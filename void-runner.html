@@ -7,7 +7,7 @@
 <style>
   * { margin: 0; padding: 0; box-sizing: border-box; }
   body { background: #000; display: flex; justify-content: center; align-items: center; height: 100vh; overflow: hidden; font-family: 'Courier New', monospace; }
-  canvas { display: block; image-rendering: pixelated; }
+  canvas { display: block; image-rendering: pixelated; touch-action: none; }
 </style>
 </head>
 <body>
@@ -18,16 +18,105 @@ const ctx = canvas.getContext('2d');
 
 const W = 480, H = 720;
 canvas.width = W; canvas.height = H;
-canvas.style.width = Math.min(window.innerWidth, window.innerHeight * W/H) + 'px';
-canvas.style.height = Math.min(window.innerHeight, window.innerWidth * H/W) + 'px';
 
-// ---- STATE ----
+function fitCanvas() {
+  const scale = Math.min(window.innerWidth / W, window.innerHeight / H);
+  canvas.style.width = (W * scale) + 'px';
+  canvas.style.height = (H * scale) + 'px';
+}
+fitCanvas();
+window.addEventListener('resize', fitCanvas);
+
+// ===== CONFIG =====
+
+const CFG = {
+  creditsPerScore: 100,
+
+  caps: { particles: 400, bullets: 200, enemyBullets: 300, enemies: 40 },
+
+  // Ship roster. `id` is the persisted key.
+  ships: [
+    { id: 'vanguard', name: 'VANGUARD', cost: 0,    lives: 3, speed: 5.5, fireMul: 1.00, hitW: 28, hitH: 36, spreadMul: 1.0, phase: false,
+      hull: ['#a0d8ff', '#3399ff', '#0055bb'], trim: '#00ccff',
+      blurb: 'Balanced. Standard-issue runner.' },
+    { id: 'needle',   name: 'NEEDLE',   cost: 500,  lives: 2, speed: 7.5, fireMul: 0.62, hitW: 22, hitH: 32, spreadMul: 0.8, phase: false,
+      hull: ['#ffe0a0', '#ff9933', '#bb4400'], trim: '#ffcc33',
+      blurb: 'Fast and fragile. Fires far quicker.' },
+    { id: 'bulwark',  name: 'BULWARK',  cost: 1500, lives: 4, speed: 4.0, fireMul: 1.25, hitW: 34, hitH: 40, spreadMul: 1.6, phase: false,
+      hull: ['#c8ffd0', '#33bb66', '#116633'], trim: '#44ffaa',
+      blurb: 'Slow tank. Starts each run shielded.' },
+    { id: 'phantom',  name: 'PHANTOM',  cost: 4000, lives: 3, speed: 6.0, fireMul: 0.92, hitW: 18, hitH: 28, spreadMul: 1.0, phase: true,
+      hull: ['#e8ccff', '#9955ff', '#4400aa'], trim: '#cc88ff',
+      blurb: 'Tiny hitbox. Phases one hit per level.' }
+  ],
+
+  // Weapon levels 1..5. `dx` is the muzzle offset, `a` the launch angle in radians.
+  weapons: [
+    { fireRate: 14, pierce: 0, shots: [{dx:-10, a: 0}, {dx: 10, a: 0}] },
+    { fireRate: 10, pierce: 0, shots: [{dx:-10, a: 0}, {dx: 10, a: 0}] },
+    { fireRate: 10, pierce: 0, shots: [{dx:-11, a:-0.08}, {dx: 0, a: 0}, {dx: 11, a: 0.08}] },
+    { fireRate:  9, pierce: 0, shots: [{dx:-12, a:-0.16}, {dx:-5, a:-0.06}, {dx: 5, a: 0.06}, {dx: 12, a: 0.16}] },
+    { fireRate:  8, pierce: 1, shots: [{dx:-13, a:-0.14}, {dx:-7, a:-0.05}, {dx: 0, a: 0}, {dx: 7, a: 0.05}, {dx: 13, a: 0.14}] }
+  ]
+};
+
+// ===== SAVE =====
+
+const Save = {
+  KEY: 'voidrunner.save',
+  VERSION: 1,
+  ok: true,
+  data: null,
+
+  defaults() {
+    return {
+      version: 1,
+      hiScore: 0, bestLevel: 1, totalRuns: 0, totalKills: 0,
+      credits: 0, unlocked: ['vanguard'], selectedShip: 'vanguard', muted: false
+    };
+  },
+
+  load() {
+    Save.data = Save.defaults();
+    try {
+      const raw = localStorage.getItem(Save.KEY);
+      if (raw) {
+        const parsed = JSON.parse(raw);
+        // An unrecognized version resets to defaults rather than crashing.
+        if (parsed && parsed.version === Save.VERSION) {
+          Object.assign(Save.data, parsed);
+          if (!Array.isArray(Save.data.unlocked) || !Save.data.unlocked.length) Save.data.unlocked = ['vanguard'];
+          if (!CFG.ships.some(s => s.id === Save.data.selectedShip)) Save.data.selectedShip = 'vanguard';
+        }
+      }
+    } catch (e) {
+      // Storage blocked or corrupt: run from memory with defaults.
+      Save.ok = false;
+      Save.data = Save.defaults();
+    }
+  },
+
+  write() {
+    try {
+      localStorage.setItem(Save.KEY, JSON.stringify(Save.data));
+    } catch (e) {
+      Save.ok = false;
+    }
+  }
+};
+
+Save.load();
+
+// ===== STATE =====
+
 let state = 'start'; // start | play | dead
-let score = 0, hiScore = 0, lives = 3, level = 1;
+let score = 0, lives = 3, level = 1;
+let hiScore = Save.data.hiScore;
 let shake = 0, shakeX = 0, shakeY = 0;
 let combo = 0, comboTimer = 0;
 let flashText = [], levelBanner = null;
 let frame = 0;
+let runKills = 0;
 
 // ---- STARS ----
 const starLayers = [
@@ -57,7 +146,26 @@ let touchX = null;
 // ---- DIFFICULTY ----
 let spawnTimer = 0, asteroidTimer = 0, levelTimer = 0;
 function difficulty() {
-  return { spawnRate: Math.max(35, 90 - level*5), asteroidRate: Math.max(50, 120 - level*6), enemySpeed: 1.2 + level*0.2, bulletSpeed: 2.5 + level*0.15 };
+  return {
+    spawnRate: Math.max(35, 90 - level*5),
+    asteroidRate: Math.max(50, 120 - level*6),
+    enemySpeed: 1.2 + level*0.2,
+    bulletSpeed: 2.5 + level*0.15
+  };
+}
+
+// ===== SYSTEMS =====
+
+// Keep array lengths bounded so a chaotic screen can't sink the frame rate.
+function capArray(arr, max) {
+  if (arr.length > max) arr.splice(0, arr.length - max);
+  return arr;
+}
+function capAll() {
+  capArray(particles, CFG.caps.particles);
+  capArray(bullets, CFG.caps.bullets);
+  capArray(enemyBullets, CFG.caps.enemyBullets);
+  capArray(enemies, CFG.caps.enemies);
 }
 
 // ---- INPUT ----
@@ -65,7 +173,8 @@ const keys = {};
 document.addEventListener('keydown', e => {
   keys[e.key] = true;
   if (state === 'start' || state === 'dead') { if (e.key === ' ' || e.key === 'Enter') startGame(); }
-  e.preventDefault && ['ArrowLeft','ArrowRight','ArrowUp','ArrowDown',' '].includes(e.key) && e.preventDefault();
+  if (e.key === ']' && state === 'play') levelUp(); // DEBUG: removed in final pass
+  if (['ArrowLeft','ArrowRight','ArrowUp','ArrowDown',' '].includes(e.key)) e.preventDefault();
 });
 document.addEventListener('keyup', e => { keys[e.key] = false; });
 canvas.addEventListener('touchstart', e => { touchX = e.touches[0].clientX; if (state !== 'play') startGame(); }, {passive:true});
@@ -74,13 +183,31 @@ canvas.addEventListener('touchend', () => { touchX = null; });
 
 function startGame() {
   state = 'play';
-  score = 0; lives = 3; level = 1; frame = 0;
+  score = 0; lives = 3; level = 1; frame = 0; runKills = 0;
   player.x = W/2; player.y = H - 120; player.invincible = 0; player.shield = 0; player.boost = 0; player.trail = [];
   bullets = []; enemyBullets = []; asteroids = []; enemies = []; particles = []; powerups = []; flashText = [];
   spawnTimer = 0; asteroidTimer = 0; levelTimer = 0; combo = 0; comboTimer = 0; levelBanner = null;
 }
 
-// ---- SHAPES ----
+function levelUp() {
+  levelTimer = 0; level++;
+  levelBanner = {text: 'LEVEL ' + level, life: 120};
+  spawnParticles(W/2, H/2, '#00ffff', 30);
+}
+
+function endRun() {
+  state = 'dead';
+  hiScore = Math.max(hiScore, score);
+  Save.data.hiScore = hiScore;
+  Save.data.bestLevel = Math.max(Save.data.bestLevel, level);
+  Save.data.totalRuns += 1;
+  Save.data.totalKills += runKills;
+  Save.write();
+  spawnParticles(player.x, player.y, '#ff8800', 50);
+}
+
+// ===== ENTITIES =====
+
 function drawShip(x, y, invincible, shield, boost, t) {
   ctx.save();
   ctx.translate(x, y);
@@ -90,12 +217,10 @@ function drawShip(x, y, invincible, shield, boost, t) {
   let flameLen = boost ? 28 : 16;
   let flameW = boost ? 10 : 7;
   ctx.save();
-  // Left engine flame
   let gL = ctx.createLinearGradient(0,0,0,flameLen);
   gL.addColorStop(0,'rgba(0,200,255,0.9)'); gL.addColorStop(0.4,'rgba(255,140,0,0.7)'); gL.addColorStop(1,'rgba(255,60,0,0)');
   ctx.fillStyle = gL;
   ctx.beginPath(); ctx.ellipse(-9, 18+flameLen/2, flameW/2, flameLen/2, 0, 0, Math.PI*2); ctx.fill();
-  // Right engine flame
   let gR = ctx.createLinearGradient(0,0,0,flameLen);
   gR.addColorStop(0,'rgba(0,200,255,0.9)'); gR.addColorStop(0.4,'rgba(255,140,0,0.7)'); gR.addColorStop(1,'rgba(255,60,0,0)');
   ctx.fillStyle = gR;
@@ -159,7 +284,6 @@ function drawAsteroid(a) {
 function drawEnemy(e) {
   ctx.save(); ctx.translate(e.x, e.y);
   if (e.elite) {
-    // Elite: diamond shape with glow
     ctx.beginPath(); ctx.moveTo(0,-20); ctx.lineTo(16,0); ctx.lineTo(0,16); ctx.lineTo(-16,0); ctx.closePath();
     let eg = ctx.createRadialGradient(0,0,2,0,0,18);
     eg.addColorStop(0,'#ffaa00'); eg.addColorStop(1,'#880000');
@@ -168,7 +292,6 @@ function drawEnemy(e) {
     ctx.beginPath(); ctx.moveTo(-8,0); ctx.lineTo(8,0); ctx.moveTo(0,-8); ctx.lineTo(0,8);
     ctx.strokeStyle='rgba(255,200,0,0.6)'; ctx.lineWidth=1; ctx.stroke();
   } else {
-    // Basic: V-shape enemy
     ctx.beginPath(); ctx.moveTo(0,18); ctx.lineTo(14,-10); ctx.lineTo(8,-4); ctx.lineTo(0,-14); ctx.lineTo(-8,-4); ctx.lineTo(-14,-10); ctx.closePath();
     let bg = ctx.createLinearGradient(-14,-14,14,18);
     bg.addColorStop(0,'#ff6600'); bg.addColorStop(1,'#aa0000');
@@ -235,7 +358,7 @@ function hitPlayer() {
   shake = 20;
   spawnParticles(player.x, player.y, '#ff4400', 20);
   combo = 0; comboTimer = 0;
-  if (lives <= 0) { state = 'dead'; hiScore = Math.max(hiScore, score); spawnParticles(player.x, player.y, '#ff8800', 50); }
+  if (lives <= 0) endRun();
 }
 
 function aabbCircle(rx, ry, rw, rh, cx, cy, cr) {
@@ -244,16 +367,14 @@ function aabbCircle(rx, ry, rw, rh, cx, cy, cr) {
   return (nx-cx)*(nx-cx)+(ny-cy)*(ny-cy) < cr*cr;
 }
 
+// ===== UPDATE =====
+
 function update() {
   frame++;
   levelTimer++;
 
   // Level up every 28 seconds
-  if (levelTimer > 60*28) {
-    levelTimer = 0; level++;
-    levelBanner = {text: 'LEVEL ' + level, life: 120};
-    spawnParticles(W/2, H/2, '#00ffff', 30);
-  }
+  if (levelTimer > 60*28) levelUp();
 
   // Stars
   starLayers.forEach(layer => layer.forEach(s => {
@@ -292,9 +413,9 @@ function update() {
   let fireRate = player.boost > 0 ? 8 : 14;
   if (shootTimer >= fireRate) {
     shootTimer = 0;
-    bullets.push({x: player.x - 10, y: player.y - 10, vy: -11, w: 3, h: 10});
-    bullets.push({x: player.x + 10, y: player.y - 10, vy: -11, w: 3, h: 10});
-    if (player.boost > 0) bullets.push({x: player.x, y: player.y - 20, vy: -13, w: 3, h: 10});
+    bullets.push({x: player.x - 10, y: player.y - 10, vx: 0, vy: -11, w: 3, h: 10, pierce: 0, dead: false});
+    bullets.push({x: player.x + 10, y: player.y - 10, vx: 0, vy: -11, w: 3, h: 10, pierce: 0, dead: false});
+    if (player.boost > 0) bullets.push({x: player.x, y: player.y - 20, vx: 0, vy: -13, w: 3, h: 10, pierce: 0, dead: false});
   }
 
   // Spawn asteroids
@@ -311,25 +432,22 @@ function update() {
     if (Math.random() < 0.7) enemies.push(makeEnemy());
   }
 
-  // Update bullets
-  bullets = bullets.filter(b => b.y > -20);
-  bullets.forEach(b => { b.y += b.vy; });
+  // Move bullets
+  bullets.forEach(b => { b.x += b.vx; b.y += b.vy; });
 
-  // Update enemy bullets
-  enemyBullets = enemyBullets.filter(b => b.y < H+20 && b.x > -20 && b.x < W+20);
+  // Move enemy bullets
   enemyBullets.forEach(b => { b.x += b.vx; b.y += b.vy; });
 
-  // Update asteroids
+  // Asteroids
   asteroids.forEach(a => {
     a.x += a.vx; a.y += a.vy; a.rot += a.rotSpeed;
-    // Bullet hits
-    bullets.forEach((b, bi) => {
+    bullets.forEach(b => {
+      if (b.dead || a.hp <= 0) return;
       if (Math.abs(b.x - a.x) < a.r + 2 && Math.abs(b.y - a.y) < a.r + 2) {
-        bullets.splice(bi, 1);
+        if (b.pierce > 0) b.pierce--; else b.dead = true;
         a.hp--;
         spawnParticles(b.x, b.y, '#aaaaaa', 4);
         if (a.hp <= 0) {
-          // Split big asteroid
           if (a.big) {
             for (let i = 0; i < 2; i++) asteroids.push({...makeAsteroid(false), x: a.x + (i?15:-15), y: a.y, vy: a.vy*1.2});
           }
@@ -340,41 +458,38 @@ function update() {
         }
       }
     });
-    // Player hit
-    if (aabbCircle(player.x, player.y, player.w, player.h, a.x, a.y, a.r)) hitPlayer();
+    if (a.hp > 0 && aabbCircle(player.x, player.y, player.w, player.h, a.x, a.y, a.r)) hitPlayer();
   });
-  asteroids = asteroids.filter(a => a.y < H + 60 && a.hp > 0);
 
-  // Update enemies
+  // Enemies
   enemies.forEach(e => {
     e.zigzag += 0.04;
     e.x += e.vx + Math.sin(e.zigzag)*2.5*e.zigzagDir;
     e.y += e.vy;
     if (e.x < 20 || e.x > W-20) e.vx *= -1;
 
-    // Shooting
     e.shootTimer++;
     let eRate = e.elite ? 55 : 90;
     if (e.shootTimer >= eRate) {
       e.shootTimer = 0;
       let angle = Math.atan2(player.y - e.y, player.x - e.x);
       let spd2 = difficulty().bulletSpeed;
-      enemyBullets.push({x: e.x, y: e.y + 10, vx: Math.cos(angle)*spd2, vy: Math.sin(angle)*spd2, r: 4, elite: e.elite});
+      enemyBullets.push({x: e.x, y: e.y + 10, vx: Math.cos(angle)*spd2, vy: Math.sin(angle)*spd2, r: 4, elite: e.elite, dead: false});
       if (e.elite) {
-        // Spread shot
         [-0.3, 0.3].forEach(offset => {
-          enemyBullets.push({x: e.x, y: e.y + 10, vx: Math.cos(angle+offset)*spd2, vy: Math.sin(angle+offset)*spd2, r: 4, elite: true});
+          enemyBullets.push({x: e.x, y: e.y + 10, vx: Math.cos(angle+offset)*spd2, vy: Math.sin(angle+offset)*spd2, r: 4, elite: true, dead: false});
         });
       }
     }
 
-    // Bullet hits
-    bullets.forEach((b, bi) => {
+    bullets.forEach(b => {
+      if (b.dead || e.hp <= 0) return;
       if (Math.abs(b.x-e.x)<18 && Math.abs(b.y-e.y)<18) {
-        bullets.splice(bi,1);
+        if (b.pierce > 0) b.pierce--; else b.dead = true;
         e.hp--;
         spawnParticles(b.x, b.y, e.elite ? '#ff8800' : '#ff4400', 4);
         if (e.hp <= 0) {
+          runKills++;
           spawnParticles(e.x, e.y, e.elite ? '#ffaa00' : '#ff4400', e.elite ? 30 : 20);
           shake = e.elite ? 10 : 5;
           let pts = e.elite ? 200 : 100;
@@ -382,32 +497,30 @@ function update() {
           score += pts * multiplier;
           combo++; comboTimer = 120;
           addFlashText('+' + pts*multiplier, e.x, e.y - 10, e.elite ? '#ffaa00' : '#ff6600');
-          // Drop powerup
           if (Math.random() < 0.3) {
-            powerups.push({x: e.x, y: e.y, type: Math.random()<0.5?'shield':'boost', vy: 1.5, life: 300});
+            powerups.push({x: e.x, y: e.y, type: Math.random()<0.5?'shield':'boost', vy: 1.5, life: 300, dead: false});
           }
         }
       }
     });
-    // Player hit
-    if (Math.abs(player.x-e.x)<22 && Math.abs(player.y-e.y)<22) hitPlayer();
+    if (e.hp > 0 && Math.abs(player.x-e.x)<22 && Math.abs(player.y-e.y)<22) hitPlayer();
   });
-  enemies = enemies.filter(e => e.y < H+50 && e.hp > 0);
 
   // Enemy bullets hit player
-  enemyBullets.forEach((b, bi) => {
+  enemyBullets.forEach(b => {
+    if (b.dead) return;
     if (Math.abs(b.x-player.x)<14 && Math.abs(b.y-player.y)<14) {
-      enemyBullets.splice(bi, 1);
+      b.dead = true;
       hitPlayer();
     }
   });
 
   // Powerups
-  powerups.forEach(p => { p.y += p.vy; p.life--; });
-  powerups = powerups.filter(p => p.y < H+30 && p.life > 0);
-  powerups.forEach((p, pi) => {
+  powerups.forEach(p => {
+    p.y += p.vy; p.life--;
+    if (p.dead) return;
     if (Math.abs(p.x-player.x)<24 && Math.abs(p.y-player.y)<24) {
-      powerups.splice(pi,1);
+      p.dead = true;
       if (p.type === 'shield') { player.shield = 180; addFlashText('SHIELD!', player.x, player.y-30, '#00ffff'); }
       else { player.boost = 200; addFlashText('BOOST!', player.x, player.y-30, '#ffff00'); }
       spawnParticles(p.x, p.y, p.type==='shield'?'#00ffff':'#ffff00', 15);
@@ -416,11 +529,19 @@ function update() {
 
   // Particles
   particles.forEach(p => { p.x += p.vx; p.y += p.vy; p.vx *= 0.95; p.vy *= 0.95; p.life--; p.r *= 0.97; });
-  particles = particles.filter(p => p.life > 0);
 
   // Flash text
   flashText.forEach(f => { f.y += f.vy; f.life--; });
+
+  // Reap everything in one place, after all collision passes have run.
+  bullets = bullets.filter(b => !b.dead && b.y > -20);
+  enemyBullets = enemyBullets.filter(b => !b.dead && b.y < H+20 && b.x > -20 && b.x < W+20);
+  asteroids = asteroids.filter(a => a.y < H + 60 && a.hp > 0);
+  enemies = enemies.filter(e => e.y < H+50 && e.hp > 0);
+  powerups = powerups.filter(p => !p.dead && p.y < H+30 && p.life > 0);
+  particles = particles.filter(p => p.life > 0);
   flashText = flashText.filter(f => f.life > 0);
+  capAll();
 
   // Level banner
   if (levelBanner) { levelBanner.life--; if (levelBanner.life <= 0) levelBanner = null; }
@@ -438,11 +559,12 @@ function update() {
   score++;
 }
 
+// ===== RENDER =====
+
 function drawBg() {
   ctx.fillStyle = '#020818';
   ctx.fillRect(0, 0, W, H);
 
-  // Nebulae
   nebulae.forEach(n => {
     let ng = ctx.createRadialGradient(n.x, n.y, 0, n.x, n.y, n.rx);
     ng.addColorStop(0, `hsla(${n.hue},70%,40%,0.07)`);
@@ -451,7 +573,6 @@ function drawBg() {
     ctx.beginPath(); ctx.ellipse(n.x, n.y, n.rx, n.ry, 0, 0, Math.PI*2); ctx.fill();
   });
 
-  // Stars
   starLayers.forEach((layer, li) => {
     layer.forEach(s => {
       ctx.fillStyle = li===2 ? `rgba(200,220,255,0.9)` : li===1 ? `rgba(180,200,255,0.6)` : `rgba(160,180,255,0.4)`;
@@ -467,14 +588,12 @@ function draw() {
   drawBg();
 
   if (state === 'play' || state === 'dead') {
-    // Player trail
     player.trail.forEach(t => {
       let alpha = (t.life/12)*0.3;
       ctx.beginPath(); ctx.arc(t.x, t.y, 5, 0, Math.PI*2);
       ctx.fillStyle = `rgba(0,150,255,${alpha})`; ctx.fill();
     });
 
-    // Powerups
     powerups.forEach(p => {
       let pulse = 0.7 + 0.3*Math.sin(frame*0.15);
       ctx.save(); ctx.translate(p.x, p.y);
@@ -492,13 +611,9 @@ function draw() {
       ctx.restore();
     });
 
-    // Asteroids
     asteroids.forEach(drawAsteroid);
-
-    // Enemies
     enemies.forEach(drawEnemy);
 
-    // Bullets
     bullets.forEach(b => {
       let bg2 = ctx.createLinearGradient(b.x, b.y, b.x, b.y + b.h);
       bg2.addColorStop(0, '#ffffff'); bg2.addColorStop(0.3, '#88ffff'); bg2.addColorStop(1, 'rgba(0,200,255,0)');
@@ -506,21 +621,18 @@ function draw() {
       ctx.beginPath(); ctx.roundRect(b.x - b.w/2, b.y - b.h, b.w, b.h, 2); ctx.fill();
     });
 
-    // Enemy bullets
     enemyBullets.forEach(b => {
       ctx.save(); ctx.translate(b.x, b.y);
       let eg = ctx.createRadialGradient(0,0,1,0,0,b.r);
       eg.addColorStop(0, b.elite ? '#ffffff' : '#ffcc00');
-      eg.addColorStop(1, b.elite ? 'rgba(255,80,0,0)' : 'rgba(255,80,0,0)');
+      eg.addColorStop(1, 'rgba(255,80,0,0)');
       ctx.fillStyle = eg;
       ctx.beginPath(); ctx.arc(0,0,b.r,0,Math.PI*2); ctx.fill();
       ctx.restore();
     });
 
-    // Player
     if (state === 'play') drawShip(player.x, player.y, player.invincible, player.shield, player.boost, frame);
 
-    // Particles
     particles.forEach(p => {
       let alpha = p.life / p.maxLife;
       ctx.save();
@@ -537,7 +649,6 @@ function draw() {
       ctx.restore();
     });
 
-    // Flash texts
     flashText.forEach(f => {
       let alpha = f.life / 60;
       ctx.save();
@@ -550,10 +661,8 @@ function draw() {
       ctx.restore();
     });
 
-    // HUD
     drawHUD();
 
-    // Level banner
     if (levelBanner) {
       let alpha = Math.min(1, levelBanner.life < 30 ? levelBanner.life/30 : (120-levelBanner.life)/30);
       if (alpha > 1) alpha = 1;
@@ -577,7 +686,6 @@ function draw() {
 }
 
 function drawHUD() {
-  // Score
   ctx.fillStyle = 'rgba(0,0,30,0.6)';
   ctx.fillRect(0, 0, W, 44);
   ctx.fillStyle = '#00ffff';
@@ -588,13 +696,11 @@ function drawHUD() {
   ctx.font = '11px monospace';
   ctx.fillText('BEST: ' + hiScore.toLocaleString(), 10, 34);
 
-  // Level
   ctx.fillStyle = '#ffdd44';
   ctx.font = 'bold 13px monospace';
   ctx.textAlign = 'center';
   ctx.fillText('LV ' + level, W/2, 18);
 
-  // Lives
   for (let i = 0; i < 3; i++) {
     let lx = W - 20 - i*26;
     ctx.save(); ctx.translate(lx, 18); ctx.scale(0.6, 0.6);
@@ -608,7 +714,6 @@ function drawHUD() {
     ctx.restore();
   }
 
-  // Shield/boost bars
   let barY = 48;
   if (player.shield > 0) {
     ctx.fillStyle = 'rgba(0,200,255,0.2)';
@@ -629,38 +734,75 @@ function drawHUD() {
   }
 }
 
+// ===== SCREENS =====
+
+function drawStatBlock(cx, y) {
+  const d = Save.data;
+  const rows = [
+    ['BEST',    d.hiScore.toLocaleString()],
+    ['BEST LV', String(d.bestLevel)],
+    ['RUNS',    String(d.totalRuns)],
+    ['KILLS',   d.totalKills.toLocaleString()],
+    ['CREDITS', d.credits.toLocaleString() + ' CR']
+  ];
+  ctx.save();
+  ctx.font = '11px monospace';
+  const boxW = 210, boxH = rows.length*16 + 14;
+  ctx.fillStyle = 'rgba(0,20,45,0.55)';
+  ctx.fillRect(cx - boxW/2, y, boxW, boxH);
+  ctx.strokeStyle = 'rgba(0,180,255,0.25)'; ctx.lineWidth = 1;
+  ctx.strokeRect(cx - boxW/2, y, boxW, boxH);
+  rows.forEach((r, i) => {
+    const ry = y + 18 + i*16;
+    ctx.textAlign = 'left';
+    ctx.fillStyle = '#5577aa';
+    ctx.fillText(r[0], cx - boxW/2 + 12, ry);
+    ctx.textAlign = 'right';
+    ctx.fillStyle = r[0] === 'CREDITS' ? '#ffdd44' : '#aaccee';
+    ctx.fillText(r[1], cx + boxW/2 - 12, ry);
+  });
+  ctx.restore();
+}
+
 function drawStart() {
   ctx.fillStyle = 'rgba(0,5,20,0.85)';
   ctx.fillRect(0, 0, W, H);
 
-  // Title glow
   ctx.save();
   ctx.shadowColor = '#00ccff'; ctx.shadowBlur = 30;
   ctx.fillStyle = '#00eeff';
   ctx.font = 'bold 52px monospace';
   ctx.textAlign = 'center';
-  ctx.fillText('VOID', W/2, H/2 - 80);
+  ctx.fillText('VOID', W/2, 205);
   ctx.fillStyle = '#ffffff';
-  ctx.fillText('RUNNER', W/2, H/2 - 25);
+  ctx.fillText('RUNNER', W/2, 258);
   ctx.restore();
 
   ctx.fillStyle = '#aaccff';
   ctx.font = '14px monospace';
   ctx.textAlign = 'center';
-  ctx.fillText('Survive the endless void', W/2, H/2 + 20);
+  ctx.fillText('Survive the endless void', W/2, 292);
+
+  drawStatBlock(W/2, 314);
 
   ctx.fillStyle = '#667799';
   ctx.font = '12px monospace';
-  ctx.fillText('← → or A D to move', W/2, H/2 + 55);
-  ctx.fillText('Auto-fire enabled', W/2, H/2 + 75);
-  ctx.fillText('Collect S (Shield) and B (Boost)', W/2, H/2 + 95);
+  ctx.fillText('← → or A D to move', W/2, 452);
+  ctx.fillText('Auto-fire enabled', W/2, 472);
+  ctx.fillText('Collect S (Shield) and B (Boost)', W/2, 492);
 
   let pulse = 0.6 + 0.4*Math.sin(frame*0.08);
   ctx.fillStyle = `rgba(0,255,200,${pulse})`;
   ctx.font = 'bold 18px monospace';
-  ctx.fillText('PRESS SPACE TO LAUNCH', W/2, H/2 + 145);
+  ctx.fillText('PRESS SPACE TO LAUNCH', W/2, 548);
 
-  drawShip(W/2, H/2 - 160, 0, 0, 0, frame);
+  drawShip(W/2, 112, 0, 0, 0, frame);
+
+  if (!Save.ok) {
+    ctx.fillStyle = '#665533';
+    ctx.font = '10px monospace';
+    ctx.fillText('progress cannot be saved in this browser', W/2, H - 16);
+  }
 }
 
 function drawGameOver() {
@@ -696,6 +838,8 @@ function drawGameOver() {
   ctx.fillText('PRESS SPACE TO RETRY', W/2, H/2 + 65);
 }
 
+// ===== LOOP =====
+
 function loop() {
   if (state === 'play') update();
   else {
@@ -709,8 +853,17 @@ function loop() {
 
 // Fix roundRect for older browsers
 if (!CanvasRenderingContext2D.prototype.roundRect) {
-  CanvasRenderingContext2D.prototype.roundRect = function(x,y,w,h,r){ this.moveTo(x+r,y); this.arcTo(x+w,y,x+w,y+h,r); this.arcTo(x+w,y+h,x,y+h,r); this.arcTo(x,y+h,x,y,r); this.arcTo(x,y,x+w,y,r); this.closePath(); return this; };
+  CanvasRenderingContext2D.prototype.roundRect = function(x,y,w,h,r){ this.moveTo(x+r,y); this.arcTo(x+w,y,x+w,y+h,r); this.arcTo(x,y+h,x,y+h,r); this.arcTo(x,y+h,x,y,r); this.arcTo(x,y,x+w,y,r); this.closePath(); return this; };
 }
+
+// DEBUG: inspection hook, removed in final pass
+window.__vr = {
+  get state(){return state}, get player(){return player}, get enemies(){return enemies},
+  get bullets(){return bullets}, get enemyBullets(){return enemyBullets},
+  get particles(){return particles}, get asteroids(){return asteroids},
+  get level(){return level}, get score(){return score}, get lives(){return lives},
+  Save, CFG
+};
 
 loop();
 </script>
