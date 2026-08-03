@@ -402,6 +402,7 @@ const player = {
 // ---- COLLECTIONS ----
 let bullets = [], enemyBullets = [], asteroids = [], enemies = [], particles = [], powerups = [];
 let shootTimer = 0;
+let boss = null, bossActive = false, bossWarning = 0;
 
 // ---- TOUCH ----
 let touchX = null;
@@ -539,6 +540,7 @@ function startGame() {
   player.weaponLevel = 1;
   shootTimer = 0;
   dyingTimer = 0;
+  boss = null; bossActive = false; bossWarning = 0;
   FX.reset();
   Music.setBoss(false);
   Music.setIntensity(1);
@@ -547,10 +549,15 @@ function startGame() {
 
 function levelUp() {
   levelTimer = 0; level++;
+  Music.setIntensity(level);
+  // Every fifth level is a boss fight instead of a normal wave.
+  if (level % 5 === 0) {
+    spawnBoss(level);
+    return;
+  }
   levelBanner = {text: 'LEVEL ' + level, life: 120};
   spawnParticles(W/2, H/2, '#00ffff', 30);
   Sound.play('levelUp');
-  Music.setIntensity(level);
 }
 
 function endRun() {
@@ -569,7 +576,9 @@ function endRun() {
   FX.addShake(26);
   FX.hitStop(6);
   FX.slowMo(75, 0.3);
+  boss = null; bossActive = false; bossWarning = 0;
   Music.stop();
+  Music.setBoss(false);
   Sound.play('bigExplode');
   Sound.play('death');
 }
@@ -774,6 +783,135 @@ function drawEnemy(e) {
   ctx.restore();
 }
 
+function drawBoss(b) {
+  const dying = b.dying > 0;
+  ctx.save();
+  ctx.translate(b.x, b.y);
+  if (dying && Math.floor(b.deathTick/3) % 2 === 0) ctx.globalAlpha = 0.55;
+
+  // Charging beam telegraph — a thin targeting line before the real thing.
+  if (b.laser && b.laser.charge > 0) {
+    ctx.save();
+    ctx.globalAlpha = 0.35 + 0.4*Math.sin(b.laser.charge*0.5);
+    ctx.strokeStyle = '#ff3355'; ctx.lineWidth = 2;
+    ctx.beginPath(); ctx.moveTo(0, BOSS_H/2); ctx.lineTo(0, H); ctx.stroke();
+    ctx.restore();
+  }
+
+  // Hull
+  ctx.beginPath();
+  ctx.moveTo(-BOSS_W/2, -6);
+  ctx.lineTo(-BOSS_W/2 + 18, -BOSS_H/2);
+  ctx.lineTo(BOSS_W/2 - 18, -BOSS_H/2);
+  ctx.lineTo(BOSS_W/2, -6);
+  ctx.lineTo(BOSS_W/2 - 26, BOSS_H/2);
+  ctx.lineTo(BOSS_W/2 - 40, BOSS_H/2 - 8);
+  ctx.lineTo(0, BOSS_H/2 + 10);
+  ctx.lineTo(-BOSS_W/2 + 40, BOSS_H/2 - 8);
+  ctx.lineTo(-BOSS_W/2 + 26, BOSS_H/2);
+  ctx.closePath();
+  const hg = ctx.createLinearGradient(0, -BOSS_H/2, 0, BOSS_H/2);
+  hg.addColorStop(0, '#4a5a72'); hg.addColorStop(0.5, '#22293a'); hg.addColorStop(1, '#0d1119');
+  ctx.fillStyle = hg; ctx.fill();
+  ctx.strokeStyle = b.phase === 3 ? '#ff4433' : b.phase === 2 ? '#ffaa33' : '#66aaff';
+  ctx.lineWidth = 2.5; ctx.stroke();
+  if (b.flash > 0) { ctx.fillStyle = `rgba(255,255,255,${Math.min(0.7, 0.10*b.flash)})`; ctx.fill(); }
+
+  // Armour ribs
+  ctx.strokeStyle = 'rgba(140,170,210,0.30)'; ctx.lineWidth = 1;
+  for (let i = -2; i <= 2; i++) {
+    ctx.beginPath(); ctx.moveTo(i*20, -BOSS_H/2 + 6); ctx.lineTo(i*20, BOSS_H/2 - 6); ctx.stroke();
+  }
+
+  // Three glowing cores, brighter as the fight escalates.
+  const coreCol = b.phase === 3 ? '#ff3311' : b.phase === 2 ? '#ffaa00' : '#33ccff';
+  [-32, 0, 32].forEach((cx, i) => {
+    const pulse = 0.6 + 0.4*Math.sin(frame*0.09 + i);
+    ctx.save();
+    ctx.globalCompositeOperation = 'lighter';
+    const cg = ctx.createRadialGradient(cx, 4, 0, cx, 4, 16);
+    cg.addColorStop(0, coreCol); cg.addColorStop(1, 'rgba(0,0,0,0)');
+    ctx.globalAlpha = pulse;
+    ctx.fillStyle = cg;
+    ctx.beginPath(); ctx.arc(cx, 4, 16, 0, Math.PI*2); ctx.fill();
+    ctx.restore();
+    ctx.beginPath(); ctx.arc(cx, 4, i === 1 ? 8 : 6, 0, Math.PI*2);
+    ctx.fillStyle = coreCol; ctx.fill();
+    ctx.strokeStyle = '#000'; ctx.lineWidth = 1; ctx.stroke();
+  });
+
+  ctx.restore();
+
+  // Firing beam, drawn in world space so it spans the screen.
+  if (b.laser && b.laser.fire > 0) {
+    const w = 13 + 4*Math.sin(frame*0.7);
+    ctx.save();
+    ctx.globalCompositeOperation = 'lighter';
+    const lg = ctx.createLinearGradient(b.laser.x - w, 0, b.laser.x + w, 0);
+    lg.addColorStop(0, 'rgba(255,40,80,0)');
+    lg.addColorStop(0.5, 'rgba(255,220,240,0.95)');
+    lg.addColorStop(1, 'rgba(255,40,80,0)');
+    ctx.fillStyle = lg;
+    ctx.fillRect(b.laser.x - w, b.y, w*2, H - b.y);
+    ctx.fillStyle = 'rgba(255,255,255,0.85)';
+    ctx.fillRect(b.laser.x - 2, b.y, 4, H - b.y);
+    ctx.restore();
+  }
+}
+
+function drawBossBar(b) {
+  const pad = 14, barW = W - pad*2, y = 52;
+  ctx.save();
+  ctx.fillStyle = 'rgba(0,0,20,0.65)';
+  ctx.fillRect(pad, y, barW, 10);
+  const frac = Math.max(0, b.hp / b.maxHp);
+  const col = b.phase === 3 ? '#ff3322' : b.phase === 2 ? '#ffaa22' : '#33ccff';
+  ctx.fillStyle = col;
+  ctx.fillRect(pad, y, barW*frac, 10);
+  // Phase boundaries at 66% and 33%.
+  ctx.strokeStyle = 'rgba(0,0,0,0.6)'; ctx.lineWidth = 2;
+  [0.33, 0.66].forEach(f => {
+    ctx.beginPath(); ctx.moveTo(pad + barW*f, y); ctx.lineTo(pad + barW*f, y+10); ctx.stroke();
+  });
+  ctx.strokeStyle = 'rgba(255,255,255,0.35)'; ctx.lineWidth = 1;
+  ctx.strokeRect(pad, y, barW, 10);
+  ctx.fillStyle = col;
+  ctx.font = 'bold 10px monospace'; ctx.textAlign = 'left';
+  ctx.fillText('DREADNOUGHT MK.' + b.tier, pad, y - 4);
+  ctx.textAlign = 'right';
+  ctx.fillText('PHASE ' + b.phase, W - pad, y - 4);
+  ctx.restore();
+}
+
+function drawBossWarning() {
+  const t = bossWarning / 90;
+  ctx.save();
+  // Red pulse around the screen edge.
+  ctx.globalAlpha = 0.35 + 0.35*Math.sin(frame*0.35);
+  const vg = ctx.createRadialGradient(W/2, H/2, H*0.25, W/2, H/2, H*0.72);
+  vg.addColorStop(0, 'rgba(255,0,0,0)');
+  vg.addColorStop(1, 'rgba(255,20,20,0.75)');
+  ctx.fillStyle = vg;
+  ctx.fillRect(0, 0, W, H);
+  ctx.restore();
+
+  ctx.save();
+  ctx.globalAlpha = Math.min(1, t*2.2);
+  ctx.fillStyle = 'rgba(30,0,0,0.72)';
+  ctx.fillRect(0, H/2 - 44, W, 88);
+  ctx.strokeStyle = '#ff3322'; ctx.lineWidth = 2;
+  ctx.beginPath(); ctx.moveTo(0, H/2-44); ctx.lineTo(W, H/2-44);
+  ctx.moveTo(0, H/2+44); ctx.lineTo(W, H/2+44); ctx.stroke();
+  ctx.fillStyle = Math.floor(frame/6) % 2 ? '#ff5544' : '#ffdd88';
+  ctx.font = 'bold 38px monospace'; ctx.textAlign = 'center';
+  ctx.shadowColor = '#ff2200'; ctx.shadowBlur = 24;
+  ctx.fillText('WARNING', W/2, H/2 + 2);
+  ctx.font = 'bold 14px monospace';
+  ctx.fillStyle = '#ffaa88'; ctx.shadowBlur = 0;
+  ctx.fillText('CAPITAL SHIP INBOUND', W/2, H/2 + 28);
+  ctx.restore();
+}
+
 function makeAsteroid(big) {
   let r = big ? 22+Math.random()*14 : 10+Math.random()*8;
   let verts = [];
@@ -855,6 +993,175 @@ function makeEnemy(kind) {
       break;
   }
   return e;
+}
+
+// ---- BOSS ----
+
+const BOSS_W = 112, BOSS_H = 54;
+
+function bossMaxHp(lv) {
+  // Tuned against real player DPS (~18 hits/sec at weapon level 3) for a
+  // fight of roughly 20-30 seconds rather than a war of attrition.
+  return Math.round(340 + 160 * (lv / 5));
+}
+
+function spawnBoss(lv) {
+  const hp = bossMaxHp(lv);
+  boss = {
+    x: W/2, y: -70, targetY: 150,
+    hp, maxHp: hp,
+    tier: Math.max(1, Math.round(lv / 5)),
+    phase: 1, entering: true, flash: 0,
+    attackTimer: 0, minionTimer: 0,
+    laser: null, beamCooldown: 0,
+    dying: 0, deathTick: 0
+  };
+  bossActive = true;
+  bossWarning = 90;
+  levelBanner = null;          // the warning owns the screen
+  Sound.play('warning');
+  Music.setBoss(true);
+}
+
+function bossPhaseFor(b) {
+  const f = b.hp / b.maxHp;
+  return f > 0.66 ? 1 : f > 0.33 ? 2 : 3;
+}
+
+function updateBoss() {
+  const b = boss;
+  const diff = difficulty();
+
+  // ---- death cascade ----
+  if (b.dying > 0) {
+    b.dying--;
+    b.deathTick++;
+    if (b.deathTick % 5 === 0) {
+      FX.explode(b.x + (Math.random()-0.5)*BOSS_W, b.y + (Math.random()-0.5)*BOSS_H, 26 + Math.random()*18, '#ffbb33');
+      FX.addShake(10);
+      Sound.play('explode');
+    }
+    if (b.dying === 0) {
+      FX.explode(b.x, b.y, 90, '#ffdd66');
+      FX.addShake(30);
+      FX.hitStop(8);
+      FX.slowMo(60, 0.3);
+      Sound.play('bigExplode');
+      const pts = 2000 * b.tier;
+      score += pts;
+      addFlashText('+' + pts.toLocaleString(), b.x, b.y, '#ffdd44');
+      // Guaranteed reward for clearing the fight.
+      powerups.push({x: b.x, y: b.y + 20, type: 'weapon', vy: 1.2, life: 400, dead: false});
+      levelBanner = { text: 'BOSS DOWN', life: 120 };
+      boss = null; bossActive = false;
+      Music.setBoss(false);
+    }
+    return;
+  }
+
+  if (b.flash > 0) b.flash--;
+
+  // ---- movement ----
+  if (b.entering) {
+    b.y += 1.6;
+    if (b.y >= b.targetY) { b.y = b.targetY; b.entering = false; }
+    return;                              // no attacks until it's in position
+  }
+  if (b.laser && b.laser.fire > 0) {
+    // While the beam is up the ship itself sweeps, so the beam always
+    // emanates from the hull instead of drifting free of it.
+    b.x += b.laser.dir * 2.6;
+    if (b.x < BOSS_W/2 + 8 || b.x > W - BOSS_W/2 - 8) b.laser.dir *= -1;
+  } else {
+    b.x += Math.sign(player.x - b.x) * Math.min(1.2, Math.abs(player.x - b.x));
+  }
+  b.x = Math.max(BOSS_W/2, Math.min(W - BOSS_W/2, b.x));
+
+  // ---- phase transitions ----
+  const p = bossPhaseFor(b);
+  if (p !== b.phase) {
+    b.phase = p;
+    b.flash = 10;
+    b.attackTimer = 0;
+    b.laser = null;
+    FX.addShake(14);
+    Sound.play('levelUp');
+  }
+
+  b.attackTimer++;
+
+  if (b.phase === 1) {
+    // Radial bullet ring.
+    if (b.attackTimer >= 120) {
+      b.attackTimer = 0;
+      const spd = diff.bulletSpeed * 0.85;
+      for (let i = 0; i < 12; i++) {
+        const a = (i/12)*Math.PI*2;
+        enemyBullets.push({x: b.x, y: b.y, vx: Math.cos(a)*spd, vy: Math.sin(a)*spd, r: 5, elite: true, dead: false});
+      }
+      Sound.play('hit');
+    }
+
+  } else if (b.phase === 2) {
+    // Telegraphed charge, then a sweeping vertical beam.
+    if (!b.laser && b.attackTimer >= 90) {
+      b.attackTimer = 0;
+      b.laser = { charge: 45, fire: 0, x: b.x, dir: player.x < b.x ? 1 : -1 };
+      Sound.play('warning');
+    }
+    if (b.laser) {
+      if (b.laser.charge > 0) {
+        b.laser.charge--;
+        b.laser.x = b.x;
+        if (b.laser.charge === 0) b.laser.fire = 90;
+      } else if (b.laser.fire > 0) {
+        b.laser.fire--;
+        b.laser.x = b.x;                 // locked to the hull
+        if (b.beamCooldown > 0) b.beamCooldown--;
+        if (Math.abs(player.x - b.laser.x) < 16 && player.y > b.y && b.beamCooldown === 0) {
+          b.beamCooldown = 30;   // at most one hit per half second
+          hitPlayer();
+        }
+        if (b.laser.fire === 0) b.laser = null;
+      }
+    }
+
+  } else {
+    // Minion swarm plus aimed spreads.
+    b.minionTimer++;
+    if (b.minionTimer >= 90) {
+      b.minionTimer = 0;
+      const m = makeEnemy('grunt');
+      m.x = b.x + (Math.random()-0.5)*BOSS_W; m.y = b.y + 20;
+      enemies.push(m);
+    }
+    if (b.attackTimer >= 70) {
+      b.attackTimer = 0;
+      const a = Math.atan2(player.y - b.y, player.x - b.x);
+      const spd = diff.bulletSpeed;
+      [-0.22, 0, 0.22].forEach(o => {
+        enemyBullets.push({x: b.x, y: b.y + 20, vx: Math.cos(a+o)*spd, vy: Math.sin(a+o)*spd, r: 5, elite: true, dead: false});
+      });
+    }
+  }
+
+  // ---- taking fire ----
+  bullets.forEach(bl => {
+    if (bl.dead) return;
+    if (Math.abs(bl.x - b.x) < BOSS_W/2 && Math.abs(bl.y - b.y) < BOSS_H/2) {
+      if (bl.pierce > 0) bl.pierce--; else bl.dead = true;
+      b.hp--;
+      b.flash = Math.max(b.flash, 2);
+      spawnParticles(bl.x, bl.y, '#ffaa44', 3);
+      if (b.hp <= 0 && b.dying === 0) {
+        b.hp = 0;
+        b.dying = 45; b.deathTick = 0;
+        runKills++;
+        enemyBullets = [];
+        Sound.play('explode');
+      }
+    }
+  });
 }
 
 let nextFormationId = 1;
@@ -1010,10 +1317,12 @@ function updateEffects() {
 }
 
 function update() {
-  levelTimer++;
-
-  // Level up every 28 seconds
-  if (levelTimer > 60*28) levelUp();
+  // The clock stops during a boss fight — the fight is the level.
+  if (!bossActive) {
+    levelTimer++;
+    if (levelTimer > 60*28) levelUp();
+  }
+  if (bossWarning > 0) bossWarning--;
 
   // Stars
   starLayers.forEach(layer => layer.forEach(s => {
@@ -1057,24 +1366,28 @@ function update() {
     fireWeapon();
   }
 
-  // Spawn asteroids
-  asteroidTimer++;
-  if (asteroidTimer >= difficulty().asteroidRate) {
-    asteroidTimer = 0;
-    asteroids.push(makeAsteroid(Math.random() < 0.4));
-  }
+  // Normal spawning is suspended for the duration of a boss fight; the boss
+  // supplies its own minions in phase 3.
+  if (!bossActive) {
+    asteroidTimer++;
+    if (asteroidTimer >= difficulty().asteroidRate) {
+      asteroidTimer = 0;
+      asteroids.push(makeAsteroid(Math.random() < 0.4));
+    }
 
-  // Spawn enemies — every third cycle from level 3 arrives as a formation.
-  spawnTimer++;
-  if (spawnTimer >= difficulty().spawnRate) {
-    spawnTimer = 0;
-    spawnCycle++;
-    if (level >= 3 && spawnCycle % 3 === 0) {
-      spawnFormation(Math.random() < 0.5 ? 'vee' : 'line');
-    } else if (Math.random() < 0.7) {
-      enemies.push(makeEnemy(pickEnemyKind()));
+    spawnTimer++;
+    if (spawnTimer >= difficulty().spawnRate) {
+      spawnTimer = 0;
+      spawnCycle++;
+      if (level >= 3 && spawnCycle % 3 === 0) {
+        spawnFormation(Math.random() < 0.5 ? 'vee' : 'line');
+      } else if (Math.random() < 0.7) {
+        enemies.push(makeEnemy(pickEnemyKind()));
+      }
     }
   }
+
+  if (boss) updateBoss();
 
   // Move bullets
   bullets.forEach(b => { b.x += b.vx; b.y += b.vy; });
@@ -1346,6 +1659,7 @@ function draw() {
 
     asteroids.forEach(drawAsteroid);
     enemies.forEach(drawEnemy);
+    if (boss) drawBoss(boss);
 
     bullets.forEach(b => {
       ctx.save();
@@ -1431,6 +1745,8 @@ function draw() {
     });
 
     drawHUD();
+    if (boss && boss.dying === 0) drawBossBar(boss);
+    if (bossWarning > 0) drawBossWarning();
 
     if (levelBanner) {
       let alpha = Math.min(1, levelBanner.life < 30 ? levelBanner.life/30 : (120-levelBanner.life)/30);
@@ -1511,7 +1827,8 @@ function drawHUD() {
     ctx.restore();
   }
 
-  let barY = 48;
+  // Shield/boost bars drop below the boss health bar when a fight is live.
+  let barY = (boss && boss.dying === 0) ? 70 : 48;
   if (player.shield > 0) {
     ctx.fillStyle = 'rgba(0,200,255,0.2)';
     ctx.fillRect(8, barY, (W-16)*(player.shield/180), 5);
