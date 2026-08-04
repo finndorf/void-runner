@@ -108,6 +108,7 @@ const Save = {
 Save.load();
 
 // ===== AUDIO =====
+// (selIndex is aligned to the saved ship once CFG and Save are both ready)
 // Everything here is synthesized at runtime — no asset files, so the game stays
 // a single portable document. If the AudioContext can't be created the module
 // goes inert and the game runs silent rather than failing.
@@ -375,6 +376,8 @@ let combo = 0, comboTimer = 0;
 let flashText = [], levelBanner = null;
 let frame = 0;
 let runKills = 0;
+let runCredits = 0, creditsShown = 0;
+let selIndex = 0;   // start-screen ship selector
 
 // ---- STARS ----
 const starLayers = [
@@ -490,6 +493,9 @@ function capAll() {
 // Screen-space rects, tested against pointer positions converted to canvas coords.
 const MUTE_RECT_START = { x: W - 48, y: 14, w: 34, h: 34 };
 const MUTE_RECT_PLAY  = { x: W - 40, y: H - 42, w: 30, h: 30 };
+const CHEV_L   = { x: 62,      y: 148, w: 46, h: 48 };
+const CHEV_R   = { x: W - 108, y: 148, w: 46, h: 48 };
+const BUY_RECT = { x: W/2 - 78, y: 322, w: 156, h: 30 };
 function muteRect() { return state === 'play' ? MUTE_RECT_PLAY : MUTE_RECT_START; }
 function pointInRect(p, r) { return p.x >= r.x && p.x <= r.x + r.w && p.y >= r.y && p.y <= r.y + r.h; }
 function canvasPos(clientX, clientY) {
@@ -502,38 +508,105 @@ function toggleMute() {
   Save.write();
 }
 
+function cycleShip(dir) {
+  selIndex = (selIndex + dir + CFG.ships.length) % CFG.ships.length;
+  const def = CFG.ships[selIndex];
+  // Selecting an owned ship makes it the one you fly.
+  if (shipOwned(def.id)) { Save.data.selectedShip = def.id; Save.write(); }
+  Sound.play('uiMove');
+}
+
+function tryBuyShip() {
+  const def = CFG.ships[selIndex];
+  if (shipOwned(def.id) || Save.data.credits < def.cost) return false;
+  Save.data.credits -= def.cost;
+  Save.data.unlocked.push(def.id);
+  Save.data.selectedShip = def.id;
+  Save.write();
+  Sound.play('uiBuy');
+  return true;
+}
+
+// Launch is only legal on a ship you own.
+function tryLaunch() {
+  if (!shipOwned(CFG.ships[selIndex].id)) return false;
+  startGame();
+  return true;
+}
+
 // ---- INPUT ----
 const keys = {};
 document.addEventListener('keydown', e => {
   Sound.unlock();
   keys[e.key] = true;
-  if (state === 'start' || state === 'dead') { if (e.key === ' ' || e.key === 'Enter') startGame(); }
+  if (state === 'start') {
+    if (e.key === 'ArrowLeft')  cycleShip(-1);
+    if (e.key === 'ArrowRight') cycleShip(1);
+    if (e.key === 'b' || e.key === 'B') tryBuyShip();
+    if (e.key === ' ' || e.key === 'Enter') tryLaunch();
+  } else if (state === 'dead') {
+    if (e.key === ' ' || e.key === 'Enter') state = 'start';
+  }
   if (e.key === 'm' || e.key === 'M') toggleMute();
   if (e.key === ']' && state === 'play') levelUp(); // DEBUG: removed in final pass
   if (['ArrowLeft','ArrowRight','ArrowUp','ArrowDown',' '].includes(e.key)) e.preventDefault();
 });
 document.addEventListener('keyup', e => { keys[e.key] = false; });
 
+// A tap on a control acts on that control; a tap anywhere else launches.
+function handlePointer(p) {
+  if (pointInRect(p, muteRect())) { toggleMute(); return true; }
+  if (state === 'start') {
+    if (pointInRect(p, CHEV_L)) { cycleShip(-1); return true; }
+    if (pointInRect(p, CHEV_R)) { cycleShip(1); return true; }
+    if (!shipOwned(CFG.ships[selIndex].id) && pointInRect(p, BUY_RECT)) { tryBuyShip(); return true; }
+    tryLaunch();
+    return true;
+  }
+  if (state === 'dead') { state = 'start'; return true; }
+  return false;
+}
+
 canvas.addEventListener('touchstart', e => {
   Sound.unlock();
   const t = e.touches[0];
-  if (pointInRect(canvasPos(t.clientX, t.clientY), muteRect())) { toggleMute(); return; }
+  if (handlePointer(canvasPos(t.clientX, t.clientY))) return;
   touchX = t.clientX;
-  if (state !== 'play') startGame();
 }, {passive:true});
 canvas.addEventListener('touchmove', e => { touchX = e.touches[0].clientX; e.preventDefault(); }, {passive:false});
 canvas.addEventListener('touchend', () => { touchX = null; });
 
-// Mouse equivalent so the mute control works on desktop too.
+// Mouse equivalent so every control is clickable on desktop too.
 canvas.addEventListener('mousedown', e => {
   Sound.unlock();
-  if (pointInRect(canvasPos(e.clientX, e.clientY), muteRect())) toggleMute();
+  handlePointer(canvasPos(e.clientX, e.clientY));
 });
 
+function currentShip() {
+  return CFG.ships.find(s => s.id === Save.data.selectedShip) || CFG.ships[0];
+}
+
+function shipOwned(id) { return Save.data.unlocked.includes(id); }
+
+// Ships differ only in these handling stats — no ship changes any other system.
+function applyShip(def) {
+  player.speed = def.speed;
+  player.fireMul = def.fireMul;
+  player.spreadMul = def.spreadMul;
+  player.w = def.hitW;
+  player.h = def.hitH;
+  player.canPhase = def.phase;
+  player.phaseReady = def.phase;
+  lives = def.lives;
+  if (def.id === 'bulwark') player.shield = 180;
+}
+
 function startGame() {
+  const ship = currentShip();
   state = 'play';
-  score = 0; lives = 3; level = 1; frame = 0; runKills = 0;
+  score = 0; level = 1; frame = 0; runKills = 0;
   player.x = W/2; player.y = H - 120; player.invincible = 0; player.shield = 0; player.boost = 0; player.trail = [];
+  applyShip(ship);
   bullets = []; enemyBullets = []; asteroids = []; enemies = []; particles = []; powerups = []; flashText = [];
   spawnTimer = 0; asteroidTimer = 0; levelTimer = 0; spawnCycle = 0; combo = 0; comboTimer = 0; levelBanner = null;
   player.muzzle = 0;
@@ -550,6 +623,7 @@ function startGame() {
 function levelUp() {
   levelTimer = 0; level++;
   Music.setIntensity(level);
+  if (player.canPhase) player.phaseReady = true;   // Phantom recharges each level
   // Every fifth level is a boss fight instead of a normal wave.
   if (level % 5 === 0) {
     spawnBoss(level);
@@ -570,6 +644,9 @@ function endRun() {
   Save.data.bestLevel = Math.max(Save.data.bestLevel, level);
   Save.data.totalRuns += 1;
   Save.data.totalKills += runKills;
+  runCredits = Math.floor(score / CFG.creditsPerScore);
+  creditsShown = 0;
+  Save.data.credits += runCredits;
   Save.write();
   FX.explode(player.x, player.y, 46, '#ff8800');
   FX.explode(player.x - 12, player.y + 8, 26, '#ffdd44');
@@ -585,7 +662,10 @@ function endRun() {
 
 // ===== ENTITIES =====
 
-function drawShip(x, y, invincible, shield, boost, t, muzzle) {
+function drawShip(x, y, invincible, shield, boost, t, muzzle, shipDef) {
+  const def = shipDef || currentShip();
+  const [c0, c1, c2] = def.hull;
+  const trim = def.trim;
   ctx.save();
   ctx.translate(x, y);
   if (invincible && Math.floor(t/4)%2 === 0) { ctx.restore(); return; }
@@ -609,26 +689,35 @@ function drawShip(x, y, invincible, shield, boost, t, muzzle) {
   ctx.moveTo(0, -18); ctx.lineTo(14, 14); ctx.lineTo(10, 10); ctx.lineTo(10, 18);
   ctx.lineTo(-10, 18); ctx.lineTo(-10, 10); ctx.lineTo(-14, 14); ctx.closePath();
   let hullG = ctx.createLinearGradient(-14, -18, 14, 18);
-  hullG.addColorStop(0, '#a0d8ff'); hullG.addColorStop(0.5, '#3399ff'); hullG.addColorStop(1, '#0055bb');
+  hullG.addColorStop(0, c0); hullG.addColorStop(0.5, c1); hullG.addColorStop(1, c2);
   ctx.fillStyle = hullG;
   ctx.fill();
-  ctx.strokeStyle = '#00ccff'; ctx.lineWidth = 1.5; ctx.stroke();
+  ctx.strokeStyle = trim; ctx.lineWidth = 1.5; ctx.stroke();
 
   // Cockpit
   ctx.beginPath(); ctx.ellipse(0, -4, 6, 8, 0, 0, Math.PI*2);
   let cg = ctx.createRadialGradient(0,-6,1,0,-4,8);
-  cg.addColorStop(0,'#ffffff'); cg.addColorStop(0.4,'#88eeff'); cg.addColorStop(1,'#0044cc');
+  cg.addColorStop(0,'#ffffff'); cg.addColorStop(0.4, c0); cg.addColorStop(1, c2);
   ctx.fillStyle = cg; ctx.fill();
 
   // Wings
   ctx.beginPath(); ctx.moveTo(-10, 6); ctx.lineTo(-22, 18); ctx.lineTo(-10, 14); ctx.closePath();
-  ctx.fillStyle = '#2277dd'; ctx.fill(); ctx.strokeStyle='#00ccff'; ctx.lineWidth=1; ctx.stroke();
+  ctx.fillStyle = c1; ctx.fill(); ctx.strokeStyle = trim; ctx.lineWidth=1; ctx.stroke();
   ctx.beginPath(); ctx.moveTo(10, 6); ctx.lineTo(22, 18); ctx.lineTo(10, 14); ctx.closePath();
-  ctx.fillStyle = '#2277dd'; ctx.fill(); ctx.stroke();
+  ctx.fillStyle = c1; ctx.fill(); ctx.stroke();
 
   // Cannons
-  ctx.fillStyle = '#aaddff';
+  ctx.fillStyle = c0;
   ctx.fillRect(-13, -4, 4, 14); ctx.fillRect(9, -4, 4, 14);
+
+  // Phase charge indicator
+  if (def.phase && player.phaseReady && !shipDef) {
+    ctx.save();
+    ctx.globalAlpha = 0.35 + 0.25*Math.sin(t*0.12);
+    ctx.strokeStyle = '#cc88ff'; ctx.lineWidth = 1.2;
+    ctx.beginPath(); ctx.arc(0, 0, 24, 0, Math.PI*2); ctx.stroke();
+    ctx.restore();
+  }
 
   // Muzzle flash
   if (muzzle > 0) {
@@ -1276,6 +1365,16 @@ function hitPlayer() {
     }
     return;
   }
+  // Phantom slips through one hit per level.
+  if (player.phaseReady) {
+    player.phaseReady = false;
+    player.invincible = 70;
+    addFlashText('PHASED', player.x, player.y - 34, '#cc88ff');
+    spawnParticles(player.x, player.y, '#cc88ff', 16);
+    FX.addShake(6);
+    Sound.play('shieldBreak');
+    return;
+  }
   lives--;
   player.invincible = 120;
   // Losing a weapon level on every hit is the tension the upgrades hang on.
@@ -1527,8 +1626,10 @@ function update() {
       }
     });
 
-    // ---- ramming the player ----
-    if (!e.dead && Math.abs(player.x-e.x) < st.r && Math.abs(player.y-e.y) < st.r) {
+    // ---- ramming the player ---- (scaled by the ship's own hitbox)
+    if (!e.dead &&
+        Math.abs(player.x-e.x) < st.r*0.6 + player.w*0.35 &&
+        Math.abs(player.y-e.y) < st.r*0.6 + player.h*0.28) {
       hitPlayer();
       if (e.kind === 'kamikaze') {
         FX.explode(e.x, e.y, st.boom, st.color);
@@ -1541,7 +1642,7 @@ function update() {
   // Enemy bullets hit player
   enemyBullets.forEach(b => {
     if (b.dead) return;
-    if (Math.abs(b.x-player.x)<14 && Math.abs(b.y-player.y)<14) {
+    if (Math.abs(b.x-player.x) < b.r + player.w*0.30 && Math.abs(b.y-player.y) < b.r + player.h*0.26) {
       b.dead = true;
       hitPlayer();
     }
@@ -1922,51 +2023,141 @@ function drawStatBlock(cx, y) {
   ctx.restore();
 }
 
+function drawChevron(r, dir, enabled) {
+  const cx = r.x + r.w/2, cy = r.y + r.h/2;
+  ctx.save();
+  ctx.strokeStyle = enabled ? 'rgba(0,220,255,0.85)' : 'rgba(90,110,130,0.35)';
+  ctx.lineWidth = 3; ctx.lineCap = 'round'; ctx.lineJoin = 'round';
+  // dir -1 points left, +1 points right: the apex sits on the dir side.
+  ctx.beginPath();
+  ctx.moveTo(cx - dir*5, cy - 10);
+  ctx.lineTo(cx + dir*5, cy);
+  ctx.lineTo(cx - dir*5, cy + 10);
+  ctx.stroke();
+  ctx.restore();
+}
+
 function drawStart() {
-  ctx.fillStyle = 'rgba(0,5,20,0.85)';
+  const def = CFG.ships[selIndex];
+  const owned = shipOwned(def.id);
+  const affordable = Save.data.credits >= def.cost;
+
+  ctx.fillStyle = 'rgba(0,5,20,0.88)';
   ctx.fillRect(0, 0, W, H);
 
+  // Title
   ctx.save();
-  ctx.shadowColor = '#00ccff'; ctx.shadowBlur = 30;
+  ctx.shadowColor = '#00ccff'; ctx.shadowBlur = 26;
   ctx.fillStyle = '#00eeff';
-  ctx.font = 'bold 52px monospace';
+  ctx.font = 'bold 40px monospace';
   ctx.textAlign = 'center';
-  ctx.fillText('VOID', W/2, 205);
+  ctx.fillText('VOID', W/2, 62);
   ctx.fillStyle = '#ffffff';
-  ctx.fillText('RUNNER', W/2, 258);
+  ctx.fillText('RUNNER', W/2, 102);
   ctx.restore();
 
-  ctx.fillStyle = '#aaccff';
-  ctx.font = '14px monospace';
+  // Ship preview and selector
+  ctx.save();
+  ctx.translate(W/2, 172);
+  ctx.scale(1.7, 1.7);
+  ctx.translate(-W/2, -172);
+  drawShip(W/2, 172, 0, 0, 0, frame, 0, def);
+  ctx.restore();
+
+  drawChevron(CHEV_L, -1, true);
+  drawChevron(CHEV_R, 1, true);
+
   ctx.textAlign = 'center';
-  ctx.fillText('Survive the endless void', W/2, 292);
+  ctx.fillStyle = owned ? '#ffffff' : '#7d8a9c';
+  ctx.font = 'bold 22px monospace';
+  ctx.fillText(def.name, W/2, 236);
 
-  drawStatBlock(W/2, 314);
+  ctx.fillStyle = '#6b7f96';
+  ctx.font = '11px monospace';
+  ctx.fillText(def.blurb, W/2, 256);
 
-  ctx.fillStyle = '#667799';
-  ctx.font = '12px monospace';
-  ctx.fillText('← → or A D to move', W/2, 452);
-  ctx.fillText('Auto-fire enabled', W/2, 472);
-  ctx.fillText('W upgrades your gun — a hit costs you one', W/2, 492);
-  ctx.fillText('S = Shield    B = Boost', W/2, 510);
+  // Handling stats as small bars
+  const stats = [
+    ['LIVES', def.lives / 4],
+    ['SPEED', (def.speed - 3.5) / 4.5],
+    ['FIRE',  (1.35 - def.fireMul) / 0.8]
+  ];
+  stats.forEach((s, i) => {
+    const sy = 276 + i*15;
+    ctx.textAlign = 'left';
+    ctx.fillStyle = '#5577aa'; ctx.font = '10px monospace';
+    ctx.fillText(s[0], W/2 - 92, sy + 7);
+    ctx.fillStyle = 'rgba(255,255,255,0.10)';
+    ctx.fillRect(W/2 - 42, sy, 130, 6);
+    ctx.fillStyle = def.trim;
+    ctx.fillRect(W/2 - 42, sy, 130 * Math.max(0.06, Math.min(1, s[1])), 6);
+  });
 
-  let pulse = 0.6 + 0.4*Math.sin(frame*0.08);
-  ctx.fillStyle = `rgba(0,255,200,${pulse})`;
-  ctx.font = 'bold 18px monospace';
-  ctx.fillText('PRESS SPACE TO LAUNCH', W/2, 548);
+  // Ownership / purchase control
+  if (owned) {
+    ctx.textAlign = 'center';
+    ctx.fillStyle = '#44cc88'; ctx.font = 'bold 12px monospace';
+    ctx.fillText('OWNED', W/2, 340);
+    if (def.id === Save.data.selectedShip) {
+      ctx.fillStyle = '#66ffcc'; ctx.font = '10px monospace';
+      ctx.fillText('SELECTED', W/2, 355);
+    }
+  } else {
+    ctx.fillStyle = affordable ? 'rgba(255,200,40,0.16)' : 'rgba(120,130,140,0.10)';
+    ctx.fillRect(BUY_RECT.x, BUY_RECT.y, BUY_RECT.w, BUY_RECT.h);
+    ctx.strokeStyle = affordable ? '#ffcc33' : 'rgba(140,150,160,0.35)';
+    ctx.lineWidth = 1.5;
+    ctx.strokeRect(BUY_RECT.x, BUY_RECT.y, BUY_RECT.w, BUY_RECT.h);
+    ctx.textAlign = 'center';
+    ctx.fillStyle = affordable ? '#ffdd66' : '#7d8894';
+    ctx.font = 'bold 12px monospace';
+    ctx.fillText('BUY — ' + def.cost.toLocaleString() + ' CR', W/2, BUY_RECT.y + 20);
+    if (!affordable) {
+      ctx.fillStyle = '#6b5f4a'; ctx.font = '10px monospace';
+      ctx.fillText('need ' + (def.cost - Save.data.credits).toLocaleString() + ' more', W/2, BUY_RECT.y + 42);
+    } else {
+      ctx.fillStyle = '#8a7f5a'; ctx.font = '10px monospace';
+      ctx.fillText('press B or tap to buy', W/2, BUY_RECT.y + 42);
+    }
+  }
 
-  drawShip(W/2, 112, 0, 0, 0, frame);
+  // Dots showing position in the roster
+  CFG.ships.forEach((s, i) => {
+    const dx = W/2 - (CFG.ships.length-1)*7 + i*14;
+    ctx.beginPath(); ctx.arc(dx, 372, 3.2, 0, Math.PI*2);
+    ctx.fillStyle = i === selIndex ? '#00ddff' : shipOwned(s.id) ? 'rgba(120,180,220,0.5)' : 'rgba(120,140,160,0.22)';
+    ctx.fill();
+  });
+
+  drawStatBlock(W/2, 388);
+
+  ctx.textAlign = 'center';
+  ctx.fillStyle = '#5b6b80';
+  ctx.font = '11px monospace';
+  ctx.fillText('← → move    W upgrades your gun    a hit costs one', W/2, 512);
+  ctx.fillText('S = Shield    B = Boost    auto-fire is always on', W/2, 530);
+
+  if (owned) {
+    const pulse = 0.6 + 0.4*Math.sin(frame*0.08);
+    ctx.fillStyle = `rgba(0,255,200,${pulse})`;
+    ctx.font = 'bold 17px monospace';
+    ctx.fillText('PRESS SPACE TO LAUNCH', W/2, 570);
+  } else {
+    ctx.fillStyle = 'rgba(120,135,150,0.8)';
+    ctx.font = 'bold 13px monospace';
+    ctx.fillText('LOCKED — pick an owned ship to launch', W/2, 570);
+  }
+
   drawMuteIcon(MUTE_RECT_START);
 
   ctx.fillStyle = '#445566';
   ctx.font = '10px monospace';
-  ctx.textAlign = 'center';
-  ctx.fillText('M to mute', W/2, 574);
+  ctx.fillText('M to mute', W/2, 596);
 
   if (!Save.ok) {
     ctx.fillStyle = '#665533';
     ctx.font = '10px monospace';
-    ctx.fillText('progress cannot be saved in this browser', W/2, H - 16);
+    ctx.fillText('progress cannot be saved in this browser', W/2, H - 14);
   }
 }
 
@@ -1997,10 +2188,23 @@ function drawGameOver() {
     ctx.fillText('BEST: ' + hiScore.toLocaleString(), W/2, H/2 + 12);
   }
 
-  let pulse = 0.6 + 0.4*Math.sin(frame*0.1);
-  ctx.fillStyle = `rgba(0,220,180,${pulse})`;
+  // Credits earned, counting up so the reward is felt rather than just shown.
+  ctx.fillStyle = 'rgba(255,210,60,0.14)';
+  ctx.fillRect(W/2 - 92, H/2 + 32, 184, 40);
+  ctx.strokeStyle = 'rgba(255,210,60,0.45)'; ctx.lineWidth = 1;
+  ctx.strokeRect(W/2 - 92, H/2 + 32, 184, 40);
+  ctx.fillStyle = '#ffdd44';
   ctx.font = 'bold 18px monospace';
-  ctx.fillText('PRESS SPACE TO RETRY', W/2, H/2 + 65);
+  ctx.fillText('+' + Math.floor(creditsShown).toLocaleString() + ' CR', W/2, H/2 + 58);
+  ctx.fillStyle = '#8a7f5a';
+  ctx.font = '10px monospace';
+  ctx.fillText('banked: ' + Save.data.credits.toLocaleString() + ' CR', W/2, H/2 + 86);
+  ctx.fillText('reached level ' + level + '   ·   ' + runKills + ' kills', W/2, H/2 + 102);
+
+  const pulse = 0.6 + 0.4*Math.sin(frame*0.1);
+  ctx.fillStyle = `rgba(0,220,180,${pulse})`;
+  ctx.font = 'bold 17px monospace';
+  ctx.fillText('PRESS SPACE FOR HANGAR', W/2, H/2 + 136);
 }
 
 // ===== LOOP =====
@@ -2022,6 +2226,11 @@ function loop() {
   } else {
     starLayers.forEach(layer => layer.forEach(s => { s.y += s.speed; if (s.y > H+2) { s.y=-2; s.x=Math.random()*W; } }));
     nebulae.forEach(n => { n.y += n.speed; if (n.y - n.ry > H) n.y = -n.ry; });
+
+    // Animate the credit payout on the game-over screen.
+    if (state === 'dead' && creditsShown < runCredits) {
+      creditsShown = Math.min(runCredits, creditsShown + Math.max(1, runCredits/45));
+    }
 
     if (state === 'dying') {
       if (FX.hitStopFrames > 0) {
@@ -2046,6 +2255,9 @@ function loop() {
 if (!CanvasRenderingContext2D.prototype.roundRect) {
   CanvasRenderingContext2D.prototype.roundRect = function(x,y,w,h,r){ this.moveTo(x+r,y); this.arcTo(x+w,y,x+w,y+h,r); this.arcTo(x,y+h,x,y+h,r); this.arcTo(x,y+h,x,y,r); this.arcTo(x,y,x+w,y,r); this.closePath(); return this; };
 }
+
+// Open the hangar on the ship you last flew.
+selIndex = Math.max(0, CFG.ships.findIndex(s => s.id === Save.data.selectedShip));
 
 // DEBUG: inspection hook, removed in final pass
 window.__vr = {
