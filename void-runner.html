@@ -30,7 +30,9 @@ window.addEventListener('resize', fitCanvas);
 // ===== CONFIG =====
 
 const CFG = {
-  creditsPerScore: 100,
+  creditsPerScore: 60,
+  maxComboMultiplier: 8,   // uncapped, a long streak runs score into the millions
+  levelSeconds: 24,
 
   caps: { particles: 400, bullets: 200, enemyBullets: 300, enemies: 40 },
 
@@ -42,10 +44,10 @@ const CFG = {
     { id: 'needle',   name: 'NEEDLE',   cost: 500,  lives: 2, speed: 7.5, fireMul: 0.62, hitW: 22, hitH: 32, spreadMul: 0.8, phase: false,
       hull: ['#ffe0a0', '#ff9933', '#bb4400'], trim: '#ffcc33',
       blurb: 'Fast and fragile. Fires far quicker.' },
-    { id: 'bulwark',  name: 'BULWARK',  cost: 1500, lives: 4, speed: 4.0, fireMul: 1.25, hitW: 34, hitH: 40, spreadMul: 1.6, phase: false,
+    { id: 'bulwark',  name: 'BULWARK',  cost: 1200, lives: 4, speed: 4.0, fireMul: 1.25, hitW: 34, hitH: 40, spreadMul: 1.6, phase: false,
       hull: ['#c8ffd0', '#33bb66', '#116633'], trim: '#44ffaa',
       blurb: 'Slow tank. Starts each run shielded.' },
-    { id: 'phantom',  name: 'PHANTOM',  cost: 4000, lives: 3, speed: 6.0, fireMul: 0.92, hitW: 18, hitH: 28, spreadMul: 1.0, phase: true,
+    { id: 'phantom',  name: 'PHANTOM',  cost: 3000, lives: 3, speed: 6.0, fireMul: 0.92, hitW: 18, hitH: 28, spreadMul: 1.0, phase: true,
       hull: ['#e8ccff', '#9955ff', '#4400aa'], trim: '#cc88ff',
       blurb: 'Tiny hitbox. Phases one hit per level.' }
   ],
@@ -108,7 +110,6 @@ const Save = {
 Save.load();
 
 // ===== AUDIO =====
-// (selIndex is aligned to the saved ship once CFG and Save are both ready)
 // Everything here is synthesized at runtime — no asset files, so the game stays
 // a single portable document. If the AudioContext can't be created the module
 // goes inert and the game runs silent rather than failing.
@@ -548,7 +549,6 @@ document.addEventListener('keydown', e => {
     if (e.key === ' ' || e.key === 'Enter') state = 'start';
   }
   if (e.key === 'm' || e.key === 'M') toggleMute();
-  if (e.key === ']' && state === 'play') levelUp(); // DEBUG: removed in final pass
   if (['ArrowLeft','ArrowRight','ArrowUp','ArrowDown',' '].includes(e.key)) e.preventDefault();
 });
 document.addEventListener('keyup', e => { keys[e.key] = false; });
@@ -1319,6 +1319,10 @@ function spawnParticles(x, y, color, count) {
   }
 }
 
+function comboMultiplier() {
+  return Math.max(1, Math.min(CFG.maxComboMultiplier, Math.floor(combo/3)));
+}
+
 function killEnemy(e) {
   const st = ENEMY[e.kind];
   e.dead = true;
@@ -1328,7 +1332,7 @@ function killEnemy(e) {
   if (st.hitStop) FX.hitStop(st.hitStop);
   Sound.play('explode');
 
-  const multiplier = Math.max(1, Math.floor(combo/3));
+  const multiplier = comboMultiplier();
   score += st.points * multiplier;
   combo++; comboTimer = 120;
   addFlashText('+' + st.points*multiplier, e.x, e.y - 10, st.color);
@@ -1419,7 +1423,7 @@ function update() {
   // The clock stops during a boss fight — the fight is the level.
   if (!bossActive) {
     levelTimer++;
-    if (levelTimer > 60*28) levelUp();
+    if (levelTimer > 60*CFG.levelSeconds) levelUp();
   }
   if (bossWarning > 0) bossWarning--;
 
@@ -1903,8 +1907,8 @@ function drawHUD() {
 
   // Combo meter — drains as the window closes, colour steps with the multiplier.
   if (combo > 1) {
-    const mult = Math.max(1, Math.floor(combo/3));
-    const tierCol = mult >= 4 ? '#ff44aa' : mult >= 3 ? '#ff8800' : mult >= 2 ? '#ffdd00' : '#66ddff';
+    const mult = comboMultiplier();
+    const tierCol = mult >= 6 ? '#ff44aa' : mult >= 4 ? '#ff8800' : mult >= 2 ? '#ffdd00' : '#66ddff';
     const bw = 74, bx = W/2 - bw/2, by = 26;
     ctx.fillStyle = 'rgba(255,255,255,0.10)';
     ctx.fillRect(bx, by, bw, 4);
@@ -2258,15 +2262,6 @@ if (!CanvasRenderingContext2D.prototype.roundRect) {
 
 // Open the hangar on the ship you last flew.
 selIndex = Math.max(0, CFG.ships.findIndex(s => s.id === Save.data.selectedShip));
-
-// DEBUG: inspection hook, removed in final pass
-window.__vr = {
-  get state(){return state}, get player(){return player}, get enemies(){return enemies},
-  get bullets(){return bullets}, get enemyBullets(){return enemyBullets},
-  get particles(){return particles}, get asteroids(){return asteroids},
-  get level(){return level}, get score(){return score}, get lives(){return lives},
-  Save, CFG
-};
 
 loop();
 </script>
