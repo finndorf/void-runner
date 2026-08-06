@@ -3,7 +3,7 @@
 A single-file arcade space shooter. No build step, no dependencies, no server —
 the entire game (code, styles, and synthesized audio) lives in `void-runner.html`.
 
-**Play it:** https://voidrunner.vercel.app
+**Play it:** https://voidrunner-game.vercel.app
 
 ## Running it locally
 
