@@ -1636,6 +1636,46 @@ function spawnParticles(x, y, color, count) {
   }
 }
 
+// Flak Burst: on-impact AoE against nearby enemies. Deliberately does not
+// call itself (or trigger further splash) — one blast per impact.
+function applySplash(x, y, radius, damage) {
+  if (radius <= 0) return;
+  enemies.forEach(e => {
+    if (e.dead) return;
+    if ((e.x - x) ** 2 + (e.y - y) ** 2 <= radius * radius) {
+      e.hp -= damage; e.flash = 4;
+      if (e.hp <= 0) killEnemy(e);
+    }
+  });
+  FX.explode(x, y, radius * 0.7, '#ffaa44');
+}
+
+// Chain Lightning: arcs to the nearest un-hit enemy within range, up to `hops`
+// times. Bounded by the hop count, so it cannot recurse indefinitely.
+function applyChain(x, y, hops, damage) {
+  let from = { x, y };
+  const hit = [];
+  for (let i = 0; i < hops; i++) {
+    let best = null, bestD = 1e9;
+    enemies.forEach(e => {
+      if (e.dead || hit.includes(e)) return;
+      const d = (e.x - from.x) ** 2 + (e.y - from.y) ** 2;
+      // Skip anything essentially co-located with the current arc origin —
+      // on hop 0 that's the enemy the bullet just hit directly, and without
+      // this the chain wastes its first hop re-hitting the same target
+      // instead of arcing out to a nearby one.
+      if (d < 4) return;
+      if (d < bestD && d < 160 * 160) { bestD = d; best = e; }
+    });
+    if (!best) return;
+    hit.push(best);
+    best.hp -= damage; best.flash = 4;
+    spawnParticles(best.x, best.y, '#88ddff', 6);
+    if (best.hp <= 0) killEnemy(best);
+    from = best;
+  }
+}
+
 function comboMultiplier() {
   return Math.max(1, Math.min(CFG.maxComboMultiplier, Math.floor(combo/3)));
 }
@@ -1811,6 +1851,30 @@ function update() {
 
   if (boss) updateBoss();
 
+  // Hunter Rounds: steer bullets toward the nearest live enemy. b.homing is a
+  // turn-rate cap in radians/frame, so shots curve rather than snap onto target.
+  bullets.forEach(b => {
+    if (b.homing > 0) {
+      let best = null, bestD = 1e9;
+      enemies.forEach(e => {
+        if (e.dead) return;
+        const d = (e.x - b.x) ** 2 + (e.y - b.y) ** 2;
+        if (d < bestD) { bestD = d; best = e; }
+      });
+      if (best) {
+        const want = Math.atan2(best.x - b.x, -(best.y - b.y));
+        const cur  = Math.atan2(b.vx, -b.vy);
+        let diff = want - cur;
+        while (diff >  Math.PI) diff -= Math.PI * 2;
+        while (diff < -Math.PI) diff += Math.PI * 2;
+        const turn = Math.max(-b.homing, Math.min(b.homing, diff));
+        const a = cur + turn;
+        b.vx = Math.sin(a) * BULLET_SPEED;
+        b.vy = -Math.cos(a) * BULLET_SPEED;
+      }
+    }
+  });
+
   // Move bullets
   bullets.forEach(b => { b.x += b.vx; b.y += b.vy; });
 
@@ -1941,7 +2005,24 @@ function update() {
         e.flash = 3;
         spawnParticles(b.x, b.y, st.color, 4);
         Sound.play('hit');
-        if (e.hp <= 0) {
+
+        // On-impact bullet behaviours (Task 12). These fire on every hit,
+        // independent of whether this hit kills the enemy.
+        if (b.splash > 0) applySplash(e.x, e.y, b.splash, b.damage * 0.6);
+        if (stats.chain > 0) applyChain(e.x, e.y, stats.chain, b.damage * 0.5);
+        if (b.split && !b.isSplit) {
+          [-0.5, 0.5].forEach(a => bullets.push({
+            x: e.x, y: e.y,
+            vx: Math.sin(a) * BULLET_SPEED, vy: -Math.cos(a) * BULLET_SPEED,
+            w: 3, h: 8, pierce: 0, damage: b.damage * 0.5, homing: 0, splash: 0,
+            split: false, isSplit: true, crit: false, dead: false
+          }));
+        }
+
+        // !e.dead guards against a double-kill: applySplash's blast radius
+        // includes the directly-hit enemy itself (distance 0), so it may
+        // already have called killEnemy(e) above.
+        if (e.hp <= 0 && !e.dead) {
           // A shot mine arms rather than dying outright, so it still detonates.
           if (e.kind === 'mine') { e.hp = 1; if (e.arming === 0) e.arming = 30; }
           else killEnemy(e);
@@ -1977,7 +2058,11 @@ function update() {
   if (player.muzzle > 0) player.muzzle--;
 
   // Reap everything in one place, after all collision passes have run.
-  bullets = bullets.filter(b => !b.dead && b.y > -20);
+  // Player bullets aren't all forward-firing any more (rear cannon fires
+  // downward, side pods fire sideways), so cull on all four edges rather
+  // than only the top or they'd fly off-screen forever and just pile up
+  // until capArray trims them from the front of the array.
+  bullets = bullets.filter(b => !b.dead && b.y > -20 && b.y < H+20 && b.x > -20 && b.x < W+20);
   enemyBullets = enemyBullets.filter(b => !b.dead && b.y < H+20 && b.x > -20 && b.x < W+20);
   asteroids = asteroids.filter(a => a.y < H + 60 && a.hp > 0);
   // Turrets retreat off the top, so cull in both directions.
@@ -2053,7 +2138,7 @@ function draw() {
       ctx.rotate(Math.atan2(b.vy, b.vx) + Math.PI/2);   // point along travel
       const bg2 = ctx.createLinearGradient(0, 0, 0, b.h);
       bg2.addColorStop(0, '#ffffff');
-      bg2.addColorStop(0.3, b.pierce > 0 ? '#ffbbff' : '#88ffff');
+      bg2.addColorStop(0.3, b.crit ? '#ffdd33' : b.isSplit ? '#88ddff' : b.pierce > 0 ? '#ffbbff' : '#88ffff');
       bg2.addColorStop(1, 'rgba(0,200,255,0)');
       ctx.fillStyle = bg2;
       ctx.beginPath(); ctx.roundRect(-b.w/2, -b.h, b.w, b.h, 2); ctx.fill();
