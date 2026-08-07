@@ -296,6 +296,24 @@ RLCore.stripCheapest = function (owned) {
   return { owned: next, removed: { id: target.id, tier: u.tier } };
 };
 
+// Firing pattern: the two base shots fly parallel until WIDE MOUNT adds more,
+// at which point the whole pattern fans out (narrower with TIGHT BARREL).
+RLCore.buildShots = function (s) {
+  const n = 2 + s.extraShots;
+  const step = 0.085 * s.spread;
+  const fan = s.extraShots > 0;   // the two base shots fly parallel, as they do today
+  const shots = [];
+  // Centre the pattern on straight-up and keep its total width at 20px, so the
+  // muzzles stay on the hull no matter how many shots there are.
+  for (let i = 0; i < n; i++) {
+    const off = i - (n - 1) / 2;
+    shots.push({ dx: off * (n > 1 ? 20 / (n - 1) : 0), dy: -10, a: fan ? off * step : 0 });
+  }
+  if (s.rear)  shots.push({ dx: -6, dy: 12, a: Math.PI }, { dx: 6, dy: 12, a: -Math.PI });
+  if (s.sides) shots.push({ dx: -14, dy: 0, a: -Math.PI/2 }, { dx: 14, dy: 0, a: Math.PI/2 });
+  return s.twinCore ? shots.concat(shots.map(x => ({ dx: x.dx * 0.6, dy: x.dy + 4, a: x.a }))) : shots;
+};
+
 RLCore.scrapForKill = function (points, scrapMul) { return Math.round(points * scrapMul); };
 RLCore.creditsForScore = function (score) { return Math.floor(score / RLCore.CREDIT_DIVISOR); };
 RLCore.rerollCost = function (uses) { return 300 * Math.pow(2, uses); };
@@ -1585,16 +1603,19 @@ function spawnFormation(type) {
 
 const BULLET_SPEED = 11;
 
-const BASE_SHOTS = [{ dx: -10, a: 0 }, { dx: 10, a: 0 }];
-
 function fireWeapon() {
-  BASE_SHOTS.forEach(s => {
+  overchargeCount++;
+  const crit = stats.overcharge > 0 && overchargeCount % stats.overcharge === 0;
+  const dmg = stats.damage * (crit ? 3 : 1);
+  RLCore.buildShots(stats).forEach(s => {
     bullets.push({
-      x: player.x + s.dx, y: player.y - 10,
+      x: player.x + s.dx, y: player.y + s.dy,
       vx: Math.sin(s.a) * BULLET_SPEED,
       vy: -Math.cos(s.a) * BULLET_SPEED,
-      w: 3, h: 10, pierce: stats.pierce, damage: stats.damage, dead: false,
-      homing: stats.homing, splash: stats.splash
+      w: 3, h: 10,
+      pierce: stats.pierce, damage: dmg, homing: stats.homing,
+      splash: stats.splash, split: stats.split, crit,
+      dead: false
     });
   });
   player.muzzle = 3;

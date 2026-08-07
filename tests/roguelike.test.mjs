@@ -390,3 +390,48 @@ test('bossHpMultiplier is monotonically non-decreasing', () => {
     prev = curr;
   }
 });
+
+// ---- Task 11: firing-pattern upgrades ----
+
+const baseStats = over => Object.assign({
+  extraShots: 0, spread: 1, rear: false, sides: false, twinCore: false
+}, over);
+
+test('the base pattern is two forward shots', () => {
+  const core = loadCore();
+  const shots = core.buildShots(baseStats());
+  assert.equal(shots.length, 2);
+  assert.ok(shots.every(s => Math.abs(s.a) < 1e-9));
+});
+
+test('WIDE MOUNT adds shots and fans them', () => {
+  const core = loadCore();
+  assert.equal(core.buildShots(baseStats({ extraShots: 1 })).length, 3);
+  assert.equal(core.buildShots(baseStats({ extraShots: 3 })).length, 5);
+  const fanned = core.buildShots(baseStats({ extraShots: 3 }));
+  assert.ok(fanned.some(s => s.a < 0) && fanned.some(s => s.a > 0));
+});
+
+test('TIGHT BARREL narrows the fan', () => {
+  const core = loadCore();
+  const wide = core.buildShots(baseStats({ extraShots: 3, spread: 1 }));
+  const tight = core.buildShots(baseStats({ extraShots: 3, spread: 0.5 }));
+  const span = a => Math.max(...a.map(s => Math.abs(s.a)));
+  assert.ok(span(tight) < span(wide));
+});
+
+test('REAR CANNON and SIDE PODS add shots at the right angles', () => {
+  const core = loadCore();
+  const rear = core.buildShots(baseStats({ rear: true }));
+  assert.ok(rear.some(s => Math.abs(Math.abs(s.a) - Math.PI) < 1e-6));
+  const sides = core.buildShots(baseStats({ sides: true }));
+  assert.ok(sides.some(s => Math.abs(s.a - Math.PI/2) < 1e-6));
+  assert.ok(sides.some(s => Math.abs(s.a + Math.PI/2) < 1e-6));
+});
+
+test('TWIN CORE doubles every shot', () => {
+  const core = loadCore();
+  const one = core.buildShots(baseStats({ extraShots: 2, rear: true }));
+  const two = core.buildShots(baseStats({ extraShots: 2, rear: true, twinCore: true }));
+  assert.equal(two.length, one.length * 2);
+});
