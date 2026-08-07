@@ -51,15 +51,6 @@ const CFG = {
     { id: 'phantom',  name: 'PHANTOM',  cost: 3000, lives: 3, speed: 6.0, fireMul: 0.92, hitW: 18, hitH: 28, spreadMul: 1.0, phase: true,
       hull: ['#e8ccff', '#9955ff', '#4400aa'], trim: '#cc88ff',
       blurb: 'Tiny hitbox. Phases one hit per level.' }
-  ],
-
-  // Weapon levels 1..5. `dx` is the muzzle offset, `a` the launch angle in radians.
-  weapons: [
-    { fireRate: 14, pierce: 0, shots: [{dx:-10, a: 0}, {dx: 10, a: 0}] },
-    { fireRate: 10, pierce: 0, shots: [{dx:-10, a: 0}, {dx: 10, a: 0}] },
-    { fireRate: 10, pierce: 0, shots: [{dx:-11, a:-0.08}, {dx: 0, a: 0}, {dx: 11, a: 0.08}] },
-    { fireRate:  9, pierce: 0, shots: [{dx:-12, a:-0.16}, {dx:-5, a:-0.06}, {dx: 5, a: 0.06}, {dx: 12, a: 0.16}] },
-    { fireRate:  8, pierce: 1, shots: [{dx:-13, a:-0.14}, {dx:-7, a:-0.05}, {dx: 0, a: 0}, {dx: 7, a: 0.05}, {dx: 13, a: 0.14}] }
   ]
 };
 
@@ -673,12 +664,12 @@ const nebulae = Array.from({length: 5}, () => ({
 const player = {
   x: W/2, y: H - 120, w: 28, h: 36, speed: 5.5,
   invincible: 0, shield: 0, boost: 0, trail: [],
-  weaponLevel: 1, muzzle: 0,
+  muzzle: 0,
   fireMul: 1, spreadMul: 1   // set per ship
 };
 
 // ---- COLLECTIONS ----
-let bullets = [], enemyBullets = [], asteroids = [], enemies = [], particles = [], powerups = [];
+let bullets = [], enemyBullets = [], asteroids = [], enemies = [], particles = [];
 let shootTimer = 0;
 let boss = null, bossActive = false, bossWarning = 0;
 
@@ -882,10 +873,9 @@ function startGame() {
   score = 0; level = 1; frame = 0; runKills = 0;
   player.x = W/2; player.y = H - 120; player.invincible = 0; player.shield = 0; player.boost = 0; player.trail = [];
   applyShip(ship);
-  bullets = []; enemyBullets = []; asteroids = []; enemies = []; particles = []; powerups = []; flashText = [];
+  bullets = []; enemyBullets = []; asteroids = []; enemies = []; particles = []; flashText = [];
   spawnTimer = 0; asteroidTimer = 0; levelTimer = 0; spawnCycle = 0; combo = 0; comboTimer = 0; levelBanner = null;
   player.muzzle = 0;
-  player.weaponLevel = 1;
   shootTimer = 0;
   dyingTimer = 0;
   boss = null; bossActive = false; bossWarning = 0;
@@ -1414,8 +1404,6 @@ function updateBoss() {
       const pts = 2000 * b.tier;
       score += pts;
       addFlashText('+' + pts.toLocaleString(), b.x, b.y, '#ffdd44');
-      // Guaranteed reward for clearing the fight.
-      powerups.push({x: b.x, y: b.y + 20, type: 'weapon', vy: 1.2, life: 400, dead: false});
       levelBanner = { text: 'BOSS DOWN', life: 120 };
       boss = null; bossActive = false;
       Music.setBoss(false);
@@ -1558,22 +1546,17 @@ function spawnFormation(type) {
   return id;
 }
 
-// Weapon pickups are magenta rather than yellow so they read instantly against
-// the yellow boost orb.
-const POWERUP_COLOR = { shield: '#00ddff', boost: '#ffdd00', weapon: '#ff66cc' };
-const POWERUP_LETTER = { shield: 'S', boost: 'B', weapon: 'W' };
-
 const BULLET_SPEED = 11;
 
+const BASE_SHOTS = [{ dx: -10, a: 0 }, { dx: 10, a: 0 }];
+
 function fireWeapon() {
-  const w = CFG.weapons[player.weaponLevel - 1];
-  w.shots.forEach(s => {
-    const a = s.a * player.spreadMul;
+  BASE_SHOTS.forEach(s => {
     bullets.push({
       x: player.x + s.dx, y: player.y - 10,
-      vx: Math.sin(a) * BULLET_SPEED,
-      vy: -Math.cos(a) * BULLET_SPEED,
-      w: 3, h: 10, pierce: w.pierce, dead: false
+      vx: Math.sin(s.a) * BULLET_SPEED,
+      vy: -Math.cos(s.a) * BULLET_SPEED,
+      w: 3, h: 10, pierce: 0, damage: 1, dead: false
     });
   });
   player.muzzle = 3;
@@ -1611,12 +1594,6 @@ function killEnemy(e) {
   score += st.points * multiplier;
   combo++; comboTimer = 120;
   addFlashText('+' + st.points*multiplier, e.x, e.y - 10, st.color);
-
-  if (Math.random() < 0.32) {
-    const r = Math.random();
-    const type = r < 0.40 ? 'weapon' : r < 0.70 ? 'shield' : 'boost';
-    powerups.push({x: e.x, y: e.y, type, vy: 1.5, life: 300, dead: false});
-  }
 
   // Clearing an entire formation pays a bonus.
   if (e.formationId) {
@@ -1656,11 +1633,6 @@ function hitPlayer() {
   }
   lives--;
   player.invincible = 120;
-  // Losing a weapon level on every hit is the tension the upgrades hang on.
-  if (player.weaponLevel > 1) {
-    player.weaponLevel--;
-    addFlashText('-WEAPON', player.x, player.y - 34, '#ff4466');
-  }
   FX.addShake(20);
   FX.explode(player.x, player.y, 24, '#ff4400');
   combo = 0; comboTimer = 0;
@@ -1734,11 +1706,10 @@ function update() {
   if (player.shield > 0) player.shield--;
   if (player.boost > 0) player.boost--;
 
-  // Shooting (auto-fire). Shot count and spread come from the weapon level;
-  // boost only shortens the interval.
+  // Shooting (auto-fire). Fixed base pattern for now; boost only shortens
+  // the interval. Task 8 reconnects fire rate to resolveStats.
   shootTimer++;
-  const wcfg = CFG.weapons[player.weaponLevel - 1];
-  const fireRate = Math.max(4, Math.round(wcfg.fireRate * player.fireMul * (player.boost > 0 ? 0.65 : 1)));
+  const fireRate = Math.max(4, Math.round(10 * player.fireMul * (player.boost > 0 ? 0.65 : 1)));
   if (shootTimer >= fireRate) {
     shootTimer = 0;
     fireWeapon();
@@ -1927,34 +1898,6 @@ function update() {
     }
   });
 
-  // Powerups
-  powerups.forEach(p => {
-    p.y += p.vy; p.life--;
-    if (p.dead) return;
-    if (Math.abs(p.x-player.x)<24 && Math.abs(p.y-player.y)<24) {
-      p.dead = true;
-      if (p.type === 'shield') {
-        player.shield = 180;
-        addFlashText('SHIELD!', player.x, player.y-30, '#00ffff');
-        Sound.play('powerup');
-      } else if (p.type === 'boost') {
-        player.boost = 200;
-        addFlashText('BOOST!', player.x, player.y-30, '#ffff00');
-        Sound.play('powerup');
-      } else {
-        if (player.weaponLevel < CFG.weapons.length) {
-          player.weaponLevel++;
-          addFlashText('WEAPON ' + player.weaponLevel, player.x, player.y-30, '#ff66cc');
-        } else {
-          score += 250;
-          addFlashText('+250', player.x, player.y-30, '#ff66cc');
-        }
-        Sound.play('weaponUp');
-      }
-      spawnParticles(p.x, p.y, POWERUP_COLOR[p.type], 15);
-    }
-  });
-
   // Hit-flash decay
   enemies.forEach(e => { if (e.flash > 0) e.flash--; });
   asteroids.forEach(a => { if (a.flash > 0) a.flash--; });
@@ -1966,7 +1909,6 @@ function update() {
   asteroids = asteroids.filter(a => a.y < H + 60 && a.hp > 0);
   // Turrets retreat off the top, so cull in both directions.
   enemies = enemies.filter(e => !e.dead && e.y < H+50 && e.y > -120);
-  powerups = powerups.filter(p => !p.dead && p.y < H+30 && p.life > 0);
   capAll();
 
   // Level banner
@@ -2022,19 +1964,6 @@ function draw() {
       let alpha = (t.life/12)*0.3;
       ctx.beginPath(); ctx.arc(t.x, t.y, 5, 0, Math.PI*2);
       ctx.fillStyle = `rgba(0,150,255,${alpha})`; ctx.fill();
-    });
-
-    powerups.forEach(p => {
-      const pulse = 0.7 + 0.3*Math.sin(frame*0.15);
-      const col = POWERUP_COLOR[p.type];
-      ctx.save(); ctx.translate(p.x, p.y);
-      ctx.beginPath(); ctx.arc(0, 0, 12*pulse, 0, Math.PI*2);
-      ctx.globalAlpha = 0.25; ctx.fillStyle = col; ctx.fill();
-      ctx.globalAlpha = 1;
-      ctx.strokeStyle = col; ctx.lineWidth = 2; ctx.stroke();
-      ctx.fillStyle = col; ctx.font = 'bold 11px monospace'; ctx.textAlign = 'center';
-      ctx.fillText(POWERUP_LETTER[p.type], 0, 4);
-      ctx.restore();
     });
 
     asteroids.forEach(drawAsteroid);
@@ -2227,23 +2156,6 @@ function drawHUD() {
     ctx.fillText('BOOST', 8, barY+14);
   }
 
-  // Weapon level pips, bottom-left and out of the play area.
-  ctx.save();
-  ctx.font = '9px monospace'; ctx.textAlign = 'left';
-  ctx.fillStyle = '#556677';
-  ctx.fillText('WPN', 10, H - 24);
-  for (let i = 0; i < CFG.weapons.length; i++) {
-    const px = 10 + i*11, py = H - 18;
-    if (i < player.weaponLevel) {
-      ctx.fillStyle = '#ff66cc';
-      ctx.fillRect(px, py, 7, 7);
-    } else {
-      ctx.strokeStyle = 'rgba(255,102,204,0.28)'; ctx.lineWidth = 1;
-      ctx.strokeRect(px + 0.5, py + 0.5, 6, 6);
-    }
-  }
-  ctx.restore();
-
   drawMuteIcon(MUTE_RECT_PLAY);
 }
 
@@ -2413,8 +2325,8 @@ function drawStart() {
   ctx.textAlign = 'center';
   ctx.fillStyle = '#5b6b80';
   ctx.font = '11px monospace';
-  ctx.fillText('← → move    W upgrades your gun    a hit costs one', W/2, 512);
-  ctx.fillText('S = Shield    B = Boost    auto-fire is always on', W/2, 530);
+  ctx.fillText('← → move    auto-fire is always on', W/2, 512);
+  ctx.fillText('kills earn SCRAP — spend it when cargo docks', W/2, 530);
 
   if (owned) {
     const pulse = 0.6 + 0.4*Math.sin(frame*0.08);
