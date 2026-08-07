@@ -63,6 +63,15 @@ const CFG = {
   ]
 };
 
+// ===== ROGUELIKE CORE (PURE) =====
+// No DOM, no canvas, no game globals. Randomness arrives as an injected rnd().
+// tests/roguelike.test.mjs extracts and evaluates everything between these
+// sentinels, so keeping it pure is what makes the game testable at all.
+
+const RLCore = {};
+
+// ===== END ROGUELIKE CORE (PURE) =====
+
 // ===== SAVE =====
 
 const Save = {
