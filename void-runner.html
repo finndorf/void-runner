@@ -127,6 +127,86 @@ RLCore.rollRarity = function (level, rnd) {
   return 'COMMON';
 };
 
+// Effect keys are read by RLCore.resolveStats. Multiplicative keys end in Mul
+// and are summed then applied once; flags are booleans or counts.
+RLCore.UPGRADES = [
+  // --- COMMON ---
+  { id: 'reload_coil',  tier: 'COMMON', name: 'RELOAD COIL',  desc: '+8% fire rate',      effect: { fireRateMul: 0.08 } },
+  { id: 'heavy_rounds', tier: 'COMMON', name: 'HEAVY ROUNDS', desc: '+10% damage',        effect: { damageMul: 0.10 } },
+  { id: 'thrusters',    tier: 'COMMON', name: 'THRUSTERS',    desc: '+8% move speed',     effect: { speedMul: 0.08 } },
+  { id: 'plating',      tier: 'COMMON', name: 'PLATING',      desc: '+1 shield charge',   effect: { shieldCharges: 1 } },
+  { id: 'scrap_magnet', tier: 'COMMON', name: 'SCRAP MAGNET', desc: '+10% scrap',         effect: { scrapMul: 0.10 } },
+  { id: 'tight_barrel', tier: 'COMMON', name: 'TIGHT BARREL', desc: '-10% shot spread',   effect: { spreadMul: -0.10 } },
+
+  // --- UNCOMMON ---
+  { id: 'twin_feed',    tier: 'UNCOMMON', name: 'TWIN FEED',    desc: '+15% fire rate',        effect: { fireRateMul: 0.15 } },
+  { id: 'ap_rounds',    tier: 'UNCOMMON', name: 'AP ROUNDS',    desc: '+18% damage',           effect: { damageMul: 0.18 } },
+  { id: 'repair_kit',   tier: 'UNCOMMON', name: 'REPAIR KIT',   desc: '+1 life',               effect: { lives: 1 } },
+  { id: 'evasion',      tier: 'UNCOMMON', name: 'EVASION FIELD',desc: '+12% speed, -10% size', effect: { speedMul: 0.12, hitScaleMul: -0.10 } },
+  { id: 'salvage_rig',  tier: 'UNCOMMON', name: 'SALVAGE RIG',  desc: '+20% scrap',            effect: { scrapMul: 0.20 } },
+  { id: 'wide_mount',   tier: 'UNCOMMON', name: 'WIDE MOUNT',   desc: '+1 shot',               effect: { extraShots: 1 } },
+
+  // --- RARE ---
+  { id: 'piercing',     tier: 'RARE', name: 'PIERCING ROUNDS', desc: 'shots pass through one enemy', effect: { pierce: 1 } },
+  { id: 'split_shot',   tier: 'RARE', name: 'SPLIT SHOT',      desc: 'shots split in two on impact', effect: { split: true } },
+  { id: 'overcharge',   tier: 'RARE', name: 'OVERCHARGE',      desc: 'every 5th shot triples',       effect: { overcharge: 5 } },
+  { id: 'kinetic_barrier', tier: 'RARE', name: 'KINETIC BARRIER', desc: 'a shield regrows every 20s', effect: { shieldRegen: 1200 } },
+  { id: 'hunter_rounds',tier: 'RARE', name: 'HUNTER ROUNDS',   desc: 'shots steer toward enemies',   effect: { homing: 0.045 } },
+
+  // --- EPIC ---
+  { id: 'rear_cannon',  tier: 'EPIC', name: 'REAR CANNON',  desc: 'you also fire backwards',    effect: { rear: true } },
+  { id: 'side_pods',    tier: 'EPIC', name: 'SIDE PODS',    desc: 'you also fire left and right',effect: { sides: true } },
+  { id: 'flak_burst',   tier: 'EPIC', name: 'FLAK BURST',   desc: 'shots explode on impact',    effect: { splash: 30 } },
+  { id: 'phase_drive',  tier: 'EPIC', name: 'PHASE DRIVE',  desc: 'boost grants invulnerability',effect: { phaseBoost: true } },
+  { id: 'vampiric',     tier: 'EPIC', name: 'VAMPIRIC CORE',desc: 'a life back every 30 kills', effect: { lifePerKills: 30 } },
+
+  // --- LEGENDARY ---
+  { id: 'orbital_drone',tier: 'LEGENDARY', name: 'ORBITAL DRONE', desc: 'a drone fights beside you',   effect: { drones: 1 } },
+  { id: 'chain',        tier: 'LEGENDARY', name: 'CHAIN LIGHTNING',desc: 'hits arc to two enemies',    effect: { chain: 2 } },
+  { id: 'time_dilation',tier: 'LEGENDARY', name: 'TIME DILATION', desc: 'enemy bullets 35% slower',    effect: { enemyBulletMul: -0.35 } },
+  { id: 'fortress',     tier: 'LEGENDARY', name: 'FORTRESS',      desc: 'start each level shielded',   effect: { fortress: 2 } },
+
+  // --- APEX ---
+  { id: 'twin_core',    tier: 'APEX', name: 'TWIN CORE',       desc: 'every weapon effect fires twice', effect: { twinCore: true } },
+  { id: 'singularity',  tier: 'APEX', name: 'SINGULARITY',     desc: 'a black hole orbits you',         effect: { singularity: true } },
+  { id: 'immortal',     tier: 'APEX', name: 'IMMORTAL ENGINE', desc: 'your first death is survivable',  effect: { extraLife: 1 } }
+];
+
+RLCore.tierOf = function (id) { return RLCore.TIERS.find(t => t.id === id); };
+
+RLCore.eligible = function (tier, owned) {
+  const limit = RLCore.tierOf(tier).stackLimit;
+  return RLCore.UPGRADES.filter(u => {
+    if (u.tier !== tier) return false;
+    const have = owned.find(o => o.id === u.id);
+    return !have || have.stacks < limit;
+  });
+};
+
+RLCore.rollSlot = function (level, owned, rnd, exclude) {
+  const skip = exclude || [];
+  // rollRarity consumes rnd() and must be called exactly once per slot: calling
+  // it inside the findIndex predicate would re-invoke it (with a fresh random
+  // draw) for every tier checked, since Array#findIndex calls the predicate
+  // once per element until it matches.
+  const rarity = RLCore.rollRarity(level, rnd);
+  let idx = RLCore.TIERS.findIndex(t => t.id === rarity);
+  for (; idx >= 0; idx--) {
+    const pool = RLCore.eligible(RLCore.TIERS[idx].id, owned).filter(u => !skip.includes(u.id));
+    if (pool.length) return pool[Math.floor(rnd() * pool.length)];
+  }
+  return null;
+};
+
+RLCore.rollShop = function (level, owned, rnd) {
+  const out = [];
+  for (let i = 0; i < 3; i++) {
+    const u = RLCore.rollSlot(level, owned, rnd, out.map(o => o.id));
+    if (u) out.push(u);
+  }
+  return out;
+};
+
 // ===== END ROGUELIKE CORE (PURE) =====
 
 // ===== SAVE =====

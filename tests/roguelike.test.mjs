@@ -134,3 +134,64 @@ test('APEX lands at 0.3% over many rolls', () => {
   const pct = (apex / N) * 100;
   assert.ok(pct > 0.25 && pct < 0.35, `APEX came out at ${pct.toFixed(3)}%`);
 });
+
+test('the catalog has 29 upgrades with the specified tier counts', () => {
+  const core = loadCore();
+  assert.equal(core.UPGRADES.length, 29);
+  const count = t => core.UPGRADES.filter(u => u.tier === t).length;
+  assert.equal(count('COMMON'), 6);
+  assert.equal(count('UNCOMMON'), 6);
+  assert.equal(count('RARE'), 5);
+  assert.equal(count('EPIC'), 5);
+  assert.equal(count('LEGENDARY'), 4);
+  assert.equal(count('APEX'), 3);
+});
+
+test('every upgrade has a unique id, a name and a description', () => {
+  const core = loadCore();
+  const ids = new Set();
+  for (const u of core.UPGRADES) {
+    assert.ok(u.id && !ids.has(u.id), `duplicate or missing id: ${u.id}`);
+    ids.add(u.id);
+    assert.ok(u.name && u.name.length > 0);
+    assert.ok(u.desc && u.desc.length > 0);
+    assert.ok(u.effect && typeof u.effect === 'object');
+  }
+});
+
+test('owned unique upgrades are excluded from rolls', () => {
+  const core = loadCore();
+  const rare = core.UPGRADES.filter(u => u.tier === 'RARE');
+  const owned = rare.slice(0, 4).map(u => ({ id: u.id, stacks: 1 }));
+  const left = core.eligible('RARE', owned);
+  assert.equal(left.length, 1);
+  assert.equal(left[0].id, rare[4].id);
+});
+
+test('a stackable upgrade stays eligible until it hits its stack limit', () => {
+  const core = loadCore();
+  const common = core.UPGRADES.find(u => u.tier === 'COMMON');
+  assert.equal(core.eligible('COMMON', [{ id: common.id, stacks: 4 }]).some(u => u.id === common.id), true);
+  assert.equal(core.eligible('COMMON', [{ id: common.id, stacks: 5 }]).some(u => u.id === common.id), false);
+});
+
+test('an exhausted tier falls to a lower tier rather than returning nothing', () => {
+  const core = loadCore();
+  const owned = core.UPGRADES
+    .filter(u => u.tier === 'APEX' || u.tier === 'LEGENDARY')
+    .map(u => ({ id: u.id, stacks: 1 }));
+  const picked = core.rollSlot(1, owned, () => 0.9999);
+  assert.ok(picked, 'expected a fallback upgrade');
+  assert.ok(picked.tier !== 'APEX' && picked.tier !== 'LEGENDARY');
+});
+
+test('a shop rolls three upgrades with no duplicates', () => {
+  const core = loadCore();
+  let seed = 7;
+  const rnd = () => ((seed = (seed * 1103515245 + 12345) & 0x7fffffff) / 0x7fffffff);
+  for (let i = 0; i < 200; i++) {
+    const shop = core.rollShop(4, [], rnd);
+    assert.equal(shop.length, 3);
+    assert.equal(new Set(shop.map(u => u.id)).size, 3);
+  }
+});
