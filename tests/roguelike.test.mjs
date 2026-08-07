@@ -115,13 +115,22 @@ test('rollRarity picks the tier the random value lands in', () => {
   assert.equal(core.rollRarity(1, () => 0.6), 'UNCOMMON');
 });
 
+test('rollRarity respects tier boundaries', () => {
+  const core = loadCore();
+  // COMMON is 52%, so rnd() returning exactly 0.52 (52% of 100) should be at the
+  // boundary. Since weights are subtracted, landing exactly at the boundary
+  // (r < 0) should fall into UNCOMMON, not COMMON.
+  assert.equal(core.rollRarity(1, () => 0.52), 'UNCOMMON');
+});
+
 test('APEX lands at 0.3% over many rolls', () => {
   const core = loadCore();
   let seed = 12345;
-  const rnd = () => ((seed = (seed * 1103515245 + 12345) & 0x7fffffff) / 0x7fffffff);
+  // Use Math.imul for 32-bit correct multiplication to avoid precision loss
+  const rnd = () => ((seed = (Math.imul(seed, 1103515245) + 12345) >>> 0) / 0x100000000);
   let apex = 0;
   const N = 200000;
   for (let i = 0; i < N; i++) if (core.rollRarity(1, rnd) === 'APEX') apex++;
   const pct = (apex / N) * 100;
-  assert.ok(pct > 0.2 && pct < 0.45, `APEX came out at ${pct.toFixed(3)}%`);
+  assert.ok(pct > 0.25 && pct < 0.35, `APEX came out at ${pct.toFixed(3)}%`);
 });
