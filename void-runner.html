@@ -675,6 +675,26 @@ let scrap = 0, scrapSpent = 0;
 let stats = null;           // resolved by recomputeStats()
 let overchargeCount = 0, killsSinceLife = 0;
 
+// ---- HUD build-list cache (Task 15) ----
+// runUpgrades mutates in place on purchase (stacks++ / push) rather than
+// getting a new array reference, so we can't detect changes by identity —
+// every call site that changes it bumps this counter instead. drawHUD
+// rebuilds the resolved {name, color, stacks} list only when the version
+// it last cached at is stale, so a 60fps draw loop never re-runs
+// RLCore.UPGRADES.find() per entry per frame.
+let runUpgradesVersion = 0;
+let buildCache = [];
+let buildCacheVersion = -1;
+
+function rebuildBuildCache() {
+  buildCache = runUpgrades.map(o => {
+    const u = RLCore.UPGRADES.find(x => x.id === o.id);
+    if (!u) return null; // unknown id in the catalog: skip, don't throw
+    return { name: u.name, color: RLCore.tierOf(u.tier).color, stacks: o.stacks };
+  }).filter(Boolean);
+  buildCacheVersion = runUpgradesVersion;
+}
+
 function recomputeStats() {
   const ship = currentShip();
   stats = RLCore.resolveStats(ship, runUpgrades);
@@ -948,6 +968,7 @@ function startGame() {
   dyingTimer = 0;
   boss = null; bossActive = false; bossWarning = 0;
   runUpgrades = []; scrap = 0; scrapSpent = 0;
+  runUpgradesVersion++;
   overchargeCount = 0; killsSinceLife = 0;
   recomputeStats();
   lives += stats.extraLives;
@@ -1887,6 +1908,7 @@ function hitPlayer() {
   const res = RLCore.stripCheapest(runUpgrades);
   runUpgrades = res.owned;
   if (res.removed) {
+    runUpgradesVersion++;
     const t = RLCore.tierOf(res.removed.tier);
     const u = RLCore.UPGRADES.find(x => x.id === res.removed.id);
     addFlashText('-' + u.name, player.x, player.y - 30, t.color);
@@ -2484,7 +2506,58 @@ function drawHUD() {
     ctx.fillText('BOOST', 8, barY+14);
   }
 
+  drawScrapAndBuild();
   drawMuteIcon(MUTE_RECT_PLAY);
+}
+
+// Scrap readout plus the current build (owned upgrades), drawn down the
+// left side under the boss/shield/boost bars. Fixed anchor at y=124: the
+// bars above it top out around y=109 in the worst case (boss bar + shield
+// + boost all live at once), so this always clears them with margin.
+// The player only ever moves horizontally at a fixed y=H-120=600, and the
+// list is capped well short of that, so it can never sit over the ship.
+function drawScrapAndBuild() {
+  ctx.textAlign = 'left';
+  ctx.font = 'bold 12px monospace';
+  ctx.fillStyle = '#5577aa';
+  ctx.fillText('SCRAP', 14, 124);
+  ctx.fillStyle = '#ffdd44';
+  ctx.fillText(Math.floor(scrap).toLocaleString(), 62, 124);
+
+  if (buildCacheVersion !== runUpgradesVersion) rebuildBuildCache();
+  const n = buildCache.length;
+  if (n === 0) return;
+
+  ctx.font = '8px monospace';
+  ctx.fillStyle = 'rgba(150,175,200,0.55)';
+  ctx.fillText('BUILD', 14, 138);
+
+  // Two columns of up to 8 rows (16 slots). Six COMMON and six UNCOMMON
+  // upgrades can each stack to 5, plus up to ~17 non-stacking uniques, so a
+  // maxed-out run can hold ~29 distinct entries -- far more than fits on a
+  // 720px canvas. Past the cap, the last slot collapses into "+N MORE"
+  // instead of letting the list run off the bottom of the screen.
+  const perCol = 8, maxSlots = perCol * 2, rowH = 12, startY = 150, colX = [14, 180];
+  const overflow = n > maxSlots;
+  const showCount = overflow ? maxSlots - 1 : n;
+
+  for (let i = 0; i < showCount; i++) {
+    const col = i < perCol ? 0 : 1;
+    const row = i % perCol;
+    const x = colX[col], rowTop = startY + row * rowH;
+    const o = buildCache[i];
+    ctx.fillStyle = o.color;
+    ctx.fillRect(x, rowTop, 6, 6);
+    ctx.fillStyle = 'rgba(200,220,240,0.75)';
+    ctx.fillText(o.name + (o.stacks > 1 ? ' x' + o.stacks : ''), x + 10, rowTop + 6);
+  }
+
+  if (overflow) {
+    const row = (maxSlots - 1) % perCol;
+    const rowTop = startY + row * rowH;
+    ctx.fillStyle = 'rgba(150,175,200,0.7)';
+    ctx.fillText('+' + (n - showCount) + ' MORE', colX[1] + 10, rowTop + 6);
+  }
 }
 
 // ===== SCREENS =====
@@ -2719,6 +2792,7 @@ function drawGameOver() {
   ctx.font = '10px monospace';
   ctx.fillText('banked: ' + Save.data.credits.toLocaleString() + ' CR', W/2, H/2 + 86);
   ctx.fillText('reached level ' + level + '   ·   ' + runKills + ' kills', W/2, H/2 + 102);
+  ctx.fillText('SCRAP SPENT: ' + scrapSpent.toLocaleString(), W/2, H/2 + 118);
 
   const pulse = 0.6 + 0.4*Math.sin(frame*0.1);
   ctx.fillStyle = `rgba(0,220,180,${pulse})`;
@@ -2789,6 +2863,7 @@ function tryBuySlot(i) {
   scrap -= price;
   scrapSpent += price;
   if (have) have.stacks++; else runUpgrades.push({ id: u.id, stacks: 1 });
+  runUpgradesVersion++;
   shopSlots[i] = null;
   recomputeStats();
   if (u.effect.shieldCharges) player.shieldCharges = Math.max(player.shieldCharges, stats.shieldCharges);
