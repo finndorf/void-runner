@@ -70,3 +70,58 @@ test('migrateSave reports ok so callers know whether it is safe to persist', () 
   const unrecognized = core.migrateSave({ version: 99, credits: 10 }, DEFAULTS());
   assert.equal(unrecognized.ok, false);
 });
+
+test('base weights sum to 100 and match the spec', () => {
+  const core = loadCore();
+  const w = core.rarityWeights(1);
+  assert.equal(w.COMMON, 52);
+  assert.equal(w.UNCOMMON, 27);
+  assert.equal(w.RARE, 13);
+  assert.equal(w.EPIC, 6);
+  assert.equal(Math.round(w.LEGENDARY * 10) / 10, 1.7);
+  assert.equal(Math.round(w.APEX * 10) / 10, 0.3);
+  assert.equal(Math.round(Object.values(w).reduce((a, b) => a + b, 0)), 100);
+});
+
+test('weights still sum to 100 at every level', () => {
+  const core = loadCore();
+  for (let lv = 1; lv <= 20; lv++) {
+    const total = Object.values(core.rarityWeights(lv)).reduce((a, b) => a + b, 0);
+    assert.ok(Math.abs(total - 100) < 1e-9, `level ${lv} summed to ${total}`);
+  }
+});
+
+test('APEX never drifts', () => {
+  const core = loadCore();
+  for (let lv = 1; lv <= 20; lv++) {
+    assert.ok(Math.abs(core.rarityWeights(lv).APEX - 0.3) < 1e-9);
+  }
+});
+
+test('drift moves weight from COMMON to the middle tiers, capped at level 12', () => {
+  const core = loadCore();
+  const l1 = core.rarityWeights(1), l8 = core.rarityWeights(8);
+  const l12 = core.rarityWeights(12), l20 = core.rarityWeights(20);
+  assert.ok(l8.COMMON < l1.COMMON);
+  assert.ok(l8.RARE > l1.RARE);
+  assert.equal(l20.COMMON, l12.COMMON);
+  assert.equal(l12.COMMON, 37);
+});
+
+test('rollRarity picks the tier the random value lands in', () => {
+  const core = loadCore();
+  assert.equal(core.rollRarity(1, () => 0), 'COMMON');
+  assert.equal(core.rollRarity(1, () => 0.999), 'APEX');
+  assert.equal(core.rollRarity(1, () => 0.6), 'UNCOMMON');
+});
+
+test('APEX lands at 0.3% over many rolls', () => {
+  const core = loadCore();
+  let seed = 12345;
+  const rnd = () => ((seed = (seed * 1103515245 + 12345) & 0x7fffffff) / 0x7fffffff);
+  let apex = 0;
+  const N = 200000;
+  for (let i = 0; i < N; i++) if (core.rollRarity(1, rnd) === 'APEX') apex++;
+  const pct = (apex / N) * 100;
+  assert.ok(pct > 0.2 && pct < 0.45, `APEX came out at ${pct.toFixed(3)}%`);
+});

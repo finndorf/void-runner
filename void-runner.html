@@ -91,6 +91,42 @@ RLCore.migrateSave = function (parsed, defaults) {
   return { data, ok: true };
 };
 
+RLCore.TIERS = [
+  { id: 'COMMON',    name: 'COMMON',    price:  240, color: '#b8c4d0', stackLimit: 5 },
+  { id: 'UNCOMMON',  name: 'UNCOMMON',  price:  500, color: '#44dd77', stackLimit: 5 },
+  { id: 'RARE',      name: 'RARE',      price:  900, color: '#3399ff', stackLimit: 1 },
+  { id: 'EPIC',      name: 'EPIC',      price: 2100, color: '#aa66ff', stackLimit: 1 },
+  { id: 'LEGENDARY', name: 'LEGENDARY', price: 4500, color: '#ffaa22', stackLimit: 1 },
+  { id: 'APEX',      name: 'APEX',      price: 9000, color: '#00ffee', stackLimit: 1 }
+];
+
+RLCore.BASE_WEIGHTS = { COMMON: 52, UNCOMMON: 27, RARE: 13, EPIC: 6, LEGENDARY: 1.7, APEX: 0.3 };
+
+// Depth drift takes weight off COMMON and spreads it across UNCOMMON..LEGENDARY
+// in proportion to their base weights. APEX is deliberately excluded: it is the
+// one probability the player can rely on never changing.
+RLCore.rarityWeights = function (level) {
+  const w = Object.assign({}, RLCore.BASE_WEIGHTS);
+  const steps = Math.max(0, Math.min(level, 12) - 2);
+  const drift = 1.5 * steps;
+  if (drift <= 0) return w;
+  w.COMMON -= drift;
+  const mid = ['UNCOMMON', 'RARE', 'EPIC', 'LEGENDARY'];
+  const midTotal = mid.reduce((a, k) => a + RLCore.BASE_WEIGHTS[k], 0);
+  mid.forEach(k => { w[k] += drift * (RLCore.BASE_WEIGHTS[k] / midTotal); });
+  return w;
+};
+
+RLCore.rollRarity = function (level, rnd) {
+  const w = RLCore.rarityWeights(level);
+  let r = rnd() * 100;
+  for (const t of RLCore.TIERS) {
+    r -= w[t.id];
+    if (r < 0) return t.id;
+  }
+  return 'COMMON';
+};
+
 // ===== END ROGUELIKE CORE (PURE) =====
 
 // ===== SAVE =====
