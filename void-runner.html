@@ -294,6 +294,10 @@ const Sound = {
 // so it never depends on the render loop's timing.
 const Music = {
   bus: null, playing: false, timer: null,
+  // `wanted` is whether a run wants music at all; `playing` is whether it is
+  // actually being scheduled. Mute separates the two so unmuting mid-run can
+  // resume without a run having to restart the track.
+  wanted: false,
   step: 0, bar: 0, nextTime: 0,
   level: 1, boss: false,
 
@@ -309,14 +313,26 @@ const Music = {
   },
 
   start() {
+    Music.wanted = true;
     if (!Sound.ready() || !Music.bus) return;
-    Music.playing = true;
+    Music.playing = !Sound.muted;
     Music.step = 0; Music.bar = 0;
     Music.nextTime = Sound.ctx.currentTime + 0.08;
     if (!Music.timer) Music.timer = setInterval(Music.tick, 25);
   },
 
-  stop() { Music.playing = false; },
+  stop() { Music.wanted = false; Music.playing = false; },
+
+  // Muting stops scheduling outright rather than only zeroing the output gain,
+  // so a muted game does no audio work at all. Unmuting picks the track up from
+  // where it was, and rebases nextTime so the silent gap is not scheduled as a
+  // backlog of notes all landing at once.
+  setMuted(m) {
+    if (m) { Music.playing = false; return; }
+    if (!Music.wanted || !Sound.ready() || !Music.bus) return;
+    Music.playing = true;
+    Music.nextTime = Sound.ctx.currentTime + 0.08;
+  },
   setIntensity(lv) { Music.level = lv; },
   setBoss(b) { Music.boss = b; },
 
@@ -533,6 +549,7 @@ function canvasPos(clientX, clientY) {
 }
 function toggleMute() {
   Sound.setMuted(!Sound.muted);
+  Music.setMuted(Sound.muted);
   Save.data.muted = Sound.muted;
   Save.write();
 }

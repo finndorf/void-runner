@@ -90,7 +90,7 @@ test('pure block loads and exposes RLCore', () => {
 
 - [ ] **Step 3: Run it to verify it fails**
 
-Run: `node --test tests/`
+Run: `node --test tests/*.mjs`
 Expected: FAIL with "pure block sentinels not found".
 
 - [ ] **Step 4: Add the pure block scaffold**
@@ -110,7 +110,7 @@ const RLCore = {};
 
 - [ ] **Step 5: Run the test to verify it passes**
 
-Run: `node --test tests/`
+Run: `node --test tests/*.mjs`
 Expected: PASS, 1 test.
 
 - [ ] **Step 6: Commit**
@@ -191,7 +191,7 @@ test('a corrupt unlocked list is repaired without losing credits', () => {
 
 - [ ] **Step 2: Run to verify they fail**
 
-Run: `node --test tests/`
+Run: `node --test tests/*.mjs`
 Expected: FAIL — `core.migrateSave is not a function`.
 
 - [ ] **Step 3: Implement in the pure block**
@@ -223,7 +223,7 @@ RLCore.migrateSave = function (parsed, defaults) {
 
 - [ ] **Step 4: Run to verify they pass**
 
-Run: `node --test tests/`
+Run: `node --test tests/*.mjs`
 Expected: PASS, 5 tests.
 
 - [ ] **Step 5: Wire it into Save**
@@ -358,7 +358,7 @@ test('APEX lands at 0.3% over many rolls', () => {
 
 - [ ] **Step 2: Run to verify they fail**
 
-Run: `node --test tests/`
+Run: `node --test tests/*.mjs`
 Expected: FAIL — `core.rarityWeights is not a function`.
 
 - [ ] **Step 3: Implement**
@@ -403,7 +403,7 @@ RLCore.rollRarity = function (level, rnd) {
 
 - [ ] **Step 4: Run to verify they pass**
 
-Run: `node --test tests/`
+Run: `node --test tests/*.mjs`
 Expected: PASS, 11 tests.
 
 - [ ] **Step 5: Commit**
@@ -495,7 +495,7 @@ test('a shop rolls three upgrades with no duplicates', () => {
 
 - [ ] **Step 2: Run to verify they fail**
 
-Run: `node --test tests/`
+Run: `node --test tests/*.mjs`
 Expected: FAIL — `core.UPGRADES is undefined`.
 
 - [ ] **Step 3: Implement the catalog**
@@ -579,7 +579,7 @@ RLCore.rollShop = function (level, owned, rnd) {
 
 - [ ] **Step 4: Run to verify they pass**
 
-Run: `node --test tests/`
+Run: `node --test tests/*.mjs`
 Expected: PASS, 17 tests.
 
 - [ ] **Step 5: Commit**
@@ -664,7 +664,7 @@ test('scrap multiplier accumulates across both scrap upgrades', () => {
 
 - [ ] **Step 2: Run to verify they fail**
 
-Run: `node --test tests/`
+Run: `node --test tests/*.mjs`
 Expected: FAIL — `core.resolveStats is not a function`.
 
 - [ ] **Step 3: Implement**
@@ -724,7 +724,7 @@ RLCore.resolveStats = function (ship, owned) {
 
 - [ ] **Step 4: Run to verify they pass**
 
-Run: `node --test tests/`
+Run: `node --test tests/*.mjs`
 Expected: PASS, 23 tests.
 
 - [ ] **Step 5: Commit**
@@ -825,7 +825,7 @@ test('boss health scales with scrap spent and caps at 2.5x', () => {
 
 - [ ] **Step 2: Run to verify they fail**
 
-Run: `node --test tests/`
+Run: `node --test tests/*.mjs`
 Expected: FAIL — `core.stripCheapest is not a function`.
 
 - [ ] **Step 3: Implement**
@@ -869,7 +869,7 @@ RLCore.bossHpMultiplier = function (scrapSpent) {
 
 - [ ] **Step 4: Run to verify they pass**
 
-Run: `node --test tests/`
+Run: `node --test tests/*.mjs`
 Expected: PASS, 31 tests.
 
 - [ ] **Step 5: Commit**
@@ -1444,7 +1444,7 @@ test('TWIN CORE doubles every shot', () => {
 
 - [ ] **Step 2: Run to verify they fail**
 
-Run: `node --test tests/`
+Run: `node --test tests/*.mjs`
 Expected: FAIL — `core.buildShots is not a function`.
 
 - [ ] **Step 3: Implement in the pure block**
@@ -1469,7 +1469,7 @@ RLCore.buildShots = function (s) {
 
 - [ ] **Step 4: Run to verify they pass**
 
-Run: `node --test tests/`
+Run: `node --test tests/*.mjs`
 Expected: PASS, 36 tests.
 
 - [ ] **Step 5: Use it in the game**
@@ -1868,7 +1868,7 @@ git commit -m "feat: show scrap and the current build in the HUD"
 
 - [ ] **Step 1: Run the full test suite**
 
-Run: `node --test tests/`
+Run: `node --test tests/*.mjs`
 Expected: all tests pass. Record the count.
 
 - [ ] **Step 2: Confirm the pure block stayed pure**
