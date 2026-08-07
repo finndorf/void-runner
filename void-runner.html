@@ -31,7 +31,6 @@ window.addEventListener('resize', fitCanvas);
 // ===== CONFIG =====
 
 const CFG = {
-  creditsPerScore: 60,
   maxComboMultiplier: 8,   // uncapped, a long streak runs score into the millions
   levelSeconds: 24,
 
@@ -645,6 +644,17 @@ let runKills = 0;
 let runCredits = 0, creditsShown = 0;
 let selIndex = 0;   // start-screen ship selector
 
+// ---- ROGUELIKE RUN STATE (Task 8) ----
+let runUpgrades = [];       // [{id, stacks}] — this run only
+let scrap = 0, scrapSpent = 0;
+let stats = null;           // resolved by recomputeStats()
+let overchargeCount = 0, killsSinceLife = 0;
+
+function recomputeStats() {
+  stats = RLCore.resolveStats(currentShip(), runUpgrades);
+  player.speed = stats.speed;
+}
+
 // ---- STARS ----
 const starLayers = [
   Array.from({length:60}, () => ({x: Math.random()*W, y: Math.random()*H, r: 0.6, speed: 0.4})),
@@ -879,6 +889,11 @@ function startGame() {
   shootTimer = 0;
   dyingTimer = 0;
   boss = null; bossActive = false; bossWarning = 0;
+  runUpgrades = []; scrap = 0; scrapSpent = 0;
+  overchargeCount = 0; killsSinceLife = 0;
+  recomputeStats();
+  lives += stats.extraLives;
+  player.shieldCharges = stats.shieldCharges;
   FX.reset();
   Music.setBoss(false);
   Music.setIntensity(1);
@@ -909,7 +924,8 @@ function endRun() {
   Save.data.bestLevel = Math.max(Save.data.bestLevel, level);
   Save.data.totalRuns += 1;
   Save.data.totalKills += runKills;
-  runCredits = Math.floor(score / CFG.creditsPerScore);
+  runCredits = RLCore.creditsForScore(score);
+  Save.data.bestScrapSpent = Math.max(Save.data.bestScrapSpent, scrapSpent);
   creditsShown = 0;
   Save.data.credits += runCredits;
   Save.write();
@@ -1356,7 +1372,9 @@ const BOSS_W = 112, BOSS_H = 54;
 function bossMaxHp(lv) {
   // Tuned against real player DPS (~18 hits/sec at weapon level 3) for a
   // fight of roughly 20-30 seconds rather than a war of attrition.
-  return Math.round(340 + 160 * (lv / 5));
+  // Scaled by scrap actually spent so a boss only gets tougher when the
+  // player is actually stronger, not just for hoarding scrap.
+  return Math.round((340 + 160 * (lv / 5)) * RLCore.bossHpMultiplier(scrapSpent));
 }
 
 function spawnBoss(lv) {
@@ -1502,7 +1520,7 @@ function updateBoss() {
     if (bl.dead) return;
     if (Math.abs(bl.x - b.x) < BOSS_W/2 && Math.abs(bl.y - b.y) < BOSS_H/2) {
       if (bl.pierce > 0) bl.pierce--; else bl.dead = true;
-      b.hp--;
+      b.hp -= bl.damage;
       b.flash = Math.max(b.flash, 2);
       spawnParticles(bl.x, bl.y, '#ffaa44', 3);
       if (b.hp <= 0 && b.dying === 0) {
@@ -1556,7 +1574,8 @@ function fireWeapon() {
       x: player.x + s.dx, y: player.y - 10,
       vx: Math.sin(s.a) * BULLET_SPEED,
       vy: -Math.cos(s.a) * BULLET_SPEED,
-      w: 3, h: 10, pierce: 0, damage: 1, dead: false
+      w: 3, h: 10, pierce: stats.pierce, damage: stats.damage, dead: false,
+      homing: stats.homing, splash: stats.splash
     });
   });
   player.muzzle = 3;
@@ -1592,6 +1611,9 @@ function killEnemy(e) {
 
   const multiplier = comboMultiplier();
   score += st.points * multiplier;
+  // Scrap deliberately ignores the combo multiplier — score rewards a hot
+  // streak, but the shop economy stays predictable only if scrap does not.
+  scrap += RLCore.scrapForKill(st.points, stats.scrapMul);
   combo++; comboTimer = 120;
   addFlashText('+' + st.points*multiplier, e.x, e.y - 10, st.color);
 
@@ -1630,6 +1652,18 @@ function hitPlayer() {
     FX.addShake(6);
     Sound.play('shieldBreak');
     return;
+  }
+  // ---- Task 8: hit penalty ----
+  // Only a hit that actually lands (past both the shield and phase early
+  // returns above) strips an upgrade. Self-contained on purpose: a later
+  // task's shield logic will touch the rest of hitPlayer, not this block.
+  const res = RLCore.stripCheapest(runUpgrades);
+  runUpgrades = res.owned;
+  if (res.removed) {
+    const t = RLCore.tierOf(res.removed.tier);
+    const u = RLCore.UPGRADES.find(x => x.id === res.removed.id);
+    addFlashText('-' + u.name, player.x, player.y - 30, t.color);
+    recomputeStats();
   }
   lives--;
   player.invincible = 120;
@@ -1706,10 +1740,9 @@ function update() {
   if (player.shield > 0) player.shield--;
   if (player.boost > 0) player.boost--;
 
-  // Shooting (auto-fire). Fixed base pattern for now; boost only shortens
-  // the interval. Task 8 reconnects fire rate to resolveStats.
+  // Shooting (auto-fire). boost only shortens the interval.
   shootTimer++;
-  const fireRate = Math.max(4, Math.round(10 * player.fireMul * (player.boost > 0 ? 0.65 : 1)));
+  const fireRate = Math.max(4, Math.round(stats.fireRate * (player.boost > 0 ? 0.65 : 1)));
   if (shootTimer >= fireRate) {
     shootTimer = 0;
     fireWeapon();
@@ -1751,7 +1784,7 @@ function update() {
       if (b.dead || a.hp <= 0) return;
       if (Math.abs(b.x - a.x) < a.r + 2 && Math.abs(b.y - a.y) < a.r + 2) {
         if (b.pierce > 0) b.pierce--; else b.dead = true;
-        a.hp--;
+        a.hp -= b.damage;
         a.flash = 3;
         spawnParticles(b.x, b.y, '#aaaaaa', 4);
         Sound.play('hit');
@@ -1864,7 +1897,7 @@ function update() {
       if (b.dead || e.dead) return;
       if (Math.abs(b.x-e.x) < st.r*0.8 && Math.abs(b.y-e.y) < st.r*0.8) {
         if (b.pierce > 0) b.pierce--; else b.dead = true;
-        e.hp--;
+        e.hp -= b.damage;
         e.flash = 3;
         spawnParticles(b.x, b.y, st.color, 4);
         Sound.play('hit');
