@@ -1089,11 +1089,15 @@ function openShop() {
   shopSel = 0;
   haulerX = W + 120;
   state = 'shop';
-  if (shopSlots.some(s => s.tier === 'APEX')) {
-    Save.data.apexFound += 1; Save.write();
-    FX.addShake(10);
-    Sound.play('apex');
-  }
+  noteApex();
+}
+
+// Called from openShop and tryReroll alike, so an APEX rerolled into still counts.
+function noteApex() {
+  if (!shopSlots.some(s => s && s.tier === 'APEX')) return;
+  Save.data.apexFound += 1; Save.write();
+  FX.addShake(10);
+  Sound.play('apex');
 }
 
 function updateShop() {
@@ -1203,6 +1207,7 @@ function tryReroll() {
   scrapSpent += cost;
   shopRerolls++;
   shopSlots = RLCore.rollShop(level, runUpgrades, Math.random);
+  noteApex();
   Sound.play('uiMove');
   return true;
 }
@@ -1448,11 +1453,13 @@ Expected: FAIL — `core.buildShots is not a function`.
 RLCore.buildShots = function (s) {
   const n = 2 + s.extraShots;
   const step = 0.085 * s.spread;
+  const fan = s.extraShots > 0;   // the two base shots fly parallel, as they do today
   const shots = [];
-  // Centre the fan on straight-up: an even count straddles centre, an odd count includes it.
+  // Centre the pattern on straight-up and keep its total width at 20px, so the
+  // muzzles stay on the hull no matter how many shots there are.
   for (let i = 0; i < n; i++) {
     const off = i - (n - 1) / 2;
-    shots.push({ dx: off * 9, dy: -10, a: off * step });
+    shots.push({ dx: off * (n > 1 ? 20 / (n - 1) : 0), dy: -10, a: fan ? off * step : 0 });
   }
   if (s.rear)  shots.push({ dx: -6, dy: 12, a: Math.PI }, { dx: 6, dy: 12, a: -Math.PI });
   if (s.sides) shots.push({ dx: -14, dy: 0, a: -Math.PI/2 }, { dx: 14, dy: 0, a: Math.PI/2 });
@@ -1874,7 +1881,8 @@ const {readFileSync}=require('fs');
 const s=readFileSync('void-runner.html','utf8');
 const a=s.indexOf('// ===== ROGUELIKE CORE (PURE) =====');
 const b=s.indexOf('// ===== END ROGUELIKE CORE (PURE) =====');
-const body=s.slice(a,b);
+// Comments legitimately mention 'canvas' and 'DOM', so drop comment text first.
+const body=s.slice(a,b).split('\n').map(l=>{const i=l.indexOf('//');return i===-1?l:l.slice(0,i);}).join('\n');
 const bad=['document','window','ctx','canvas','Save.','Sound.','Math.random'];
 const hits=bad.filter(t=>body.includes(t));
 console.log(hits.length?'IMPURE: '+hits.join(', '):'pure block is clean');
