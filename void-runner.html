@@ -2504,12 +2504,18 @@ const DEPART_RECT = { x: W/2 + 10,  y: 474, w: 140, h: 34 };
 
 function tryBuySlot(i) {
   const u = shopSlots[i];
-  if (!u) return false;
-  const price = RLCore.tierOf(u.tier).price;
+  if (!u) { Sound.play('uiDeny'); return false; }
+  const t = RLCore.tierOf(u.tier);
+  const price = t.price;
   if (scrap < price) { Sound.play('uiDeny'); return false; }
+  const have = runUpgrades.find(o => o.id === u.id);
+  // Defensive: RLCore.eligible already keeps a maxed-out upgrade off the roll,
+  // so this should never trigger from live play, but a shop visit spans
+  // multiple purchases without re-rolling, so re-check here rather than trust
+  // the roll-time filter to still hold.
+  if (have && have.stacks >= t.stackLimit) { Sound.play('uiDeny'); return false; }
   scrap -= price;
   scrapSpent += price;
-  const have = runUpgrades.find(o => o.id === u.id);
   if (have) have.stacks++; else runUpgrades.push({ id: u.id, stacks: 1 });
   shopSlots[i] = null;
   recomputeStats();
@@ -2526,6 +2532,7 @@ function tryReroll() {
   scrapSpent += cost;
   shopRerolls++;
   shopSlots = RLCore.rollShop(level, runUpgrades, Math.random);
+  shopSel = Math.min(shopSel, Math.max(0, shopSlots.length - 1));
   noteApex();
   Sound.play('uiMove');
   return true;
