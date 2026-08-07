@@ -1560,6 +1560,23 @@ function updateBoss() {
       b.hp -= bl.damage;
       b.flash = Math.max(b.flash, 2);
       spawnParticles(bl.x, bl.y, '#ffaa44', 3);
+
+      // FLAK BURST / CHAIN LIGHTNING / SPLIT SHOT during a boss fight.
+      // applySplash/applyChain only ever touch the `enemies` array, so this
+      // cannot double-damage the boss itself — it lets those upgrades still
+      // do something (hit whatever minions the boss has spawned) instead of
+      // going dead silent for the entire fight.
+      if (bl.splash > 0) applySplash(bl.x, bl.y, bl.splash, bl.damage * 0.6);
+      if (stats.chain > 0) applyChain(bl.x, bl.y, stats.chain, bl.damage * 0.5);
+      if (bl.split && !bl.isSplit) {
+        [-0.5, 0.5].forEach(a => bullets.push({
+          x: bl.x, y: bl.y,
+          vx: Math.sin(a) * BULLET_SPEED, vy: -Math.cos(a) * BULLET_SPEED,
+          w: 3, h: 10, pierce: 0, damage: bl.damage * 0.5, homing: 0, splash: 0,
+          split: false, isSplit: true, crit: false, dead: false
+        }));
+      }
+
       if (b.hp <= 0 && b.dying === 0) {
         b.hp = 0;
         b.dying = 45; b.deathTick = 0;
@@ -1636,6 +1653,26 @@ function spawnParticles(x, y, color, count) {
   }
 }
 
+// Single definition of "what happens when an enemy takes damage". Every path
+// that can hurt an enemy — the direct bullet/enemy collision, applySplash and
+// applyChain — routes through here so they can't disagree about it. In
+// particular: a mine is supposed to arm (not die outright) once its hp hits
+// zero, however that damage arrived. Before this existed, applySplash and
+// applyChain called killEnemy directly with no mine check at all, so FLAK
+// BURST/CHAIN LIGHTNING silently killed mines instead of letting them arm and
+// detonate — including a *directly*-hit mine, since a mine's 2 hp is often
+// wiped out by the splash from its own impact before a per-site special case
+// would ever get a turn to run.
+function damageEnemy(e, dmg) {
+  if (e.dead) return;
+  e.hp -= dmg;
+  e.flash = 4;
+  if (e.hp <= 0) {
+    if (e.kind === 'mine') { e.hp = 1; if (e.arming === 0) e.arming = 30; }
+    else killEnemy(e);
+  }
+}
+
 // Flak Burst: on-impact AoE against nearby enemies. Deliberately does not
 // call itself (or trigger further splash) — one blast per impact.
 function applySplash(x, y, radius, damage) {
@@ -1643,8 +1680,7 @@ function applySplash(x, y, radius, damage) {
   enemies.forEach(e => {
     if (e.dead) return;
     if ((e.x - x) ** 2 + (e.y - y) ** 2 <= radius * radius) {
-      e.hp -= damage; e.flash = 4;
-      if (e.hp <= 0) killEnemy(e);
+      damageEnemy(e, damage);
     }
   });
   FX.explode(x, y, radius * 0.7, '#ffaa44');
@@ -1669,9 +1705,8 @@ function applyChain(x, y, hops, damage) {
     });
     if (!best) return;
     hit.push(best);
-    best.hp -= damage; best.flash = 4;
     spawnParticles(best.x, best.y, '#88ddff', 6);
-    if (best.hp <= 0) killEnemy(best);
+    damageEnemy(best, damage);
     from = best;
   }
 }
@@ -2001,31 +2036,27 @@ function update() {
       if (b.dead || e.dead) return;
       if (Math.abs(b.x-e.x) < st.r*0.8 && Math.abs(b.y-e.y) < st.r*0.8) {
         if (b.pierce > 0) b.pierce--; else b.dead = true;
-        e.hp -= b.damage;
-        e.flash = 3;
         spawnParticles(b.x, b.y, st.color, 4);
         Sound.play('hit');
+        // damageEnemy applies the hp loss and decides mine-arms-vs-dies; see
+        // its definition for why that decision lives in one place.
+        damageEnemy(e, b.damage);
 
         // On-impact bullet behaviours (Task 12). These fire on every hit,
-        // independent of whether this hit kills the enemy.
+        // independent of whether this hit kills the enemy. Split children
+        // re-enter this same collision path on their own later hits, so
+        // CHAIN LIGHTNING (which reads the global stats.chain rather than a
+        // per-bullet flag) will trigger off them too — that's intentional
+        // and bounded by the hop count, not something to guard against.
         if (b.splash > 0) applySplash(e.x, e.y, b.splash, b.damage * 0.6);
         if (stats.chain > 0) applyChain(e.x, e.y, stats.chain, b.damage * 0.5);
         if (b.split && !b.isSplit) {
           [-0.5, 0.5].forEach(a => bullets.push({
             x: e.x, y: e.y,
             vx: Math.sin(a) * BULLET_SPEED, vy: -Math.cos(a) * BULLET_SPEED,
-            w: 3, h: 8, pierce: 0, damage: b.damage * 0.5, homing: 0, splash: 0,
+            w: 3, h: 10, pierce: 0, damage: b.damage * 0.5, homing: 0, splash: 0,
             split: false, isSplit: true, crit: false, dead: false
           }));
-        }
-
-        // !e.dead guards against a double-kill: applySplash's blast radius
-        // includes the directly-hit enemy itself (distance 0), so it may
-        // already have called killEnemy(e) above.
-        if (e.hp <= 0 && !e.dead) {
-          // A shot mine arms rather than dying outright, so it still detonates.
-          if (e.kind === 'mine') { e.hp = 1; if (e.arming === 0) e.arming = 30; }
-          else killEnemy(e);
         }
       }
     });
