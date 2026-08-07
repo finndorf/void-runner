@@ -2697,7 +2697,7 @@ function tryBuySlot(i) {
   if (have) have.stacks++; else runUpgrades.push({ id: u.id, stacks: 1 });
   shopSlots[i] = null;
   recomputeStats();
-  if (u.effect.shieldCharges) player.shieldCharges = stats.shieldCharges;
+  if (u.effect.shieldCharges) player.shieldCharges = Math.max(player.shieldCharges, stats.shieldCharges);
   if (u.effect.lives || u.effect.extraLife) lives += (u.effect.lives || 0) + (u.effect.extraLife || 0);
   Sound.play('uiBuy');
   return true;
