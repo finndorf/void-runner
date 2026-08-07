@@ -195,3 +195,65 @@ test('a shop rolls three upgrades with no duplicates', () => {
     assert.equal(new Set(shop.map(u => u.id)).size, 3);
   }
 });
+
+// Deterministic RNG factory shared by the two tests below: two generators
+// built from the same seed produce identical sequences, which lets a test
+// "peek" at what a single rnd() draw would yield before feeding an
+// independently-seeded generator into the function under test.
+const seededRnd = (seed) => {
+  let s = seed;
+  return () => ((s = (s * 1103515245 + 12345) & 0x7fffffff) / 0x7fffffff);
+};
+
+test('a shop still returns 3 slots when COMMON and UNCOMMON are maxed out, by promoting to a rarer tier', () => {
+  const core = loadCore();
+  // The exact scenario the reviewer found: every COMMON and UNCOMMON upgrade
+  // owned at its stack limit (5). RARE and above are completely untouched
+  // (17 eligible upgrades remain), so a shop must never come up short.
+  const owned = core.UPGRADES
+    .filter(u => u.tier === 'COMMON' || u.tier === 'UNCOMMON')
+    .map(u => ({ id: u.id, stacks: 5 }));
+  const rareOrBetter = new Set(['RARE', 'EPIC', 'LEGENDARY', 'APEX']);
+  const rnd = seededRnd(7);
+  for (let i = 0; i < 500; i++) {
+    const shop = core.rollShop(4, owned, rnd);
+    assert.equal(shop.length, 3, `iteration ${i}: expected 3 slots, got ${shop.length}`);
+    assert.equal(new Set(shop.map(u => u.id)).size, 3, `iteration ${i}: duplicate upgrade in shop`);
+    for (const u of shop) {
+      assert.ok(rareOrBetter.has(u.tier), `iteration ${i}: expected RARE or better, got ${u.tier}`);
+    }
+  }
+});
+
+test('promotion never reaches into APEX from a lower rolled tier', () => {
+  const core = loadCore();
+  // Every non-APEX upgrade owned past its stack limit; the 3 APEX upgrades
+  // are completely untouched. If upward promotion were not capped below
+  // APEX, any non-APEX roll in this state would still find and return one
+  // of those 3 APEX upgrades (they're the only eligible upgrades left at
+  // all). The correct, capped implementation must instead return null for
+  // those rolls -- proving the cap is actually doing something, not just
+  // passing because APEX happened not to come up.
+  const owned = core.UPGRADES
+    .filter(u => u.tier !== 'APEX')
+    .map(u => ({ id: u.id, stacks: 5 }));
+  const level = 12;
+  let sawNonApexRoll = false;
+  let sawCapProvenByNullFallback = false;
+  for (let seed = 1; seed <= 3000; seed++) {
+    const rolledTier = core.rollRarity(level, seededRnd(seed));
+    const picked = core.rollSlot(level, owned, seededRnd(seed));
+    if (rolledTier === 'APEX') continue;
+    sawNonApexRoll = true;
+    assert.ok(
+      !picked || picked.tier !== 'APEX',
+      `seed ${seed}: rollRarity landed on ${rolledTier} but rollSlot returned an APEX upgrade (${picked && picked.id})`
+    );
+    if (picked === null) sawCapProvenByNullFallback = true;
+  }
+  assert.ok(sawNonApexRoll, 'test setup never exercised a non-APEX roll -- seeds need adjusting');
+  assert.ok(
+    sawCapProvenByNullFallback,
+    'test never hit a state where an uncapped search would have leaked APEX -- assertion above would pass vacuously'
+  );
+});

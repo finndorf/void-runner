@@ -172,7 +172,11 @@ RLCore.UPGRADES = [
   { id: 'immortal',     tier: 'APEX', name: 'IMMORTAL ENGINE', desc: 'your first death is survivable',  effect: { extraLife: 1 } }
 ];
 
-RLCore.tierOf = function (id) { return RLCore.TIERS.find(t => t.id === id); };
+RLCore.tierOf = function (id) {
+  const t = RLCore.TIERS.find(t => t.id === id);
+  if (!t) throw new Error(`RLCore.tierOf: unknown tier id "${id}"`);
+  return t;
+};
 
 RLCore.eligible = function (tier, owned) {
   const limit = RLCore.tierOf(tier).stackLimit;
@@ -185,16 +189,35 @@ RLCore.eligible = function (tier, owned) {
 
 RLCore.rollSlot = function (level, owned, rnd, exclude) {
   const skip = exclude || [];
+  const poolFor = (tierId) => RLCore.eligible(tierId, owned).filter(u => !skip.includes(u.id));
+
   // rollRarity consumes rnd() and must be called exactly once per slot: calling
-  // it inside the findIndex predicate would re-invoke it (with a fresh random
-  // draw) for every tier checked, since Array#findIndex calls the predicate
-  // once per element until it matches.
+  // it inside a loop predicate would re-invoke it (with a fresh random draw)
+  // for every tier checked, which is not a single stable roll.
   const rarity = RLCore.rollRarity(level, rnd);
-  let idx = RLCore.TIERS.findIndex(t => t.id === rarity);
-  for (; idx >= 0; idx--) {
-    const pool = RLCore.eligible(RLCore.TIERS[idx].id, owned).filter(u => !skip.includes(u.id));
+  const startIdx = RLCore.TIERS.findIndex(t => t.id === rarity);
+  const legendaryIdx = RLCore.TIERS.length - 2; // TIERS is COMMON..APEX; APEX is the last entry.
+
+  // A shop slot must never come up empty while eligible upgrades remain, so
+  // an exhausted tier promotes to a rarer one first: maxing out cheap
+  // upgrades should make shops show better goods, not filler-then-nothing.
+  // The walk stops at LEGENDARY -- never promote INTO APEX -- so its 0.3%
+  // rate stays a fixed promise to the player. A roll that lands on APEX
+  // directly (rarity === 'APEX') still checks its own pool normally; that's
+  // not promotion, it's the roll rollRarity already made.
+  const upperCap = rarity === 'APEX' ? RLCore.TIERS.length - 1 : legendaryIdx;
+  for (let idx = startIdx; idx <= upperCap; idx++) {
+    const pool = poolFor(RLCore.TIERS[idx].id);
     if (pool.length) return pool[Math.floor(rnd() * pool.length)];
   }
+
+  // Nothing eligible at or above the rolled tier (within the APEX-safe
+  // range): fall back downward toward COMMON.
+  for (let idx = startIdx - 1; idx >= 0; idx--) {
+    const pool = poolFor(RLCore.TIERS[idx].id);
+    if (pool.length) return pool[Math.floor(rnd() * pool.length)];
+  }
+
   return null;
 };
 
