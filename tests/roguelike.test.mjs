@@ -376,7 +376,17 @@ test('reroll cost doubles from 300', () => {
 test('boss health scales with scrap spent and caps at 2.5x', () => {
   const core = loadCore();
   assert.equal(core.bossHpMultiplier(0), 1);
-  assert.ok(Math.abs(core.bossHpMultiplier(6000) - 1.5) < 1e-9);
+  assert.ok(Math.abs(core.bossHpMultiplier(6000) - 1.75) < 1e-9);
   assert.equal(core.bossHpMultiplier(12000), 2.5);
   assert.equal(core.bossHpMultiplier(999999), 2.5);
+});
+
+test('bossHpMultiplier is monotonically non-decreasing', () => {
+  const core = loadCore();
+  let prev = core.bossHpMultiplier(0);
+  for (let spent = 1000; spent <= 20000; spent += 1000) {
+    const curr = core.bossHpMultiplier(spent);
+    assert.ok(curr >= prev, `multiplier decreased: at ${spent} got ${curr}, was ${prev}`);
+    prev = curr;
+  }
 });

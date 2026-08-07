@@ -311,12 +311,10 @@ RLCore.creditsForScore = function (score) { return Math.floor(score / RLCore.CRE
 RLCore.rerollCost = function (uses) { return 300 * Math.pow(2, uses); };
 
 // Spent, not earned: hoarding scrap should not summon a tougher boss, only
-// actually being stronger should.
+// actually being stronger should. The 12,000-scrap cap is provisional and will
+// be tuned during Task 16 playtesting.
 RLCore.bossHpMultiplier = function (scrapSpent) {
-  if (scrapSpent <= 6000) {
-    return 1 + scrapSpent / 12000;
-  }
-  return Math.min(2.5, 1.5 + (scrapSpent - 6000) / 6000);
+  return 1 + 1.5 * Math.min(1, scrapSpent / 12000);
 };
 
 // ===== END ROGUELIKE CORE (PURE) =====
