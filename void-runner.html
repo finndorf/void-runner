@@ -676,8 +676,14 @@ let stats = null;           // resolved by recomputeStats()
 let overchargeCount = 0, killsSinceLife = 0;
 
 function recomputeStats() {
-  stats = RLCore.resolveStats(currentShip(), runUpgrades);
+  const ship = currentShip();
+  stats = RLCore.resolveStats(ship, runUpgrades);
   player.speed = stats.speed;
+  // Evasion Field shrinks the hitbox relative to the ship's base size.
+  // Recomputed here (not applyShip) so it updates live whenever the build
+  // changes, since applyShip runs once at game start before stats exist.
+  player.w = ship.hitW * stats.hitScale;
+  player.h = ship.hitH * stats.hitScale;
 }
 
 // ---- STARS ----
@@ -698,7 +704,7 @@ const nebulae = Array.from({length: 5}, () => ({
 // ---- PLAYER ----
 const player = {
   x: W/2, y: H - 120, w: 28, h: 36, speed: 5.5,
-  invincible: 0, shield: 0, boost: 0, trail: [],
+  invincible: 0, shieldCharges: 0, shieldRegenTimer: 0, boost: 0, trail: [],
   muzzle: 0,
   fireMul: 1, spreadMul: 1   // set per ship
 };
@@ -916,14 +922,16 @@ function applyShip(def) {
   player.canPhase = def.phase;
   player.phaseReady = def.phase;
   lives = def.lives;
-  if (def.id === 'bulwark') player.shield = 180;
+  // Bulwark's starting shield charge is added in startGame, after
+  // player.shieldCharges is set from stats — applyShip runs first and would
+  // otherwise have its bonus wiped out by that assignment.
 }
 
 function startGame() {
   const ship = currentShip();
   state = 'play';
   score = 0; level = 1; frame = 0; runKills = 0;
-  player.x = W/2; player.y = H - 120; player.invincible = 0; player.shield = 0; player.boost = 0; player.trail = [];
+  player.x = W/2; player.y = H - 120; player.invincible = 0; player.shieldCharges = 0; player.shieldRegenTimer = 0; player.boost = 0; player.trail = [];
   applyShip(ship);
   bullets = []; enemyBullets = []; asteroids = []; enemies = []; particles = []; flashText = [];
   spawnTimer = 0; asteroidTimer = 0; levelTimer = 0; spawnCycle = 0; combo = 0; comboTimer = 0; levelBanner = null;
@@ -936,6 +944,9 @@ function startGame() {
   recomputeStats();
   lives += stats.extraLives;
   player.shieldCharges = stats.shieldCharges;
+  // Bulwark starts each run with one shield charge already up. Added here,
+  // after the stats-based assignment above, so it isn't wiped out by it.
+  if (ship.id === 'bulwark') player.shieldCharges += 1;
   FX.reset();
   Music.setBoss(false);
   Music.setIntensity(1);
@@ -1053,12 +1064,17 @@ function drawShip(x, y, invincible, shield, boost, t, muzzle, shipDef) {
     ctx.restore();
   }
 
-  // Shield bubble
+  // Shield charges — `shield` is now a charge count, not a frame timer.
+  // One ring per charge, capped at 3 so it can't visually run away.
   if (shield > 0) {
     let alpha = 0.3 + 0.2*Math.sin(t*0.2);
-    ctx.beginPath(); ctx.arc(0, 0, 32, 0, Math.PI*2);
-    ctx.strokeStyle = `rgba(0,255,255,${alpha})`; ctx.lineWidth = 2.5; ctx.stroke();
-    ctx.fillStyle = `rgba(0,200,255,${alpha*0.2})`; ctx.fill();
+    const rings = Math.min(shield, 3);
+    for (let i = 0; i < rings; i++) {
+      ctx.beginPath(); ctx.arc(0, 0, 26 + i*5, 0, Math.PI*2);
+      ctx.strokeStyle = `rgba(0,255,255,${alpha})`; ctx.lineWidth = 2.5; ctx.stroke();
+    }
+    ctx.fillStyle = `rgba(0,200,255,${alpha*0.15})`;
+    ctx.beginPath(); ctx.arc(0, 0, 26, 0, Math.PI*2); ctx.fill();
   }
 
   ctx.restore();
@@ -1501,7 +1517,7 @@ function updateBoss() {
     // Radial bullet ring.
     if (b.attackTimer >= 120) {
       b.attackTimer = 0;
-      const spd = diff.bulletSpeed * 0.85;
+      const spd = diff.bulletSpeed * 0.85 * stats.enemyBulletMul;
       for (let i = 0; i < 12; i++) {
         const a = (i/12)*Math.PI*2;
         enemyBullets.push({x: b.x, y: b.y, vx: Math.cos(a)*spd, vy: Math.sin(a)*spd, r: 5, elite: true, dead: false});
@@ -1545,7 +1561,7 @@ function updateBoss() {
     if (b.attackTimer >= 70) {
       b.attackTimer = 0;
       const a = Math.atan2(player.y - b.y, player.x - b.x);
-      const spd = diff.bulletSpeed;
+      const spd = diff.bulletSpeed * stats.enemyBulletMul;
       [-0.22, 0, 0.22].forEach(o => {
         enemyBullets.push({x: b.x, y: b.y + 20, vx: Math.cos(a+o)*spd, vy: Math.sin(a+o)*spd, r: 5, elite: true, dead: false});
       });
@@ -1729,6 +1745,14 @@ function killEnemy(e) {
   // Scrap deliberately ignores the combo multiplier — score rewards a hot
   // streak, but the shop economy stays predictable only if scrap does not.
   scrap += RLCore.scrapForKill(st.points, stats.scrapMul);
+  // Vampiric Core: a life back every stats.lifePerKills kills.
+  if (stats.lifePerKills > 0) {
+    killsSinceLife++;
+    if (killsSinceLife >= stats.lifePerKills) {
+      killsSinceLife = 0; lives++;
+      addFlashText('+1 LIFE', player.x, player.y - 40, '#44ff88');
+    }
+  }
   combo++; comboTimer = 120;
   addFlashText('+' + st.points*multiplier, e.x, e.y - 10, st.color);
 
@@ -1749,13 +1773,17 @@ function addFlashText(text, x, y, color) {
 }
 
 function hitPlayer() {
-  if (player.invincible > 0 || player.shield > 0) {
-    if (player.shield > 0) {
-      player.shield = 0;
-      FX.addShake(10);
-      FX.explode(player.x, player.y, 22, '#00ffff');
-      Sound.play('shieldBreak');
-    }
+  if (player.invincible > 0) return;
+  // Phase Drive: boosting phases the ship through everything, no cost at all.
+  if (stats.phaseBoost && player.boost > 0) return;
+  // Plating / Fortress / Kinetic Barrier all just add to this same charge
+  // count — one system, no separate timer.
+  if (player.shieldCharges > 0) {
+    player.shieldCharges--;
+    player.invincible = 60;
+    FX.addShake(10);
+    FX.explode(player.x, player.y, 22, '#00ffff');
+    Sound.play('shieldBreak');
     return;
   }
   // Phantom slips through one hit per level.
@@ -1852,8 +1880,18 @@ function update() {
   player.trail = player.trail.filter(t => t.life > 0);
 
   if (player.invincible > 0) player.invincible--;
-  if (player.shield > 0) player.shield--;
   if (player.boost > 0) player.boost--;
+
+  // Kinetic Barrier: regenerate one shield charge every stats.shieldRegen
+  // frames. Capped so it can't grow without bound if it's left to regen
+  // uninterrupted for a whole run.
+  if (stats.shieldRegen > 0) {
+    player.shieldRegenTimer = (player.shieldRegenTimer || 0) + 1;
+    if (player.shieldRegenTimer >= stats.shieldRegen) {
+      player.shieldRegenTimer = 0;
+      player.shieldCharges = Math.min(player.shieldCharges + 1, stats.shieldCharges + 3);
+    }
+  }
 
   // Shooting (auto-fire). boost only shortens the interval.
   shootTimer++;
@@ -1992,7 +2030,7 @@ function update() {
       if (e.shootTimer >= eRate) {
         e.shootTimer = 0;
         const angle = Math.atan2(player.y - e.y, player.x - e.x);
-        const spd2 = diff.bulletSpeed;
+        const spd2 = diff.bulletSpeed * stats.enemyBulletMul;
         enemyBullets.push({x: e.x, y: e.y + 10, vx: Math.cos(angle)*spd2, vy: Math.sin(angle)*spd2, r: 4, elite: e.kind === 'elite', dead: false});
         if (e.kind === 'elite') {
           [-0.3, 0.3].forEach(o => {
@@ -2008,7 +2046,7 @@ function update() {
         if (e.burstTimer <= 0) {
           e.burstTimer = 8;
           e.burstLeft--;
-          const spd2 = diff.bulletSpeed * 1.15;
+          const spd2 = diff.bulletSpeed * 1.15 * stats.enemyBulletMul;
           enemyBullets.push({x: e.x, y: e.y + 12, vx: Math.cos(e.aim)*spd2, vy: Math.sin(e.aim)*spd2, r: 4.5, elite: true, dead: false});
         }
       }
@@ -2186,7 +2224,7 @@ function draw() {
       ctx.restore();
     });
 
-    if (state === 'play') drawShip(player.x, player.y, player.invincible, player.shield, player.boost, frame, player.muzzle);
+    if (state === 'play') drawShip(player.x, player.y, player.invincible, player.shieldCharges, player.boost, frame, player.muzzle);
 
     particles.forEach(p => {
       let alpha = p.life / p.maxLife;
@@ -2331,13 +2369,16 @@ function drawHUD() {
 
   // Shield/boost bars drop below the boss health bar when a fight is live.
   let barY = (boss && boss.dying === 0) ? 70 : 48;
-  if (player.shield > 0) {
-    ctx.fillStyle = 'rgba(0,200,255,0.2)';
-    ctx.fillRect(8, barY, (W-16)*(player.shield/180), 5);
-    ctx.strokeStyle = '#00ccff'; ctx.lineWidth=1;
-    ctx.strokeRect(8, barY, W-16, 5);
+  // Shield is a charge count now, not a fraction of a timer, so it draws as
+  // one pip per charge rather than a draining bar.
+  if (player.shieldCharges > 0) {
     ctx.fillStyle = '#00ccff'; ctx.font='9px monospace'; ctx.textAlign='left';
-    ctx.fillText('SHIELD', 8, barY+14);
+    ctx.fillText('SHIELD', 8, barY+9);
+    for (let i = 0; i < player.shieldCharges; i++) {
+      ctx.beginPath(); ctx.arc(54 + i*14, barY+5, 5, 0, Math.PI*2);
+      ctx.fillStyle = 'rgba(0,200,255,0.35)'; ctx.fill();
+      ctx.strokeStyle = '#00ccff'; ctx.lineWidth = 1; ctx.stroke();
+    }
     barY += 20;
   }
   if (player.boost > 0) {
