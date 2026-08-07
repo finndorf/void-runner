@@ -2314,9 +2314,11 @@ function draw() {
       ctx.restore();
     });
 
-    if (state === 'play') drawShip(player.x, player.y, player.invincible, player.shieldCharges, player.boost, frame, player.muzzle);
-    drawDrones();
-    drawSingularity();
+    if (state === 'play') {
+      drawShip(player.x, player.y, player.invincible, player.shieldCharges, player.boost, frame, player.muzzle);
+      drawDrones();
+      drawSingularity();
+    }
 
     particles.forEach(p => {
       let alpha = p.life / p.maxLife;
