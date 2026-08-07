@@ -230,6 +230,57 @@ RLCore.rollShop = function (level, owned, rnd) {
   return out;
 };
 
+RLCore.BASE_FIRE_RATE = 10;
+RLCore.MIN_FIRE_RATE = 4;
+
+RLCore.resolveStats = function (ship, owned) {
+  const sum = key => owned.reduce((acc, o) => {
+    const u = RLCore.UPGRADES.find(x => x.id === o.id);
+    const v = u && u.effect[key];
+    return acc + (typeof v === 'number' ? v * o.stacks : 0);
+  }, 0);
+  const has = key => owned.some(o => {
+    const u = RLCore.UPGRADES.find(x => x.id === o.id);
+    return u && u.effect[key] === true;
+  });
+  const max = key => owned.reduce((acc, o) => {
+    const u = RLCore.UPGRADES.find(x => x.id === o.id);
+    const v = u && u.effect[key];
+    return typeof v === 'number' ? Math.max(acc, v) : acc;
+  }, 0);
+
+  // Fire rate is an interval in frames, so a bonus divides rather than multiplies.
+  const rate = RLCore.BASE_FIRE_RATE * ship.fireMul / (1 + sum('fireRateMul'));
+
+  return {
+    fireRate: Math.max(RLCore.MIN_FIRE_RATE, rate),
+    damage: 1 * (1 + sum('damageMul')),
+    speed: ship.speed * (1 + sum('speedMul')),
+    spread: ship.spreadMul * (1 + sum('spreadMul')),
+    hitScale: 1 + sum('hitScaleMul'),
+    shieldCharges: sum('shieldCharges'),
+    extraShots: sum('extraShots'),
+    extraLives: sum('lives') + sum('extraLife'),
+    scrapMul: 1 + sum('scrapMul'),
+    pierce: sum('pierce'),
+    homing: max('homing'),
+    splash: max('splash'),
+    shieldRegen: max('shieldRegen'),
+    overcharge: max('overcharge'),
+    lifePerKills: max('lifePerKills'),
+    drones: sum('drones'),
+    chain: max('chain'),
+    fortress: max('fortress'),
+    enemyBulletMul: 1 + sum('enemyBulletMul'),
+    split: has('split'),
+    rear: has('rear'),
+    sides: has('sides'),
+    phaseBoost: has('phaseBoost'),
+    twinCore: has('twinCore'),
+    singularity: has('singularity')
+  };
+};
+
 // ===== END ROGUELIKE CORE (PURE) =====
 
 // ===== SAVE =====

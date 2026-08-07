@@ -257,3 +257,58 @@ test('promotion never reaches into APEX from a lower rolled tier', () => {
     'test never hit a state where an uncapped search would have leaked APEX -- assertion above would pass vacuously'
   );
 });
+
+const SHIP = { id: 'vanguard', lives: 3, speed: 5.5, fireMul: 1.0, spreadMul: 1.0 };
+
+test('with no upgrades the stats are the ship baseline', () => {
+  const core = loadCore();
+  const s = core.resolveStats(SHIP, []);
+  assert.equal(s.fireRate, 10);
+  assert.equal(s.damage, 1);
+  assert.equal(s.speed, 5.5);
+  assert.equal(s.extraShots, 0);
+  assert.equal(s.pierce, 0);
+  assert.equal(s.twinCore, false);
+});
+
+test('stacked multipliers add before applying', () => {
+  const core = loadCore();
+  const s = core.resolveStats(SHIP, [{ id: 'heavy_rounds', stacks: 3 }]);
+  assert.ok(Math.abs(s.damage - 1.30) < 1e-9);
+});
+
+test('fire rate improves by shortening the interval, and never goes below 4', () => {
+  const core = loadCore();
+  const s = core.resolveStats(SHIP, [{ id: 'reload_coil', stacks: 5 }]);
+  assert.ok(s.fireRate < 10);
+  const capped = core.resolveStats(SHIP, [
+    { id: 'reload_coil', stacks: 5 }, { id: 'twin_feed', stacks: 5 }
+  ]);
+  assert.ok(capped.fireRate >= 4, `fireRate fell to ${capped.fireRate}`);
+});
+
+test('flags come through from rare and above', () => {
+  const core = loadCore();
+  const s = core.resolveStats(SHIP, [
+    { id: 'piercing', stacks: 1 }, { id: 'rear_cannon', stacks: 1 },
+    { id: 'twin_core', stacks: 1 }, { id: 'orbital_drone', stacks: 1 }
+  ]);
+  assert.equal(s.pierce, 1);
+  assert.equal(s.rear, true);
+  assert.equal(s.twinCore, true);
+  assert.equal(s.drones, 1);
+});
+
+test('ship fireMul still matters', () => {
+  const core = loadCore();
+  const fast = core.resolveStats({ ...SHIP, fireMul: 0.62 }, []);
+  assert.ok(fast.fireRate < 10);
+});
+
+test('scrap multiplier accumulates across both scrap upgrades', () => {
+  const core = loadCore();
+  const s = core.resolveStats(SHIP, [
+    { id: 'scrap_magnet', stacks: 5 }, { id: 'salvage_rig', stacks: 5 }
+  ]);
+  assert.ok(Math.abs(s.scrapMul - 2.5) < 1e-9);
+});
