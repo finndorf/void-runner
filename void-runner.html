@@ -70,21 +70,43 @@ const CFG = {
 
 const RLCore = {};
 
+RLCore.SAVE_VERSION = 2;
+
+// Upgrading rather than resetting is the whole point: the old loader threw away
+// any save whose version did not match, which would wipe every player's credits
+// and ships the moment the format changed.
+RLCore.migrateSave = function (parsed, defaults) {
+  if (!parsed || typeof parsed !== 'object') return { data: defaults, ok: false };
+  const v = parsed.version;
+  if (v !== 1 && v !== RLCore.SAVE_VERSION) return { data: defaults, ok: false };
+
+  const data = Object.assign({}, defaults, parsed);
+  data.version = RLCore.SAVE_VERSION;
+  if (v === 1) {
+    data.bestScrapSpent = 0;
+    data.apexFound = 0;
+  }
+  if (!Array.isArray(data.unlocked) || !data.unlocked.length) data.unlocked = ['vanguard'];
+  if (typeof data.selectedShip !== 'string' || !data.unlocked.includes(data.selectedShip)) data.selectedShip = 'vanguard';
+  return { data, ok: true };
+};
+
 // ===== END ROGUELIKE CORE (PURE) =====
 
 // ===== SAVE =====
 
 const Save = {
   KEY: 'voidrunner.save',
-  VERSION: 1,
+  VERSION: RLCore.SAVE_VERSION,
   ok: true,
   data: null,
 
   defaults() {
     return {
-      version: 1,
+      version: RLCore.SAVE_VERSION,
       hiScore: 0, bestLevel: 1, totalRuns: 0, totalKills: 0,
-      credits: 0, unlocked: ['vanguard'], selectedShip: 'vanguard', muted: false
+      credits: 0, unlocked: ['vanguard'], selectedShip: 'vanguard', muted: false,
+      bestScrapSpent: 0, apexFound: 0
     };
   },
 
@@ -93,16 +115,12 @@ const Save = {
     try {
       const raw = localStorage.getItem(Save.KEY);
       if (raw) {
-        const parsed = JSON.parse(raw);
-        // An unrecognized version resets to defaults rather than crashing.
-        if (parsed && parsed.version === Save.VERSION) {
-          Object.assign(Save.data, parsed);
-          if (!Array.isArray(Save.data.unlocked) || !Save.data.unlocked.length) Save.data.unlocked = ['vanguard'];
-          if (!CFG.ships.some(s => s.id === Save.data.selectedShip)) Save.data.selectedShip = 'vanguard';
-        }
+        const { data } = RLCore.migrateSave(JSON.parse(raw), Save.defaults());
+        Save.data = data;
+        if (!CFG.ships.some(s => s.id === Save.data.selectedShip)) Save.data.selectedShip = 'vanguard';
+        Save.write();
       }
     } catch (e) {
-      // Storage blocked or corrupt: run from memory with defaults.
       Save.ok = false;
       Save.data = Save.defaults();
     }
