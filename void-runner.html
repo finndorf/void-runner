@@ -147,7 +147,7 @@ RLCore.UPGRADES = [
   { id: 'rear_cannon',  tier: 'EPIC', name: 'REAR CANNON',  desc: 'you also fire backwards',    effect: { rear: true } },
   { id: 'side_pods',    tier: 'EPIC', name: 'SIDE PODS',    desc: 'you also fire left and right',effect: { sides: true } },
   { id: 'flak_burst',   tier: 'EPIC', name: 'FLAK BURST',   desc: 'shots explode on impact',    effect: { splash: 30 } },
-  { id: 'phase_drive',  tier: 'EPIC', name: 'PHASE DRIVE',  desc: 'boost grants invulnerability',effect: { phaseBoost: true } },
+  { id: 'phase_drive',  tier: 'EPIC', name: 'PHASE DRIVE',  desc: 'phase through a hit every 12s',effect: { phaseDrive: true } },
   { id: 'vampiric',     tier: 'EPIC', name: 'VAMPIRIC CORE',desc: 'a life back every 30 kills', effect: { lifePerKills: 30 } },
 
   // --- LEGENDARY ---
@@ -223,6 +223,15 @@ RLCore.rollShop = function (level, owned, rnd) {
 RLCore.BASE_FIRE_RATE = 10;
 RLCore.MIN_FIRE_RATE = 4;
 
+// PHASE DRIVE recharges a single free hit on this cadence (12s at 60fps). It
+// is self-contained: the boost mechanic it was originally bolted to was
+// removed with the powerup orbs, so it owns its own timer.
+RLCore.PHASE_DRIVE_FRAMES = 720;
+
+// REPAIR KIT is capped by the spec at "the ship's starting lives + 2", so the
+// stack of five it can reach may only ever contribute two of those lives.
+RLCore.REPAIR_KIT_MAX = 2;
+
 RLCore.resolveStats = function (ship, owned) {
   const sum = key => owned.reduce((acc, o) => {
     const u = RLCore.UPGRADES.find(x => x.id === o.id);
@@ -250,7 +259,7 @@ RLCore.resolveStats = function (ship, owned) {
     hitScale: 1 + sum('hitScaleMul'),
     shieldCharges: sum('shieldCharges'),
     extraShots: sum('extraShots'),
-    extraLives: sum('lives') + sum('extraLife'),
+    extraLives: Math.min(RLCore.REPAIR_KIT_MAX, sum('lives')) + sum('extraLife'),
     scrapMul: 1 + sum('scrapMul'),
     pierce: sum('pierce'),
     homing: max('homing'),
@@ -265,7 +274,7 @@ RLCore.resolveStats = function (ship, owned) {
     split: has('split'),
     rear: has('rear'),
     sides: has('sides'),
-    phaseBoost: has('phaseBoost'),
+    phaseDrive: has('phaseDrive'),
     twinCore: has('twinCore'),
     singularity: has('singularity')
   };
@@ -496,12 +505,6 @@ const Sound = {
         Sound.tone(85, 0.7, 'sawtooth', 0.16, 26);
         Sound.noise(0.5, 400, 0.2, 30, 0.12);
         break;
-      case 'powerup':
-        [523.25, 659.25, 783.99].forEach((f, i) => Sound.tone(f, 0.11, 'triangle', 0.12, null, i*0.055));
-        break;
-      case 'weaponUp':
-        [440, 554.37, 659.25, 880].forEach((f, i) => Sound.tone(f, 0.10, 'square', 0.13, null, i*0.05));
-        break;
       case 'shieldBreak':
         Sound.tone(1500, 0.28, 'triangle', 0.18, 320);
         Sound.noise(0.16, 5200, 0.14, 1100);
@@ -658,7 +661,7 @@ const Music = {
 
 // ===== STATE =====
 
-let state = 'start'; // start | play | dying | dead
+let state = 'start'; // start | play | shop | dying | dead
 let score = 0, lives = 3, level = 1;
 let hiScore = Save.data.hiScore;
 let dyingTimer = 0;
@@ -672,6 +675,12 @@ let selIndex = 0;   // start-screen ship selector
 // ---- ROGUELIKE RUN STATE (Task 8) ----
 let runUpgrades = [];       // [{id, stacks}] — this run only
 let scrap = 0, scrapSpent = 0;
+// Boss HP keys off scrap that actually bought power, not every scrap spent.
+// Rerolls cost scrap but grant nothing, so counting them would inflate the
+// boss for the player whose offers were bad enough to need rerolling —
+// exactly the "hoarding is not punished, only actual power is" rule inverted.
+// scrapSpent stays the player-facing total (game-over readout, best-ever stat).
+let scrapOnUpgrades = 0;
 let stats = null;           // resolved by recomputeStats()
 let overchargeCount = 0, killsSinceLife = 0;
 
@@ -727,9 +736,10 @@ const nebulae = Array.from({length: 5}, () => ({
 // ---- PLAYER ----
 const player = {
   x: W/2, y: H - 120, w: 28, h: 36, speed: 5.5,
-  invincible: 0, shieldCharges: 0, shieldRegenTimer: 0, boost: 0, trail: [],
-  muzzle: 0,
-  fireMul: 1, spreadMul: 1   // set per ship
+  invincible: 0, shieldCharges: 0, shieldRegenTimer: 0, trail: [],
+  // PHASE DRIVE: one banked free hit plus the frames counted toward the next.
+  phaseCharge: 0, phaseDriveTimer: 0,
+  muzzle: 0
 };
 
 // ---- COLLECTIONS ----
@@ -942,8 +952,6 @@ function shipOwned(id) { return Save.data.unlocked.includes(id); }
 // Ships differ only in these handling stats — no ship changes any other system.
 function applyShip(def) {
   player.speed = def.speed;
-  player.fireMul = def.fireMul;
-  player.spreadMul = def.spreadMul;
   player.w = def.hitW;
   player.h = def.hitH;
   player.canPhase = def.phase;
@@ -958,7 +966,8 @@ function startGame() {
   const ship = currentShip();
   state = 'play';
   score = 0; level = 1; frame = 0; runKills = 0;
-  player.x = W/2; player.y = H - 120; player.invincible = 0; player.shieldCharges = 0; player.shieldRegenTimer = 0; player.boost = 0; player.trail = [];
+  player.x = W/2; player.y = H - 120; player.invincible = 0; player.shieldCharges = 0; player.shieldRegenTimer = 0; player.trail = [];
+  player.phaseCharge = 0; player.phaseDriveTimer = 0;
   applyShip(ship);
   bullets = []; enemyBullets = []; asteroids = []; enemies = []; particles = []; flashText = [];
   drones = []; singularity = null;
@@ -967,7 +976,7 @@ function startGame() {
   shootTimer = 0;
   dyingTimer = 0;
   boss = null; bossActive = false; bossWarning = 0;
-  runUpgrades = []; scrap = 0; scrapSpent = 0;
+  runUpgrades = []; scrap = 0; scrapSpent = 0; scrapOnUpgrades = 0;
   runUpgradesVersion++;
   overchargeCount = 0; killsSinceLife = 0;
   recomputeStats();
@@ -982,7 +991,17 @@ function startGame() {
   Music.start();
 }
 
+const LEVEL_CLEAR_SCRAP = 500;
+
 function levelUp() {
+  // Spec: kills pay scrap, and clearing a level pays a flat bonus on top.
+  // Awarded here because levelUp is the single point every level completion
+  // passes through, boss levels included (the boss dying clears bossActive,
+  // which lets levelTimer run out and call this).
+  // Flat, deliberately: SCRAP MAGNET and SALVAGE RIG are both worded "+% scrap
+  // from kills", and a level clear is not a kill.
+  scrap += LEVEL_CLEAR_SCRAP;
+  addFlashText('LEVEL CLEAR +' + LEVEL_CLEAR_SCRAP, W/2, H/2 - 40, '#ffdd44');
   levelTimer = 0; level++;
   Music.setIntensity(level);
   if (player.canPhase) player.phaseReady = true;   // Phantom recharges each level
@@ -1020,7 +1039,7 @@ function endRun() {
 
 // ===== ENTITIES =====
 
-function drawShip(x, y, invincible, shield, boost, t, muzzle, shipDef) {
+function drawShip(x, y, invincible, shield, t, muzzle, shipDef) {
   const def = shipDef || currentShip();
   const [c0, c1, c2] = def.hull;
   const trim = def.trim;
@@ -1029,8 +1048,7 @@ function drawShip(x, y, invincible, shield, boost, t, muzzle, shipDef) {
   if (invincible && Math.floor(t/4)%2 === 0) { ctx.restore(); return; }
 
   // Engine flames
-  let flameLen = boost ? 28 : 16;
-  let flameW = boost ? 10 : 7;
+  const flameLen = 16, flameW = 7;
   ctx.save();
   let gL = ctx.createLinearGradient(0,0,0,flameLen);
   gL.addColorStop(0,'rgba(0,200,255,0.9)'); gL.addColorStop(0.4,'rgba(255,140,0,0.7)'); gL.addColorStop(1,'rgba(255,60,0,0)');
@@ -1452,11 +1470,13 @@ function makeEnemy(kind) {
 const BOSS_W = 112, BOSS_H = 54;
 
 function bossMaxHp(lv) {
-  // Tuned against real player DPS (~18 hits/sec at weapon level 3) for a
-  // fight of roughly 20-30 seconds rather than a war of attrition.
-  // Scaled by scrap actually spent so a boss only gets tougher when the
-  // player is actually stronger, not just for hoarding scrap.
-  return Math.round((340 + 160 * (lv / 5)) * RLCore.bossHpMultiplier(scrapSpent));
+  // The base curve is set against the floor of the build space: a player who
+  // has bought nothing fires 2 shots of 1 damage every 10 frames = 12 dps, so
+  // a level-5 boss at 334 HP is ~28s of clean hits. Anything above the floor
+  // is handled by the multiplier, not the base.
+  // Scaled by scrap spent ON UPGRADES so a boss only gets tougher when the
+  // player is actually stronger — not for hoarding, and not for rerolling.
+  return Math.round((227 + 107 * (lv / 5)) * RLCore.bossHpMultiplier(scrapOnUpgrades));
 }
 
 function spawnBoss(lv) {
@@ -1503,7 +1523,13 @@ function updateBoss() {
       Sound.play('bigExplode');
       const pts = 2000 * b.tier;
       score += pts;
+      // The boss is the biggest kill in the game and used to pay no scrap at
+      // all, because it never went through killEnemy. Routed through
+      // scrapForKill so SCRAP MAGNET and SALVAGE RIG apply here too.
+      const bossScrap = RLCore.scrapForKill(pts, stats.scrapMul);
+      scrap += bossScrap;
       addFlashText('+' + pts.toLocaleString(), b.x, b.y, '#ffdd44');
+      addFlashText('+' + bossScrap.toLocaleString() + ' SCRAP', b.x, b.y + 24, '#ffdd44');
       levelBanner = { text: 'BOSS DOWN', life: 120 };
       boss = null; bossActive = false;
       Music.setBoss(false);
@@ -1879,8 +1905,19 @@ function addFlashText(text, x, y, color) {
 
 function hitPlayer() {
   if (player.invincible > 0) return;
-  // Phase Drive: boosting phases the ship through everything, no cost at all.
-  if (stats.phaseBoost && player.boost > 0) return;
+  // Phase Drive: a banked free hit that recharges on its own clock. Spent
+  // before the shield and before Phantom's once-per-level slip, because it is
+  // the only one of the three that comes back by itself.
+  if (stats.phaseDrive && player.phaseCharge > 0) {
+    player.phaseCharge = 0;
+    player.phaseDriveTimer = 0;
+    player.invincible = 70;
+    addFlashText('PHASE DRIVE', player.x, player.y - 34, '#aa66ff');
+    spawnParticles(player.x, player.y, '#aa66ff', 18);
+    FX.addShake(8);
+    Sound.play('shieldBreak');
+    return;
+  }
   // Plating / Fortress / Kinetic Barrier all just add to this same charge
   // count — one system, no separate timer.
   if (player.shieldCharges > 0) {
@@ -1976,8 +2013,7 @@ function update() {
     if (tx < player.x - 15) dx = -1;
     else if (tx > player.x + 15) dx = 1;
   }
-  let spd = player.speed * (player.boost > 0 ? 1.6 : 1);
-  player.x = Math.max(20, Math.min(W-20, player.x + dx*spd));
+  player.x = Math.max(20, Math.min(W-20, player.x + dx*player.speed));
 
   // Player trail
   player.trail.push({x: player.x, y: player.y, life: 12});
@@ -1986,7 +2022,21 @@ function update() {
   player.trail = player.trail.filter(t => t.life > 0);
 
   if (player.invincible > 0) player.invincible--;
-  if (player.boost > 0) player.boost--;
+
+  // Phase Drive: recharge the banked hit. The timer only runs while the charge
+  // is spent, so an unused charge doesn't quietly bank a second one.
+  if (stats.phaseDrive) {
+    if (player.phaseCharge <= 0) {
+      player.phaseDriveTimer++;
+      if (player.phaseDriveTimer >= RLCore.PHASE_DRIVE_FRAMES) {
+        player.phaseDriveTimer = 0;
+        player.phaseCharge = 1;
+        addFlashText('PHASE READY', player.x, player.y - 44, '#aa66ff');
+      }
+    }
+  } else {
+    player.phaseCharge = 0; player.phaseDriveTimer = 0;
+  }
 
   // Kinetic Barrier: regenerate one shield charge every stats.shieldRegen
   // frames. Capped so it can't grow without bound if it's left to regen
@@ -1999,9 +2049,9 @@ function update() {
     }
   }
 
-  // Shooting (auto-fire). boost only shortens the interval.
+  // Shooting (auto-fire). The interval is entirely upgrade-driven now.
   shootTimer++;
-  const fireRate = Math.max(4, Math.round(stats.fireRate * (player.boost > 0 ? 0.65 : 1)));
+  const fireRate = Math.max(RLCore.MIN_FIRE_RATE, Math.round(stats.fireRate));
   if (shootTimer >= fireRate) {
     shootTimer = 0;
     fireWeapon();
@@ -2046,6 +2096,13 @@ function update() {
         const d = (e.x - b.x) ** 2 + (e.y - b.y) ** 2;
         if (d < bestD) { bestD = d; best = e; }
       });
+      // The boss is not in `enemies`, so without this a boss fight steers
+      // homing shots onto the minions it spawns in phase 3 — curving a
+      // 900-scrap upgrade's bullets away from the only target that matters.
+      if (boss && !boss.entering && boss.dying === 0) {
+        const d = (boss.x - b.x) ** 2 + (boss.y - b.y) ** 2;
+        if (d < bestD) { bestD = d; best = boss; }
+      }
       if (best) {
         const want = Math.atan2(best.x - b.x, -(best.y - b.y));
         const cur  = Math.atan2(b.vx, -b.vy);
@@ -2275,19 +2332,11 @@ function drawBg() {
     ctx.beginPath(); ctx.ellipse(n.x, n.y, n.rx, n.ry, 0, 0, Math.PI*2); ctx.fill();
   });
 
-  // While boosting the stars smear into warp streaks.
-  const warp = (state === 'play' && player.boost > 0);
   starLayers.forEach((layer, li) => {
     const col = li===2 ? `rgba(200,220,255,0.9)` : li===1 ? `rgba(180,200,255,0.6)` : `rgba(160,180,255,0.4)`;
     layer.forEach(s => {
-      if (warp) {
-        const len = s.speed * 9;
-        ctx.strokeStyle = col; ctx.lineWidth = s.r*1.6;
-        ctx.beginPath(); ctx.moveTo(s.x, s.y - len); ctx.lineTo(s.x, s.y); ctx.stroke();
-      } else {
-        ctx.fillStyle = col;
-        ctx.beginPath(); ctx.arc(s.x, s.y, s.r, 0, Math.PI*2); ctx.fill();
-      }
+      ctx.fillStyle = col;
+      ctx.beginPath(); ctx.arc(s.x, s.y, s.r, 0, Math.PI*2); ctx.fill();
     });
   });
 }
@@ -2337,7 +2386,7 @@ function draw() {
     });
 
     if (state === 'play') {
-      drawShip(player.x, player.y, player.invincible, player.shieldCharges, player.boost, frame, player.muzzle);
+      drawShip(player.x, player.y, player.invincible, player.shieldCharges, frame, player.muzzle);
       drawDrones();
       drawSingularity();
     }
@@ -2470,7 +2519,14 @@ function drawHUD() {
     ctx.fillText('x' + mult + '  (' + combo + ')', W/2, by + 15);
   }
 
-  for (let i = 0; i < 3; i++) {
+  // Lives are no longer capped at the ship's 2-4 starting lives: REPAIR KIT
+  // adds up to 2, IMMORTAL ENGINE 1, and VAMPIRIC CORE has no ceiling at all.
+  // Draw up to LIVES_PIP_CAP pips and collapse the rest into "+N", the same
+  // way drawScrapAndBuild handles a build list that outgrows its column.
+  const LIVES_PIP_CAP = 5;
+  const pipSlots = Math.max(3, Math.min(lives, LIVES_PIP_CAP));
+  const overflowLives = Math.max(0, lives - LIVES_PIP_CAP);
+  for (let i = 0; i < pipSlots; i++) {
     let lx = W - 20 - i*26;
     ctx.save(); ctx.translate(lx, 18); ctx.scale(0.6, 0.6);
     if (i < lives) {
@@ -2482,8 +2538,14 @@ function drawHUD() {
     }
     ctx.restore();
   }
+  if (overflowLives > 0) {
+    ctx.fillStyle = '#3399ff';
+    ctx.font = 'bold 10px monospace';
+    ctx.textAlign = 'right';
+    ctx.fillText('+' + overflowLives, W - 20 - pipSlots*26 + 12, 22);
+  }
 
-  // Shield/boost bars drop below the boss health bar when a fight is live.
+  // Shield/phase readouts drop below the boss health bar when a fight is live.
   let barY = (boss && boss.dying === 0) ? 70 : 48;
   // Shield is a charge count now, not a fraction of a timer, so it draws as
   // one pip per charge rather than a draining bar.
@@ -2497,13 +2559,23 @@ function drawHUD() {
     }
     barY += 20;
   }
-  if (player.boost > 0) {
-    ctx.fillStyle = 'rgba(255,220,0,0.2)';
-    ctx.fillRect(8, barY, (W-16)*(player.boost/200), 5);
-    ctx.strokeStyle = '#ffdd00'; ctx.lineWidth=1;
-    ctx.strokeRect(8, barY, W-16, 5);
-    ctx.fillStyle = '#ffdd00'; ctx.font='9px monospace'; ctx.textAlign='left';
-    ctx.fillText('BOOST', 8, barY+14);
+  // Phase Drive: a lit pip when the free hit is banked, a filling bar while it
+  // recharges, so the player can tell whether they are covered right now.
+  if (stats.phaseDrive) {
+    ctx.fillStyle = '#aa66ff'; ctx.font='9px monospace'; ctx.textAlign='left';
+    ctx.fillText('PHASE', 8, barY+9);
+    if (player.phaseCharge > 0) {
+      ctx.beginPath(); ctx.arc(54, barY+5, 5, 0, Math.PI*2);
+      ctx.fillStyle = 'rgba(170,102,255,0.45)'; ctx.fill();
+      ctx.strokeStyle = '#aa66ff'; ctx.lineWidth = 1; ctx.stroke();
+    } else {
+      const frac = player.phaseDriveTimer / RLCore.PHASE_DRIVE_FRAMES;
+      ctx.strokeStyle = 'rgba(170,102,255,0.5)'; ctx.lineWidth = 1;
+      ctx.strokeRect(48, barY+1, 60, 8);
+      ctx.fillStyle = 'rgba(170,102,255,0.55)';
+      ctx.fillRect(48, barY+1, 60*frac, 8);
+    }
+    barY += 20;
   }
 
   drawScrapAndBuild();
@@ -2511,9 +2583,9 @@ function drawHUD() {
 }
 
 // Scrap readout plus the current build (owned upgrades), drawn down the
-// left side under the boss/shield/boost bars. Fixed anchor at y=124: the
-// bars above it top out around y=109 in the worst case (boss bar + shield
-// + boost all live at once), so this always clears them with margin.
+// left side under the boss/shield/phase readouts. Fixed anchor at y=124: the
+// rows above it top out around y=109 in the worst case (boss bar + shield
+// + phase all live at once), so this always clears them with margin.
 // The player only ever moves horizontally at a fixed y=H-120=600, and the
 // list is capped well short of that, so it can never sit over the ship.
 function drawScrapAndBuild() {
@@ -2653,7 +2725,7 @@ function drawStart() {
   ctx.translate(W/2, 172);
   ctx.scale(1.7, 1.7);
   ctx.translate(-W/2, -172);
-  drawShip(W/2, 172, 0, 0, 0, frame, 0, def);
+  drawShip(W/2, 172, 0, 0, frame, 0, def);
   ctx.restore();
 
   drawChevron(CHEV_L, -1, true);
@@ -2804,13 +2876,21 @@ function drawGameOver() {
 
 const SHOP_SECONDS = 30;
 let shopSlots = [], shopTimer = 0, shopRerolls = 0, shopSel = 0, haulerX = W + 120;
+let shopApexFlash = 0;
 
 function openShop() {
+  // update() does not run during the shop, so the player cannot move while
+  // enemy bullets sit frozen mid-flight — one parked beside the hull would
+  // land on the first frame after DEPART, costing a life AND the upgrade just
+  // bought. The spec says nothing threatens the ship while it is docked, so
+  // the in-flight bullets are cleared rather than paused.
+  enemyBullets = [];
   shopSlots = RLCore.rollShop(level, runUpgrades, Math.random);
   shopTimer = 60 * SHOP_SECONDS;
   shopRerolls = 0;
   shopSel = 0;
   haulerX = W + 120;
+  shopApexFlash = 0;
   state = 'shop';
   noteApex();
 }
@@ -2821,6 +2901,11 @@ function openShop() {
 function noteApex() {
   if (!shopSlots.some(s => s && s.tier === 'APEX')) return;
   Save.data.apexFound += 1; Save.write();
+  // FX.addShake is deliberately NOT used for the flash: draw() returns for the
+  // shop before it ever applies the shake transform, and drawShop applies no
+  // transform of its own, so an FX-driven flash would be invisible. drawShop
+  // paints this counter itself.
+  shopApexFlash = 34;
   FX.addShake(10);
   Sound.play('apex');
 }
@@ -2828,6 +2913,7 @@ function noteApex() {
 function updateShop() {
   // The hauler slides in and parks; the clock runs regardless.
   haulerX += (W - 96 - haulerX) * 0.08;
+  if (shopApexFlash > 0) shopApexFlash--;
   shopTimer--;
   if (shopTimer <= 0) closeShop();
 }
@@ -2854,6 +2940,10 @@ function tryBuySlot(i) {
   const t = RLCore.tierOf(u.tier);
   const price = t.price;
   if (scrap < price) { Sound.play('uiDeny'); return false; }
+  // REPAIR KIT tops the ship up to its starting lives + 2 and no further. At
+  // the ceiling the purchase is refused outright rather than taking 500 scrap
+  // for nothing — same contract as the stack-limit guard below.
+  if (u.effect.lives && lives >= currentShip().lives + 2) { Sound.play('uiDeny'); return false; }
   const have = runUpgrades.find(o => o.id === u.id);
   // Defensive: RLCore.eligible already keeps a maxed-out upgrade off the roll,
   // so this should never trigger from live play, but a shop visit spans
@@ -2862,12 +2952,15 @@ function tryBuySlot(i) {
   if (have && have.stacks >= t.stackLimit) { Sound.play('uiDeny'); return false; }
   scrap -= price;
   scrapSpent += price;
+  scrapOnUpgrades += price;   // boss scaling counts only scrap that bought power
   if (have) have.stacks++; else runUpgrades.push({ id: u.id, stacks: 1 });
   runUpgradesVersion++;
   shopSlots[i] = null;
   recomputeStats();
   if (u.effect.shieldCharges) player.shieldCharges = Math.max(player.shieldCharges, stats.shieldCharges);
   if (u.effect.lives || u.effect.extraLife) lives += (u.effect.lives || 0) + (u.effect.extraLife || 0);
+  // Phase Drive arrives charged rather than 12 seconds cold.
+  if (u.effect.phaseDrive) { player.phaseCharge = 1; player.phaseDriveTimer = 0; }
   Sound.play('uiBuy');
   return true;
 }
@@ -2876,6 +2969,8 @@ function tryReroll() {
   const cost = RLCore.rerollCost(shopRerolls);
   if (scrap < cost) { Sound.play('uiDeny'); return false; }
   scrap -= cost;
+  // Counted in scrapSpent (the player's total outlay) but NOT in
+  // scrapOnUpgrades: a reroll buys zero power, so it must not raise boss HP.
   scrapSpent += cost;
   shopRerolls++;
   shopSlots = RLCore.rollShop(level, runUpgrades, Math.random);
@@ -2904,7 +2999,7 @@ function drawShop() {
   ctx.fillText('CARGO', 0, 36);
   ctx.restore();
 
-  drawShip(player.x, player.y, 0, player.shieldCharges, 0, frame, 0);
+  drawShip(player.x, player.y, 0, player.shieldCharges, frame, 0);
 
   ctx.fillStyle = 'rgba(0,5,20,0.82)';
   ctx.fillRect(0, 236, W, 300);
@@ -2965,6 +3060,16 @@ function drawShop() {
   ctx.textAlign = 'center';
   ctx.fillStyle = '#5b6b80'; ctx.font = '10px monospace';
   ctx.fillText('← → choose    SPACE buy    R reroll    D depart', W/2, 524);
+
+  // APEX flash. Drawn here, last and full-screen, because draw() returns for
+  // the shop before the FX shake transform and drawShop applies none — an
+  // FX-driven flash would never reach the screen.
+  if (shopApexFlash > 0) {
+    const a = (shopApexFlash / 34) * 0.55;
+    const rgb = Math.floor(frame/4) % 2 ? '0,255,238' : '255,221,51';   // APEX's two colours
+    ctx.fillStyle = 'rgba(' + rgb + ',' + a + ')';
+    ctx.fillRect(0, 0, W, H);
+  }
 }
 
 function drawShopButton(r, label, enabled) {

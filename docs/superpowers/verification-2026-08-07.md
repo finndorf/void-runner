@@ -175,3 +175,106 @@ little investment," not literally "at zero spend").
 | Boss balance — stacked | fine, no tuning needed (fastest engaged kill 10.18s, threshold is 4s) |
 | Boss balance — minimal | fails hard (35.6% damage dealt, all 3 lives lost); not fixable via the two `bossHpMultiplier` constants; **no code change made**, flagged for the project owner |
 | `RLCore.bossHpMultiplier` | **unchanged** (`1 + 1.5 * Math.min(1, scrapSpent / 12000)`) |
+
+---
+
+# Addendum — final fix wave (2026-08-07, post-review)
+
+Everything above describes the state of the branch **before** the final whole-branch review's
+fix wave. This addendum records the re-measurement after that wave landed. Commands and
+figures below supersede §3 where they conflict.
+
+## Automated checks (re-run)
+
+| check | result |
+|---|---|
+| `node --test tests/*.mjs` | **49 / 49 pass** (45 + 4 new: v1-migration records, REPAIR KIT cap, IMMORTAL ENGINE on top of the cap, PHASE DRIVE flag/desc) |
+| purity scan (comment-stripped, incl. `player` and `Music.`) | `pure block is clean` |
+| `node --check` on the extracted inline script | clean |
+| browser console over the whole session | no messages at all |
+
+## What changed that affects the numbers
+
+- `bossMaxHp()` base curve `340 + 160*(lv/5)` → `227 + 107*(lv/5)`. Level-5 base is now
+  **334 HP** (was 500). The stale "~18 hits/sec at weapon level 3" comment is gone.
+- The boss multiplier now keys off a new `scrapOnUpgrades` counter, not `scrapSpent`, so
+  **rerolls no longer inflate boss HP**. `scrapSpent` survives unchanged for the game-over
+  readout and `Save.data.bestScrapSpent`.
+- The boss now pays scrap (`RLCore.scrapForKill(2000 * tier, stats.scrapMul)`), which it
+  never did before.
+- `levelUp()` now awards the spec's flat **+500 scrap per level cleared**.
+
+## 1. Measured scrap income per level
+
+Method: a scripted pilot drives the **real** `update()` loop frame by frame — real spawner,
+real enemy mix, real auto-fire, real `killEnemy()`. It tracks the nearest enemy above it
+horizontally. `player.invincible` is pinned so a death cannot truncate an *income*
+measurement; that is the only intervention. Buy-nothing build, VANGUARD, 5 runs, averaged.
+
+| level | avg scrap | avg kills | wall time | note |
+|---|---|---|---|---|
+| 1 | **1,640** | 11.4 | 24s | includes the +500 clear bonus → ~1,140 from kills |
+| 2 | **1,880** | 13.8 | 24s | |
+| 3 | **4,292** | 36.4 | 24s | formations start at level 3; income roughly doubles |
+| 4 | 4,364 | 36.6 | 24s | |
+| 5 | **7,476** | 47.8 | 63.4s | boss level: ~36s fight + 24s of normal play + 2,000 boss scrap |
+| 6 | 5,240 | 43.6 | 24s | |
+
+Cumulative scrap on arriving at the level-5 boss: **~12,200**.
+
+Against the spec's estimate of "~20–25 kills per level, ~3,000 scrap per level": levels 1–2
+come in at roughly **half** the spec's figure, levels 3+ at **1.4–1.8×** it. The spec's
+single flat estimate does not describe the real curve.
+
+## 2. Boss time-to-kill at both extremes (level 5)
+
+**(a) Pure DPS window** — invincibility pinned, so this isolates damage throughput from
+piloting. 5 runs each.
+
+| build | boss HP | time to kill |
+|---|---|---|
+| buy nothing | 334 (mult 1.0×) | **33.4 – 38.1s**, mean 36.4s |
+| buy every affordable slot at every shop | 515 – 705 (mult 1.5× – 2.1×) | **9.1 – 42.1s**, median ~16s |
+
+The stacked extreme never approaches the plan's 4-second "too easy" trigger. Under the old
+500 HP curve the same no-purchase DPS window was ~56s; it is now ~36s.
+
+**(b) With real damage taken** — no invincibility pin, scripted dodging pilot, 3 lives:
+
+| build | result |
+|---|---|
+| buy nothing | dealt **49.1%** of 334 HP before losing 3 lives (was **35.6%** of 500 HP pre-fix) |
+
+**This does not confirm a minimal build can win, and I am not claiming it does.** The
+scripted pilot cannot dodge and stay on target at the same time: granting it extra lives
+scales almost perfectly linearly (3 lives → 49.1%, 5 → 54.8%, 7 → 60.5%, 9 → 66.2%, i.e.
+~9.5 HP per extra life), which says the bot's damage output collapses the moment it starts
+evading, not that 334 HP is out of reach. A pilot who can hold the firing line through the
+boss's phase-1 cadence finishes in ~36s, as (a) shows. **Only human play can settle this
+one; it is reported as unverified rather than passed.**
+
+## 3. Behavioural verification of each fix (browser)
+
+Driven at `file:///Users/cameronconway/void-runner/void-runner.html`. The real localStorage
+save was captured at the start and restored byte-for-byte at the end.
+
+| fix | evidence |
+|---|---|
+| PHASE DRIVE fires | Bought via `tryBuySlot` → arrives charged. Hit #1: **0 lives lost, 0 upgrades stripped**. Recharged in exactly **720 frames** (12.0s). Hit #2 while charged: free again. Hit #3 uncharged: `lives 3→2` **and** the upgrade stripped. Screenshot `/tmp/vr-fix-lives-phase.png` shows the purple PHASE recharge bar. |
+| boost remnants gone | `grep` for `boost` in `void-runner.html` returns only the ships' `fireMul`/`spreadMul` config and one historical comment. `drawShip`'s dead `boost` parameter removed at all 3 call sites. |
+| reroll no longer inflates boss HP | 4 rerolls (300+600+1,200+2,400 = 4,500 scrap): `bossMaxHp(5)` **334 → 334**. One 240-scrap purchase: **334 → 344**. `scrapSpent` still totals 4,740. |
+| HUNTER ROUNDS targets the boss | Bullet spawned at `x=60, vx=0` with boss at `x=240`: after 30 frames `vx = +5.88` and `x = 203` — curving onto the boss, not away. |
+| lives HUD overflow | `lives = 8` renders 5 pips + `+3`. Screenshot `/tmp/vr-fix-lives-phase.png`. |
+| REPAIR KIT cap | VANGUARD (3 base, ceiling 5): buys 1 and 2 succeed (`lives 3→4→5`, 500 scrap each); attempts 3, 4, 5 return `false` with **0 scrap taken**. `resolveStats(..., repair_kit x5).extraLives === 2`. |
+| shop departure is safe | 2 enemy bullets in flight, one parked on the hull → `levelUp()` → `enemyBullets.length === 0`. |
+| APEX flash renders | `noteApex()` sets `shopApexFlash = 34`; `drawShop` paints a full-screen wash alternating APEX cyan/gold. Screenshot `/tmp/vr-fix-apex-flash2.png` (flash frozen for capture). |
+| boss pays scrap | Boss death: **+2,000 scrap** (and +2,000 score). With SCRAP MAGNET ×5 + SALVAGE RIG ×5 (`scrapMul 2.5`): **+5,000**. |
+| +500 per level cleared | `levelUp()` → `scrap +500`. Flat by design: SCRAP MAGNET and SALVAGE RIG are both worded "+% scrap **from kills**", and a level clear is not a kill — with `scrapMul 2.5` the bonus is still exactly 500. |
+
+## 4. Open concern, not fixed
+
+`scrapOnUpgrades` is a spend proxy, not a power proxy. A defensively-skewed build raises boss
+HP without raising its own damage: one measured stacked run reached a **705 HP** boss and
+took **42.1s** — *slower* than the 334 HP no-purchase fight. If the boss curve is tuned
+again, weighting the multiplier toward offensive spend (or lowering the 1.5 cap) is a better
+lever than the base curve, which is now set correctly against the buy-nothing floor.

@@ -27,6 +27,11 @@ test('a v1 save keeps its credits, ships and records', () => {
   assert.deepEqual(data.unlocked, ['vanguard', 'needle']);
   assert.equal(data.selectedShip, 'needle');
   assert.equal(data.muted, true);
+  // Records, not just currency: silently resetting a player's lifetime stats on
+  // upgrade is irreversible, so every v1 field is asserted, not a sample of them.
+  assert.equal(data.bestLevel, 7);
+  assert.equal(data.totalRuns, 31);
+  assert.equal(data.totalKills, 900);
   assert.equal(data.bestScrapSpent, 0);
   assert.equal(data.apexFound, 0);
 });
@@ -490,4 +495,40 @@ test('TWIN CORE doubles every shot', () => {
   const one = core.buildShots(baseStats({ extraShots: 2, rear: true }));
   const two = core.buildShots(baseStats({ extraShots: 2, rear: true, twinCore: true }));
   assert.equal(two.length, one.length * 2);
+});
+
+test('REPAIR KIT cannot contribute more than the spec cap of +2 lives', () => {
+  const core = loadCore();
+  const two = core.resolveStats(SHIP, [{ id: 'repair_kit', stacks: 2 }]);
+  assert.equal(two.extraLives, 2);
+  // Stack limit is 5, but the spec ceiling is "starting lives + 2".
+  const five = core.resolveStats(SHIP, [{ id: 'repair_kit', stacks: 5 }]);
+  assert.equal(five.extraLives, 2);
+});
+
+test('IMMORTAL ENGINE stacks on top of the REPAIR KIT cap, not inside it', () => {
+  const core = loadCore();
+  const s = core.resolveStats(SHIP, [
+    { id: 'repair_kit', stacks: 5 }, { id: 'immortal', stacks: 1 }
+  ]);
+  assert.equal(s.extraLives, 3);
+});
+
+test('PHASE DRIVE resolves as a self-contained flag with its own recharge period', () => {
+  const core = loadCore();
+  const off = core.resolveStats(SHIP, []);
+  assert.equal(off.phaseDrive, false);
+  const on = core.resolveStats(SHIP, [{ id: 'phase_drive', stacks: 1 }]);
+  assert.equal(on.phaseDrive, true);
+  // The old boost-gated key must be gone, not merely unused.
+  assert.equal('phaseBoost' in on, false);
+  assert.ok(core.PHASE_DRIVE_FRAMES > 0);
+});
+
+test('the PHASE DRIVE catalog entry no longer advertises boost', () => {
+  const core = loadCore();
+  const u = core.UPGRADES.find(x => x.id === 'phase_drive');
+  assert.equal(u.effect.phaseDrive, true);
+  assert.equal(u.effect.phaseBoost, undefined);
+  assert.equal(/boost/i.test(u.desc), false, `desc still mentions boost: "${u.desc}"`);
 });
