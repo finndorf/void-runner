@@ -429,6 +429,62 @@ test('REAR CANNON and SIDE PODS add shots at the right angles', () => {
   assert.ok(sides.some(s => Math.abs(s.a + Math.PI/2) < 1e-6));
 });
 
+// ---- Task 16: the max() combinator in resolveStats ----
+// Seven upgrades (all RARE and above, so unique/stack-limit-1) are read with
+// the `max` reducer rather than `sum`: homing, splash, shieldRegen,
+// overcharge, lifePerKills, chain, fortress. No existing test ever passed any
+// of them into resolveStats. That matters because `max`'s accumulator starts
+// at 0 and every one of these effect values is positive -- a reversed
+// comparison (Math.min instead of Math.max) would silently collapse every one
+// of them to 0 and every existing test would still pass.
+
+test('the max() combinator resolves every rare-plus ability to its catalog value, not zero', () => {
+  const core = loadCore();
+  const s = core.resolveStats(SHIP, [
+    { id: 'hunter_rounds', stacks: 1 },     // homing
+    { id: 'flak_burst', stacks: 1 },        // splash
+    { id: 'kinetic_barrier', stacks: 1 },   // shieldRegen
+    { id: 'overcharge', stacks: 1 },        // overcharge
+    { id: 'vampiric', stacks: 1 },          // lifePerKills
+    { id: 'chain', stacks: 1 },             // chain
+    { id: 'fortress', stacks: 1 }           // fortress
+  ]);
+  // A Math.min(acc, v) bug would report every one of these as 0, since the
+  // reducer's accumulator starts at 0 and every catalog value is positive.
+  assert.equal(s.homing, 0.045);
+  assert.equal(s.splash, 30);
+  assert.equal(s.shieldRegen, 1200);
+  assert.equal(s.overcharge, 5);
+  assert.equal(s.lifePerKills, 30);
+  assert.equal(s.chain, 2);
+  assert.equal(s.fortress, 2);
+});
+
+test('the max() combinator ignores stacks, unlike sum() -- it is not a sum in disguise', () => {
+  const core = loadCore();
+  // These upgrades are unique (stack limit 1) in real play, but resolveStats
+  // itself does not enforce that -- it just reads whatever `stacks` it is
+  // given. If max() were accidentally implemented as `v * o.stacks` (i.e. it
+  // quietly became a sum), a stacks value above 1 would inflate the result.
+  const inflated = core.resolveStats(SHIP, [{ id: 'overcharge', stacks: 5 }]);
+  assert.equal(inflated.overcharge, 5, 'max() must read the raw effect value, not scale it by stacks');
+
+  const s2 = core.resolveStats(SHIP, [{ id: 'chain', stacks: 3 }]);
+  assert.equal(s2.chain, 2, 'max() must read the raw effect value, not scale it by stacks');
+});
+
+test('the max() combinator defaults to 0 when no upgrade grants the key', () => {
+  const core = loadCore();
+  const s = core.resolveStats(SHIP, [{ id: 'heavy_rounds', stacks: 1 }]);
+  assert.equal(s.homing, 0);
+  assert.equal(s.splash, 0);
+  assert.equal(s.shieldRegen, 0);
+  assert.equal(s.overcharge, 0);
+  assert.equal(s.lifePerKills, 0);
+  assert.equal(s.chain, 0);
+  assert.equal(s.fortress, 0);
+});
+
 test('TWIN CORE doubles every shot', () => {
   const core = loadCore();
   const one = core.buildShots(baseStats({ extraShots: 2, rear: true }));
