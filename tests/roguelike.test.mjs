@@ -57,3 +57,16 @@ test('a corrupt unlocked list is repaired without losing credits', () => {
   assert.deepEqual(data.unlocked, ['vanguard']);
   assert.equal(data.selectedShip, 'vanguard');
 });
+
+// Save.load() gates its localStorage write on this `ok` flag, so it never
+// overwrites an unrecognized-version save with substituted defaults. This
+// test pins that signal at the unit level: a recognized version must report
+// ok:true (safe to persist) and an unrecognized one must report ok:false
+// (must NOT be persisted over), so a future refactor can't silently drop it.
+test('migrateSave reports ok so callers know whether it is safe to persist', () => {
+  const core = loadCore();
+  const recognized = core.migrateSave({ version: 1, credits: 10 }, DEFAULTS());
+  assert.equal(recognized.ok, true);
+  const unrecognized = core.migrateSave({ version: 99, credits: 10 }, DEFAULTS());
+  assert.equal(unrecognized.ok, false);
+});

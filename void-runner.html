@@ -115,10 +115,14 @@ const Save = {
     try {
       const raw = localStorage.getItem(Save.KEY);
       if (raw) {
-        const { data } = RLCore.migrateSave(JSON.parse(raw), Save.defaults());
+        const { data, ok } = RLCore.migrateSave(JSON.parse(raw), Save.defaults());
         Save.data = data;
         if (!CFG.ships.some(s => s.id === Save.data.selectedShip)) Save.data.selectedShip = 'vanguard';
-        Save.write();
+        // Only persist over the stored bytes when migration actually recognized
+        // the save. An unrecognized version runs on defaults for this session
+        // but leaves the original data untouched, so it stays recoverable by a
+        // later version or by hand rather than being silently overwritten.
+        if (ok) Save.write();
       }
     } catch (e) {
       Save.ok = false;
