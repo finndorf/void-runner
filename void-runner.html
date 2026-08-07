@@ -500,6 +500,10 @@ const Sound = {
       case 'levelUp':
         [523.25, 659.25, 783.99].forEach(f => Sound.tone(f, 0.45, 'triangle', 0.12));
         break;
+      case 'apex':
+        Sound.tone(880, 0.5, 'sawtooth', 0.16, 1760);
+        Sound.tone(1320, 0.7, 'triangle', 0.12, 2640, 0.08);
+        break;
       case 'uiMove':
         Sound.tone(680, 0.05, 'square', 0.08);
         break;
@@ -904,14 +908,9 @@ function levelUp() {
   levelTimer = 0; level++;
   Music.setIntensity(level);
   if (player.canPhase) player.phaseReady = true;   // Phantom recharges each level
-  // Every fifth level is a boss fight instead of a normal wave.
-  if (level % 5 === 0) {
-    spawnBoss(level);
-    return;
-  }
-  levelBanner = {text: 'LEVEL ' + level, life: 120};
-  spawnParticles(W/2, H/2, '#00ffff', 30);
-  Sound.play('levelUp');
+  // The boss spawn and level banner used to fire here, but that put them
+  // behind the shop panel. They now fire from closeShop, once play resumes.
+  openShop();
 }
 
 function endRun() {
@@ -2431,6 +2430,47 @@ function drawGameOver() {
   ctx.fillText('PRESS SPACE FOR HANGAR', W/2, H/2 + 136);
 }
 
+// ===== SHOP =====
+
+const SHOP_SECONDS = 30;
+let shopSlots = [], shopTimer = 0, shopRerolls = 0, shopSel = 0, haulerX = W + 120;
+
+function openShop() {
+  shopSlots = RLCore.rollShop(level, runUpgrades, Math.random);
+  shopTimer = 60 * SHOP_SECONDS;
+  shopRerolls = 0;
+  shopSel = 0;
+  haulerX = W + 120;
+  state = 'shop';
+  noteApex();
+}
+
+// Standalone (not inlined into openShop) because Task 10's reroll calls it
+// too — an APEX rerolled into still counts. Tolerates null slots because
+// Task 10 sets a bought slot to null.
+function noteApex() {
+  if (!shopSlots.some(s => s && s.tier === 'APEX')) return;
+  Save.data.apexFound += 1; Save.write();
+  FX.addShake(10);
+  Sound.play('apex');
+}
+
+function updateShop() {
+  // The hauler slides in and parks; the clock runs regardless.
+  haulerX += (W - 96 - haulerX) * 0.08;
+  shopTimer--;
+  if (shopTimer <= 0) closeShop();
+}
+
+function closeShop() {
+  state = 'play';
+  levelBanner = { text: 'LEVEL ' + level, life: 120 };
+  spawnParticles(W/2, H/2, '#00ffff', 30);
+  Sound.play('levelUp');
+  if (stats.fortress > 0) player.shieldCharges = Math.max(player.shieldCharges, stats.fortress);
+  if (level % 5 === 0) spawnBoss(level);
+}
+
 // ===== LOOP =====
 
 function loop() {
@@ -2450,6 +2490,8 @@ function loop() {
   } else {
     starLayers.forEach(layer => layer.forEach(s => { s.y += s.speed; if (s.y > H+2) { s.y=-2; s.x=Math.random()*W; } }));
     nebulae.forEach(n => { n.y += n.speed; if (n.y - n.ry > H) n.y = -n.ry; });
+
+    if (state === 'shop') updateShop();
 
     // Animate the credit payout on the game-over screen.
     if (state === 'dead' && creditsShown < runCredits) {
