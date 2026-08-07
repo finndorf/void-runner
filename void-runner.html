@@ -281,6 +281,44 @@ RLCore.resolveStats = function (ship, owned) {
   };
 };
 
+RLCore.CREDIT_DIVISOR = 100;
+
+// Cheapest-first is what lets commons act as armour around a rare build: three
+// stacks of a 240-scrap upgrade are three hits the Orbital Drone does not take.
+RLCore.stripCheapest = function (owned) {
+  if (!owned.length) return { owned, removed: null };
+  const rank = id => RLCore.TIERS.findIndex(t => t.id === id);
+  let best = -1;
+  owned.forEach((o, i) => {
+    const u = RLCore.UPGRADES.find(x => x.id === o.id);
+    if (!u) return;
+    if (best === -1) { best = i; return; }
+    const bu = RLCore.UPGRADES.find(x => x.id === owned[best].id);
+    // Lower tier wins; ties go to the most recently acquired, which is the later index.
+    if (rank(u.tier) < rank(bu.tier) || (rank(u.tier) === rank(bu.tier) && i > best)) best = i;
+  });
+  if (best === -1) return { owned, removed: null };
+
+  const target = owned[best];
+  const u = RLCore.UPGRADES.find(x => x.id === target.id);
+  const next = owned.map((o, i) => (i === best ? { id: o.id, stacks: o.stacks - 1 } : o))
+                    .filter(o => o.stacks > 0);
+  return { owned: next, removed: { id: target.id, tier: u.tier } };
+};
+
+RLCore.scrapForKill = function (points, scrapMul) { return Math.round(points * scrapMul); };
+RLCore.creditsForScore = function (score) { return Math.floor(score / RLCore.CREDIT_DIVISOR); };
+RLCore.rerollCost = function (uses) { return 300 * Math.pow(2, uses); };
+
+// Spent, not earned: hoarding scrap should not summon a tougher boss, only
+// actually being stronger should.
+RLCore.bossHpMultiplier = function (scrapSpent) {
+  if (scrapSpent <= 6000) {
+    return 1 + scrapSpent / 12000;
+  }
+  return Math.min(2.5, 1.5 + (scrapSpent - 6000) / 6000);
+};
+
 // ===== END ROGUELIKE CORE (PURE) =====
 
 // ===== SAVE =====

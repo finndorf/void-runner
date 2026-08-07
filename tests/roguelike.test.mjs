@@ -312,3 +312,71 @@ test('scrap multiplier accumulates across both scrap upgrades', () => {
   ]);
   assert.ok(Math.abs(s.scrapMul - 2.5) < 1e-9);
 });
+
+test('a hit removes one stack of the cheapest upgrade', () => {
+  const core = loadCore();
+  const { owned, removed } = core.stripCheapest([
+    { id: 'reload_coil', stacks: 3 }, { id: 'orbital_drone', stacks: 1 }
+  ]);
+  assert.equal(removed.id, 'reload_coil');
+  assert.equal(owned.find(o => o.id === 'reload_coil').stacks, 2);
+  assert.equal(owned.find(o => o.id === 'orbital_drone').stacks, 1);
+});
+
+test('an entry disappears when its last stack goes', () => {
+  const core = loadCore();
+  const { owned } = core.stripCheapest([{ id: 'reload_coil', stacks: 1 }]);
+  assert.equal(owned.length, 0);
+});
+
+test('uniques survive while any stackable remains', () => {
+  const core = loadCore();
+  let owned = [
+    { id: 'twin_core', stacks: 1 }, { id: 'piercing', stacks: 1 },
+    { id: 'heavy_rounds', stacks: 2 }
+  ];
+  ({ owned } = core.stripCheapest(owned));
+  ({ owned } = core.stripCheapest(owned));
+  assert.equal(owned.find(o => o.id === 'twin_core').stacks, 1);
+  assert.equal(owned.find(o => o.id === 'piercing').stacks, 1);
+  assert.equal(owned.some(o => o.id === 'heavy_rounds'), false);
+});
+
+test('once stackables are gone the lowest-tier unique goes next', () => {
+  const core = loadCore();
+  const { removed } = core.stripCheapest([
+    { id: 'twin_core', stacks: 1 }, { id: 'piercing', stacks: 1 }
+  ]);
+  assert.equal(removed.id, 'piercing');
+});
+
+test('stripping an empty build is safe', () => {
+  const core = loadCore();
+  const { owned, removed } = core.stripCheapest([]);
+  assert.deepEqual(owned, []);
+  assert.equal(removed, null);
+});
+
+test('scrap and credit formulas match the spec', () => {
+  const core = loadCore();
+  assert.equal(core.scrapForKill(100, 1), 100);
+  assert.equal(core.scrapForKill(100, 1.5), 150);
+  assert.equal(core.scrapForKill(300, 1.1), 330);
+  assert.equal(core.creditsForScore(12000), 120);
+  assert.equal(core.creditsForScore(59), 0);
+});
+
+test('reroll cost doubles from 300', () => {
+  const core = loadCore();
+  assert.equal(core.rerollCost(0), 300);
+  assert.equal(core.rerollCost(1), 600);
+  assert.equal(core.rerollCost(2), 1200);
+});
+
+test('boss health scales with scrap spent and caps at 2.5x', () => {
+  const core = loadCore();
+  assert.equal(core.bossHpMultiplier(0), 1);
+  assert.ok(Math.abs(core.bossHpMultiplier(6000) - 1.5) < 1e-9);
+  assert.equal(core.bossHpMultiplier(12000), 2.5);
+  assert.equal(core.bossHpMultiplier(999999), 2.5);
+});
