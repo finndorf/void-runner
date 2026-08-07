@@ -684,6 +684,9 @@ function recomputeStats() {
   // changes, since applyShip runs once at game start before stats exist.
   player.w = ship.hitW * stats.hitScale;
   player.h = ship.hitH * stats.hitScale;
+  // Drone count can change mid-run (gained or stripped), so keep the visible
+  // drones[] array in sync with stats.drones every time stats are resolved.
+  syncDrones();
 }
 
 // ---- STARS ----
@@ -713,6 +716,10 @@ const player = {
 let bullets = [], enemyBullets = [], asteroids = [], enemies = [], particles = [];
 let shootTimer = 0;
 let boss = null, bossActive = false, bossWarning = 0;
+
+// ---- ORBITAL DRONE / SINGULARITY (Task 14) ----
+let drones = [];
+let singularity = null;
 
 // ---- TOUCH ----
 let touchX = null;
@@ -934,6 +941,7 @@ function startGame() {
   player.x = W/2; player.y = H - 120; player.invincible = 0; player.shieldCharges = 0; player.shieldRegenTimer = 0; player.boost = 0; player.trail = [];
   applyShip(ship);
   bullets = []; enemyBullets = []; asteroids = []; enemies = []; particles = []; flashText = [];
+  drones = []; singularity = null;
   spawnTimer = 0; asteroidTimer = 0; levelTimer = 0; spawnCycle = 0; combo = 0; comboTimer = 0; levelBanner = null;
   player.muzzle = 0;
   shootTimer = 0;
@@ -1669,6 +1677,82 @@ function spawnParticles(x, y, color, count) {
   }
 }
 
+// ---- ORBITAL DRONE ----
+// stats.drones can rise (upgrade picked up) or fall (a hit strips it), so this
+// must reconcile the drones[] array in both directions, not just grow it.
+function syncDrones() {
+  while (drones.length < stats.drones) drones.push({ angle: drones.length * Math.PI, fire: 0 });
+  while (drones.length > stats.drones) drones.pop();
+}
+
+function updateDrones() {
+  drones.forEach(d => {
+    d.angle += 0.03;
+    d.x = player.x + Math.cos(d.angle) * 46;
+    d.y = player.y + Math.sin(d.angle) * 32;
+    if (--d.fire <= 0) {
+      d.fire = 22;
+      // Carries the full bullet field set the collision code in update()
+      // reads (pierce/damage/homing/splash/split/crit/dead) — matching
+      // fireWeapon()'s shape so a drone bullet can't leave any of these
+      // undefined and corrupt the damage arithmetic.
+      bullets.push({
+        x: d.x, y: d.y - 6, vx: 0, vy: -BULLET_SPEED,
+        w: 2, h: 8, pierce: 0, damage: stats.damage * 0.5,
+        homing: 0, splash: 0, split: false, crit: false, dead: false
+      });
+    }
+  });
+}
+
+function drawDrones() {
+  drones.forEach(d => {
+    ctx.save();
+    ctx.translate(d.x, d.y);
+    ctx.fillStyle = '#ffaa22';
+    ctx.beginPath(); ctx.arc(0, 0, 5, 0, Math.PI*2); ctx.fill();
+    ctx.strokeStyle = '#ffdd88'; ctx.lineWidth = 1.2; ctx.stroke();
+    ctx.restore();
+  });
+}
+
+// ---- SINGULARITY ----
+// Drags nearby enemies inward and grinds them down at close range. Damage is
+// routed through damageEnemy (not a direct e.hp-- / killEnemy) so mines still
+// arm instead of dying outright — see damageEnemy's comment for why that
+// decision must live in exactly one place.
+function updateSingularity() {
+  if (!stats.singularity) { singularity = null; return; }
+  if (!singularity) singularity = { angle: 0 };
+  singularity.angle += 0.02;
+  singularity.x = player.x + Math.cos(singularity.angle) * 70;
+  singularity.y = player.y + Math.sin(singularity.angle) * 52;
+  enemies.forEach(e => {
+    if (e.dead) return;
+    const dx = singularity.x - e.x, dy = singularity.y - e.y;
+    const d = Math.max(Math.hypot(dx, dy), 0.001); // guard against div-by-zero if exactly co-located
+    if (d < 120) {
+      e.x += (dx / d) * 1.6; e.y += (dy / d) * 1.6;
+      if (d < 26) damageEnemy(e, 0.5);
+    }
+  });
+}
+
+function drawSingularity() {
+  if (!singularity) return;
+  ctx.save();
+  ctx.translate(singularity.x, singularity.y);
+  const g = ctx.createRadialGradient(0, 0, 2, 0, 0, 24);
+  g.addColorStop(0, '#000000');
+  g.addColorStop(0.6, 'rgba(120,0,200,0.7)');
+  g.addColorStop(1, 'rgba(0,0,0,0)');
+  ctx.fillStyle = g;
+  ctx.beginPath(); ctx.arc(0, 0, 24, 0, Math.PI*2); ctx.fill();
+  ctx.strokeStyle = 'rgba(200,120,255,0.8)'; ctx.lineWidth = 1.5;
+  ctx.beginPath(); ctx.arc(0, 0, 9 + Math.sin(frame*0.1)*2, 0, Math.PI*2); ctx.stroke();
+  ctx.restore();
+}
+
 // Single definition of "what happens when an enemy takes damage". Every path
 // that can hurt an enemy — the direct bullet/enemy collision, applySplash and
 // applyChain — routes through here so they can't disagree about it. In
@@ -1900,6 +1984,12 @@ function update() {
     shootTimer = 0;
     fireWeapon();
   }
+
+  // Orbital Drone / Singularity: pushed here (same as fireWeapon above) so any
+  // new drone bullet moves this frame along with everything else, and so the
+  // singularity's drag/grind against enemies happens once per frame.
+  updateDrones();
+  updateSingularity();
 
   // Normal spawning is suspended for the duration of a boss fight; the boss
   // supplies its own minions in phase 3.
@@ -2225,6 +2315,8 @@ function draw() {
     });
 
     if (state === 'play') drawShip(player.x, player.y, player.invincible, player.shieldCharges, player.boost, frame, player.muzzle);
+    drawDrones();
+    drawSingularity();
 
     particles.forEach(p => {
       let alpha = p.life / p.maxLife;
