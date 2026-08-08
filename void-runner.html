@@ -1929,6 +1929,517 @@ SHIP_ART.vanguard = function (c0, c1, c2, trim) {
   ctx.fillRect(-13, -4, 4, 14); ctx.fillRect(9, -4, 4, 14);
 };
 
+// ===== SHIP HULLS =====
+// One silhouette per ship. Nose points at -y. Drawn around the origin with the
+// canvas already translated to the ship's centre. No engine flames, shields,
+// phase rings or cloak shimmer — drawShip owns all of that.
+
+// --- NEEDLE ---------------------------------------------------------------
+// A dart. Almost no frontal area: a 5px-wide spine twenty-two pixels long,
+// with fins swept so far back they trail past the tail.
+SHIP_ART.needle = function (c0, c1, c2, trim) {
+  // Rear fins first so the spine sits on top of them.
+  ctx.beginPath();
+  ctx.moveTo(-2.5, -2); ctx.lineTo(-11, 15); ctx.lineTo(-9.5, 18); ctx.lineTo(-2, 9);
+  ctx.closePath();
+  ctx.fillStyle = c2; ctx.fill();
+  ctx.strokeStyle = trim; ctx.lineWidth = 0.9; ctx.stroke();
+  ctx.beginPath();
+  ctx.moveTo(2.5, -2); ctx.lineTo(11, 15); ctx.lineTo(9.5, 18); ctx.lineTo(2, 9);
+  ctx.closePath();
+  ctx.fillStyle = c2; ctx.fill(); ctx.stroke();
+
+  // Forward canards — tiny, just enough to read as "aimed".
+  ctx.beginPath();
+  ctx.moveTo(-2, -12); ctx.lineTo(-6.5, -2); ctx.lineTo(-2, -4); ctx.closePath();
+  ctx.fillStyle = c1; ctx.fill(); ctx.stroke();
+  ctx.beginPath();
+  ctx.moveTo(2, -12); ctx.lineTo(6.5, -2); ctx.lineTo(2, -4); ctx.closePath();
+  ctx.fillStyle = c1; ctx.fill(); ctx.stroke();
+
+  // The spine.
+  ctx.beginPath();
+  ctx.moveTo(0, -20);
+  ctx.lineTo(2.4, -9); ctx.lineTo(3.2, 9); ctx.lineTo(2.4, 17);
+  ctx.lineTo(-2.4, 17); ctx.lineTo(-3.2, 9); ctx.lineTo(-2.4, -9);
+  ctx.closePath();
+  var ng = ctx.createLinearGradient(-3.2, -20, 3.2, 17);
+  ng.addColorStop(0, c0); ng.addColorStop(0.45, c1); ng.addColorStop(1, c2);
+  ctx.fillStyle = ng; ctx.fill();
+  ctx.strokeStyle = trim; ctx.lineWidth = 1.1; ctx.stroke();
+
+  // Cockpit is a slit, not a bubble.
+  ctx.beginPath(); ctx.ellipse(0, -8, 1.4, 4.5, 0, 0, Math.PI * 2);
+  ctx.fillStyle = '#ffffff'; ctx.fill();
+
+  // Lit leading edge.
+  ctx.beginPath(); ctx.moveTo(0, -19); ctx.lineTo(0, 12);
+  ctx.strokeStyle = c0; ctx.lineWidth = 0.8; ctx.stroke();
+};
+
+// --- BULWARK --------------------------------------------------------------
+// A slab with a blunt nose and bolted-on side armour. Widest thing in the
+// early roster and it should look like it.
+function bulwarkBolt(x, y, c0, c2) {
+  ctx.beginPath(); ctx.arc(x, y, 1.6, 0, Math.PI * 2);
+  ctx.fillStyle = c2; ctx.fill();
+  ctx.beginPath(); ctx.arc(x - 0.4, y - 0.4, 0.7, 0, Math.PI * 2);
+  ctx.fillStyle = c0; ctx.fill();
+}
+SHIP_ART.bulwark = function (c0, c1, c2, trim) {
+  // Main slab. Flat nose, straight flanks.
+  ctx.beginPath();
+  ctx.moveTo(-9, -20); ctx.lineTo(9, -20);
+  ctx.lineTo(13, -12); ctx.lineTo(13, 12); ctx.lineTo(10, 20);
+  ctx.lineTo(-10, 20); ctx.lineTo(-13, 12); ctx.lineTo(-13, -12);
+  ctx.closePath();
+  var bg = ctx.createLinearGradient(-13, -20, 13, 20);
+  bg.addColorStop(0, c0); bg.addColorStop(0.5, c1); bg.addColorStop(1, c2);
+  ctx.fillStyle = bg; ctx.fill();
+  ctx.strokeStyle = trim; ctx.lineWidth = 1.6; ctx.stroke();
+
+  // Heavy side armour, bolted on outboard of the flanks.
+  ctx.beginPath();
+  ctx.moveTo(-13, -10); ctx.lineTo(-18, -6); ctx.lineTo(-18, 12); ctx.lineTo(-13, 15);
+  ctx.closePath();
+  ctx.fillStyle = c2; ctx.fill(); ctx.strokeStyle = trim; ctx.lineWidth = 1.2; ctx.stroke();
+  ctx.beginPath();
+  ctx.moveTo(13, -10); ctx.lineTo(18, -6); ctx.lineTo(18, 12); ctx.lineTo(13, 15);
+  ctx.closePath();
+  ctx.fillStyle = c2; ctx.fill(); ctx.stroke();
+
+  // Brow plate over the flat nose.
+  ctx.beginPath();
+  ctx.moveTo(-9, -20); ctx.lineTo(9, -20); ctx.lineTo(7, -14); ctx.lineTo(-7, -14);
+  ctx.closePath();
+  ctx.fillStyle = c0; ctx.fill(); ctx.stroke();
+
+  // Visor slot rather than a canopy.
+  ctx.fillStyle = '#ffffff';
+  ctx.fillRect(-6, -9, 12, 3.5);
+  ctx.fillStyle = c2;
+  ctx.fillRect(-6, -3, 12, 2);
+
+  // Bolts. Two rows down each armour plate plus four on the brow.
+  bulwarkBolt(-15.5, -3, c0, c2); bulwarkBolt(-15.5, 4, c0, c2); bulwarkBolt(-15.5, 11, c0, c2);
+  bulwarkBolt(15.5, -3, c0, c2); bulwarkBolt(15.5, 4, c0, c2); bulwarkBolt(15.5, 11, c0, c2);
+  bulwarkBolt(-6, -17.5, c0, c2); bulwarkBolt(6, -17.5, c0, c2);
+
+  // Rear thruster block.
+  ctx.fillStyle = c1;
+  ctx.fillRect(-9, 15, 6, 6); ctx.fillRect(3, 15, 6, 6);
+};
+
+// --- PHANTOM --------------------------------------------------------------
+// A small delta with the middle cut clean out. The hole is the whole point:
+// you should see stars through this ship.
+SHIP_ART.phantom = function (c0, c1, c2, trim) {
+  ctx.beginPath();
+  // Outer delta.
+  ctx.moveTo(0, -16); ctx.lineTo(11, 12); ctx.lineTo(8, 14); ctx.lineTo(0, 8);
+  ctx.lineTo(-8, 14); ctx.lineTo(-11, 12);
+  ctx.closePath();
+  // Inner hole, wound the same way — even-odd punches it out.
+  ctx.moveTo(0, -6); ctx.lineTo(6, 8); ctx.lineTo(0, 4); ctx.lineTo(-6, 8);
+  ctx.closePath();
+  var pg = ctx.createLinearGradient(0, -16, 0, 14);
+  pg.addColorStop(0, c0); pg.addColorStop(0.55, c1); pg.addColorStop(1, c2);
+  ctx.fillStyle = pg; ctx.fill('evenodd');
+
+  // Outline both rims so the hollow reads at 40px.
+  ctx.beginPath();
+  ctx.moveTo(0, -16); ctx.lineTo(11, 12); ctx.lineTo(8, 14); ctx.lineTo(0, 8);
+  ctx.lineTo(-8, 14); ctx.lineTo(-11, 12); ctx.closePath();
+  ctx.strokeStyle = trim; ctx.lineWidth = 1.4; ctx.stroke();
+  ctx.beginPath();
+  ctx.moveTo(0, -6); ctx.lineTo(6, 8); ctx.lineTo(0, 4); ctx.lineTo(-6, 8); ctx.closePath();
+  ctx.strokeStyle = trim; ctx.lineWidth = 1; ctx.stroke();
+
+  // Wingtip winglets, turned up.
+  ctx.beginPath(); ctx.moveTo(-11, 12); ctx.lineTo(-12, 5); ctx.lineTo(-9, 10); ctx.closePath();
+  ctx.fillStyle = c2; ctx.fill(); ctx.stroke();
+  ctx.beginPath(); ctx.moveTo(11, 12); ctx.lineTo(12, 5); ctx.lineTo(9, 10); ctx.closePath();
+  ctx.fillStyle = c2; ctx.fill(); ctx.stroke();
+
+  // Nose sensor.
+  ctx.beginPath(); ctx.ellipse(0, -11, 1.6, 2.6, 0, 0, Math.PI * 2);
+  ctx.fillStyle = '#ffffff'; ctx.fill();
+  ctx.beginPath(); ctx.moveTo(-3, -8); ctx.lineTo(3, -8);
+  ctx.strokeStyle = c0; ctx.lineWidth = 0.8; ctx.stroke();
+};
+
+// --- WARDEN ---------------------------------------------------------------
+// Rounded hull holding a riot shield out in front of it. The shield is wider
+// than the ship and overlaps the nose — that overhang is the read.
+SHIP_ART.warden = function (c0, c1, c2, trim) {
+  // Rounded body.
+  ctx.beginPath();
+  ctx.moveTo(0, -14);
+  ctx.bezierCurveTo(7, -12, 10, -2, 10, 8);
+  ctx.lineTo(9, 18); ctx.lineTo(-9, 18);
+  ctx.lineTo(-10, 8);
+  ctx.bezierCurveTo(-10, -2, -7, -12, 0, -14);
+  ctx.closePath();
+  var wg = ctx.createLinearGradient(-10, -14, 10, 18);
+  wg.addColorStop(0, c0); wg.addColorStop(0.5, c1); wg.addColorStop(1, c2);
+  ctx.fillStyle = wg; ctx.fill();
+  ctx.strokeStyle = trim; ctx.lineWidth = 1.3; ctx.stroke();
+
+  // Outboard nacelles.
+  ctx.fillStyle = c2;
+  ctx.fillRect(-14, 2, 4.5, 15); ctx.fillRect(9.5, 2, 4.5, 15);
+  ctx.strokeStyle = trim; ctx.lineWidth = 0.9;
+  ctx.strokeRect(-14, 2, 4.5, 15); ctx.strokeRect(9.5, 2, 4.5, 15);
+
+  // The riot shield: a broad curved plate carried ahead of the nose.
+  ctx.beginPath();
+  ctx.moveTo(-15, -8);
+  ctx.quadraticCurveTo(0, -24, 15, -8);
+  ctx.quadraticCurveTo(0, -13, -15, -8);
+  ctx.closePath();
+  ctx.fillStyle = c1; ctx.fill();
+  ctx.strokeStyle = trim; ctx.lineWidth = 1.6; ctx.stroke();
+
+  // Shield ribs and centre boss.
+  ctx.beginPath();
+  ctx.moveTo(-8, -12); ctx.lineTo(-8, -9);
+  ctx.moveTo(0, -15); ctx.lineTo(0, -10);
+  ctx.moveTo(8, -12); ctx.lineTo(8, -9);
+  ctx.strokeStyle = c2; ctx.lineWidth = 1; ctx.stroke();
+  ctx.beginPath(); ctx.arc(0, -13, 3, 0, Math.PI * 2);
+  ctx.fillStyle = c0; ctx.fill();
+  ctx.strokeStyle = trim; ctx.lineWidth = 0.9; ctx.stroke();
+
+  // Canopy behind the shield.
+  ctx.beginPath(); ctx.ellipse(0, -2, 4, 5.5, 0, 0, Math.PI * 2);
+  ctx.fillStyle = '#ffffff'; ctx.fill();
+};
+
+// --- SCAVENGER ------------------------------------------------------------
+// Deliberately lopsided. Cargo pods bolted down the right flank, a collector
+// dish cantilevered off the left, and no two panels matching.
+SHIP_ART.scavenger = function (c0, c1, c2, trim) {
+  // Off-centre hull — the spine sits right of the origin.
+  ctx.beginPath();
+  ctx.moveTo(2, -19);
+  ctx.lineTo(9, -4); ctx.lineTo(10, 13); ctx.lineTo(6, 19);
+  ctx.lineTo(-5, 19); ctx.lineTo(-8, 10); ctx.lineTo(-6, -6);
+  ctx.closePath();
+  var sg = ctx.createLinearGradient(-8, -19, 10, 19);
+  sg.addColorStop(0, c1); sg.addColorStop(0.6, c0); sg.addColorStop(1, c2);
+  ctx.fillStyle = sg; ctx.fill();
+  ctx.strokeStyle = trim; ctx.lineWidth = 1.3; ctx.stroke();
+
+  // RIGHT: two mismatched cargo pods on a stub pylon.
+  ctx.fillStyle = c2;
+  ctx.fillRect(9, -6, 3, 4);
+  ctx.beginPath();
+  ctx.moveTo(11, -9); ctx.lineTo(17, -7); ctx.lineTo(17, 3); ctx.lineTo(11, 2);
+  ctx.closePath();
+  ctx.fillStyle = c1; ctx.fill(); ctx.strokeStyle = trim; ctx.lineWidth = 1; ctx.stroke();
+  ctx.beginPath();
+  ctx.moveTo(10, 5); ctx.lineTo(15, 6); ctx.lineTo(15, 15); ctx.lineTo(10, 16);
+  ctx.closePath();
+  ctx.fillStyle = c2; ctx.fill(); ctx.stroke();
+  ctx.fillStyle = c0;
+  ctx.fillRect(12, -5, 4, 1.5); ctx.fillRect(12, -1, 4, 1.5);
+
+  // LEFT: collector dish on an arm, facing forward.
+  ctx.beginPath(); ctx.moveTo(-6, 0); ctx.lineTo(-12, -4);
+  ctx.strokeStyle = c2; ctx.lineWidth = 2.2; ctx.stroke();
+  ctx.beginPath();
+  ctx.arc(-13, -4, 7, Math.PI * 0.62, Math.PI * 1.72);
+  ctx.closePath();
+  ctx.fillStyle = c0; ctx.fill();
+  ctx.strokeStyle = trim; ctx.lineWidth = 1.2; ctx.stroke();
+  ctx.beginPath(); ctx.arc(-13, -4, 3.7, Math.PI * 0.62, Math.PI * 1.72);
+  ctx.strokeStyle = c2; ctx.lineWidth = 1; ctx.stroke();
+  ctx.beginPath(); ctx.arc(-13, -4, 1.5, 0, Math.PI * 2);
+  ctx.fillStyle = trim; ctx.fill();
+
+  // Mismatched hull panels and a crooked whip aerial.
+  ctx.fillStyle = c2; ctx.fillRect(-4, 4, 7, 6);
+  ctx.fillStyle = c0; ctx.fillRect(3, -2, 4, 5);
+  ctx.beginPath(); ctx.moveTo(4, -18); ctx.lineTo(7, -23);
+  ctx.strokeStyle = trim; ctx.lineWidth = 0.9; ctx.stroke();
+
+  // Cockpit, shoved off to one side like everything else.
+  ctx.beginPath(); ctx.ellipse(2, -11, 3, 4.2, 0.2, 0, Math.PI * 2);
+  ctx.fillStyle = '#ffffff'; ctx.fill();
+};
+
+// --- REVENANT -------------------------------------------------------------
+// More frame than skin: a bare spine, four pairs of exposed ribs, and wings
+// swept FORWARD so it leans into the fight.
+SHIP_ART.revenant = function (c0, c1, c2, trim) {
+  // Forward-swept wings — tips are ahead of the roots.
+  ctx.beginPath();
+  ctx.moveTo(-2, 10); ctx.lineTo(-12, -6); ctx.lineTo(-13, -1); ctx.lineTo(-3, 14);
+  ctx.closePath();
+  ctx.fillStyle = c2; ctx.fill();
+  ctx.strokeStyle = trim; ctx.lineWidth = 1.1; ctx.stroke();
+  ctx.beginPath();
+  ctx.moveTo(2, 10); ctx.lineTo(12, -6); ctx.lineTo(13, -1); ctx.lineTo(3, 14);
+  ctx.closePath();
+  ctx.fillStyle = c2; ctx.fill(); ctx.stroke();
+
+  // Exposed ribcage — struts, no plating between them.
+  ctx.strokeStyle = c1; ctx.lineWidth = 1.6;
+  for (var i = 0; i < 4; i++) {
+    var ry = -3 + i * 4.6, rx = 9 - i * 1.2;
+    ctx.beginPath();
+    ctx.moveTo(-2, ry - 2); ctx.quadraticCurveTo(-rx, ry, -rx * 0.6, ry + 4);
+    ctx.stroke();
+    ctx.beginPath();
+    ctx.moveTo(2, ry - 2); ctx.quadraticCurveTo(rx, ry, rx * 0.6, ry + 4);
+    ctx.stroke();
+  }
+
+  // The spine itself.
+  ctx.beginPath();
+  ctx.moveTo(0, -17); ctx.lineTo(3, -8); ctx.lineTo(3, 12); ctx.lineTo(2, 17);
+  ctx.lineTo(-2, 17); ctx.lineTo(-3, 12); ctx.lineTo(-3, -8);
+  ctx.closePath();
+  var rg = ctx.createLinearGradient(0, -17, 0, 17);
+  rg.addColorStop(0, c0); rg.addColorStop(0.5, c1); rg.addColorStop(1, c2);
+  ctx.fillStyle = rg; ctx.fill();
+  ctx.strokeStyle = trim; ctx.lineWidth = 1.2; ctx.stroke();
+
+  // Vertebrae.
+  ctx.fillStyle = c0;
+  ctx.fillRect(-1.2, -5, 2.4, 2); ctx.fillRect(-1.2, 0, 2.4, 2); ctx.fillRect(-1.2, 5, 2.4, 2);
+
+  // Skull-plate nose.
+  ctx.beginPath();
+  ctx.moveTo(0, -19); ctx.lineTo(4, -11); ctx.lineTo(0, -9); ctx.lineTo(-4, -11);
+  ctx.closePath();
+  ctx.fillStyle = c0; ctx.fill(); ctx.stroke();
+  ctx.beginPath(); ctx.arc(0, -12, 1.3, 0, Math.PI * 2);
+  ctx.fillStyle = '#ffffff'; ctx.fill();
+};
+
+// --- TITAN ----------------------------------------------------------------
+// A carrier. Layered deck plating and four separate engine housings across a
+// squared-off stern — the biggest, heaviest outline in the hangar.
+SHIP_ART.titan = function (c0, c1, c2, trim) {
+  // Lower hull, widest layer.
+  ctx.beginPath();
+  ctx.moveTo(-8, -18); ctx.lineTo(8, -18);
+  ctx.lineTo(16, 0); ctx.lineTo(18, 16); ctx.lineTo(-18, 16); ctx.lineTo(-16, 0);
+  ctx.closePath();
+  ctx.fillStyle = c2; ctx.fill();
+  ctx.strokeStyle = trim; ctx.lineWidth = 1.6; ctx.stroke();
+
+  // Mid deck.
+  ctx.beginPath();
+  ctx.moveTo(-6, -20); ctx.lineTo(6, -20);
+  ctx.lineTo(12, -2); ctx.lineTo(12, 12); ctx.lineTo(-12, 12); ctx.lineTo(-12, -2);
+  ctx.closePath();
+  var tg = ctx.createLinearGradient(-12, -20, 12, 12);
+  tg.addColorStop(0, c0); tg.addColorStop(0.5, c1); tg.addColorStop(1, c2);
+  ctx.fillStyle = tg; ctx.fill(); ctx.stroke();
+
+  // Upper spine plate.
+  ctx.beginPath();
+  ctx.moveTo(0, -21); ctx.lineTo(6, -6); ctx.lineTo(5, 8); ctx.lineTo(-5, 8); ctx.lineTo(-6, -6);
+  ctx.closePath();
+  ctx.fillStyle = c0; ctx.fill();
+  ctx.strokeStyle = trim; ctx.lineWidth = 1; ctx.stroke();
+
+  // Four engine housings across the stern.
+  var ex = [-15, -6.5, 2, 10.5];
+  for (var i = 0; i < 4; i++) {
+    ctx.fillStyle = c1;
+    ctx.fillRect(ex[i], 13, 5, 8);
+    ctx.strokeStyle = trim; ctx.lineWidth = 0.9;
+    ctx.strokeRect(ex[i], 13, 5, 8);
+    ctx.fillStyle = c2;
+    ctx.fillRect(ex[i] + 1, 18, 3, 3);
+  }
+
+  // Shoulder pylons.
+  ctx.beginPath(); ctx.moveTo(-12, -2); ctx.lineTo(-19, 2); ctx.lineTo(-16, 8); ctx.closePath();
+  ctx.fillStyle = c1; ctx.fill(); ctx.strokeStyle = trim; ctx.lineWidth = 1; ctx.stroke();
+  ctx.beginPath(); ctx.moveTo(12, -2); ctx.lineTo(19, 2); ctx.lineTo(16, 8); ctx.closePath();
+  ctx.fillStyle = c1; ctx.fill(); ctx.stroke();
+
+  // Bridge.
+  ctx.beginPath(); ctx.ellipse(0, -12, 3.2, 5, 0, 0, Math.PI * 2);
+  ctx.fillStyle = '#ffffff'; ctx.fill();
+  // Deck seams.
+  ctx.beginPath();
+  ctx.moveTo(-11, 2); ctx.lineTo(11, 2);
+  ctx.moveTo(-12, 7); ctx.lineTo(12, 7);
+  ctx.strokeStyle = c2; ctx.lineWidth = 0.9; ctx.stroke();
+};
+
+// --- ORACLE ---------------------------------------------------------------
+// An instrument more than a fighter: a hollow sensor ring mounted ahead of a
+// slim fuselage, with a pair of antennae raked up and out.
+SHIP_ART.oracle = function (c0, c1, c2, trim) {
+  // Antennae, drawn first so the ring overlaps their roots.
+  ctx.beginPath();
+  ctx.moveTo(-5, 4); ctx.lineTo(-13, -14);
+  ctx.moveTo(5, 4); ctx.lineTo(13, -14);
+  ctx.strokeStyle = trim; ctx.lineWidth = 1; ctx.stroke();
+  ctx.beginPath(); ctx.arc(-13, -14, 1.8, 0, Math.PI * 2);
+  ctx.fillStyle = c0; ctx.fill();
+  ctx.beginPath(); ctx.arc(13, -14, 1.8, 0, Math.PI * 2);
+  ctx.fillStyle = c0; ctx.fill();
+
+  // Slim fuselage.
+  ctx.beginPath();
+  ctx.moveTo(0, -6); ctx.lineTo(6, 2); ctx.lineTo(6, 14); ctx.lineTo(4, 18);
+  ctx.lineTo(-4, 18); ctx.lineTo(-6, 14); ctx.lineTo(-6, 2);
+  ctx.closePath();
+  var og = ctx.createLinearGradient(0, -6, 0, 18);
+  og.addColorStop(0, c0); og.addColorStop(0.5, c1); og.addColorStop(1, c2);
+  ctx.fillStyle = og; ctx.fill();
+  ctx.strokeStyle = trim; ctx.lineWidth = 1.2; ctx.stroke();
+
+  // Low swept fins.
+  ctx.beginPath(); ctx.moveTo(-6, 6); ctx.lineTo(-12, 17); ctx.lineTo(-6, 15); ctx.closePath();
+  ctx.fillStyle = c2; ctx.fill(); ctx.stroke();
+  ctx.beginPath(); ctx.moveTo(6, 6); ctx.lineTo(12, 17); ctx.lineTo(6, 15); ctx.closePath();
+  ctx.fillStyle = c2; ctx.fill(); ctx.stroke();
+
+  // Mount struts up to the ring.
+  ctx.beginPath();
+  ctx.moveTo(-3, -5); ctx.lineTo(-6, -10);
+  ctx.moveTo(3, -5); ctx.lineTo(6, -10);
+  ctx.strokeStyle = c2; ctx.lineWidth = 1.8; ctx.stroke();
+
+  // The ring: an annulus punched out with even-odd, so it reads hollow.
+  ctx.beginPath();
+  ctx.arc(0, -12, 8.5, 0, Math.PI * 2);
+  ctx.arc(0, -12, 5.1, 0, Math.PI * 2);
+  ctx.fillStyle = c1; ctx.fill('evenodd');
+  ctx.beginPath(); ctx.arc(0, -12, 8.5, 0, Math.PI * 2);
+  ctx.strokeStyle = trim; ctx.lineWidth = 1.3; ctx.stroke();
+  ctx.beginPath(); ctx.arc(0, -12, 5.1, 0, Math.PI * 2);
+  ctx.strokeStyle = c0; ctx.lineWidth = 0.9; ctx.stroke();
+
+  // The lens, slung under the ring, blinking slowly.
+  ctx.beginPath(); ctx.arc(0, -12, 2.5, 0, Math.PI * 2);
+  ctx.fillStyle = '#ffffff'; ctx.fill();
+  ctx.save();
+  ctx.globalAlpha = 0.35 + 0.25 * Math.sin(frame * 0.05);
+  ctx.beginPath(); ctx.arc(0, -12, 3.8, 0, Math.PI * 2);
+  ctx.strokeStyle = c0; ctx.lineWidth = 0.8; ctx.stroke();
+  ctx.restore();
+};
+
+// --- WRAITH ---------------------------------------------------------------
+// Barely there. One thin blade of hull, everything else negative space, and
+// trailing edges that fade out instead of ending.
+SHIP_ART.wraith = function (c0, c1, c2, trim) {
+  // Ghosted trailing edges — long, thin, almost gone.
+  ctx.save();
+  ctx.globalAlpha = 0.3;
+  ctx.beginPath();
+  ctx.moveTo(-2, 2); ctx.lineTo(-10, 20); ctx.lineTo(-3, 12); ctx.closePath();
+  ctx.fillStyle = c1; ctx.fill();
+  ctx.beginPath();
+  ctx.moveTo(2, 2); ctx.lineTo(10, 20); ctx.lineTo(3, 12); ctx.closePath();
+  ctx.fillStyle = c1; ctx.fill();
+  ctx.restore();
+
+  // The blade: a single narrow sliver of solid hull.
+  ctx.beginPath();
+  ctx.moveTo(0, -17);
+  ctx.lineTo(3.5, -2); ctx.lineTo(2, 15); ctx.lineTo(-2, 15); ctx.lineTo(-3.5, -2);
+  ctx.closePath();
+  var xg = ctx.createLinearGradient(0, -17, 0, 15);
+  xg.addColorStop(0, c0); xg.addColorStop(0.45, c1); xg.addColorStop(1, c2);
+  ctx.fillStyle = xg; ctx.fill();
+  ctx.strokeStyle = trim; ctx.lineWidth = 1.1; ctx.stroke();
+
+  // Wings exist only as outlines — the fill is the void behind them.
+  ctx.beginPath();
+  ctx.moveTo(-3, -4); ctx.lineTo(-10, 8); ctx.lineTo(-6, 14);
+  ctx.strokeStyle = trim; ctx.lineWidth = 1; ctx.stroke();
+  ctx.beginPath();
+  ctx.moveTo(3, -4); ctx.lineTo(10, 8); ctx.lineTo(6, 14);
+  ctx.stroke();
+
+  // A single lit rib on each side, so the empty wing still has an edge.
+  ctx.save();
+  ctx.globalAlpha = 0.55;
+  ctx.beginPath();
+  ctx.moveTo(-3.2, 3); ctx.lineTo(-8, 9);
+  ctx.moveTo(3.2, 3); ctx.lineTo(8, 9);
+  ctx.strokeStyle = c0; ctx.lineWidth = 0.8; ctx.stroke();
+  ctx.restore();
+
+  // Dark slit where a cockpit would be.
+  ctx.beginPath(); ctx.ellipse(0, -8, 1.2, 3.6, 0, 0, Math.PI * 2);
+  ctx.fillStyle = c2; ctx.fill();
+  ctx.beginPath(); ctx.moveTo(0, -16); ctx.lineTo(0, -12);
+  ctx.strokeStyle = '#ffffff'; ctx.lineWidth = 0.8; ctx.stroke();
+};
+
+// --- ASCENDANT ------------------------------------------------------------
+// Regal. Three layered wing blades a side stack into a crown, with a spiked
+// diadem over the nose and a jewel at the heart.
+SHIP_ART.ascendant = function (c0, c1, c2, trim) {
+  // Crown wings: three blades each side, each longer and higher than the last.
+  var blade = [[8, 4, 16, -4, 10, 10], [10, 8, 15, 4, 9, 14], [9, 12, 12, 12, 6, 17]];
+  for (var i = 0; i < 3; i++) {
+    var b = blade[i];
+    ctx.beginPath();
+    ctx.moveTo(-b[0], b[1]); ctx.lineTo(-b[2], b[3]); ctx.lineTo(-b[4], b[5]);
+    ctx.closePath();
+    ctx.fillStyle = i === 1 ? c1 : c2; ctx.fill();
+    ctx.strokeStyle = trim; ctx.lineWidth = 1; ctx.stroke();
+    ctx.beginPath();
+    ctx.moveTo(b[0], b[1]); ctx.lineTo(b[2], b[3]); ctx.lineTo(b[4], b[5]);
+    ctx.closePath();
+    ctx.fillStyle = i === 1 ? c1 : c2; ctx.fill(); ctx.stroke();
+  }
+
+  // Core hull, tall and narrow.
+  ctx.beginPath();
+  ctx.moveTo(0, -17);
+  ctx.lineTo(5, -6); ctx.lineTo(7, 8); ctx.lineTo(5, 17);
+  ctx.lineTo(-5, 17); ctx.lineTo(-7, 8); ctx.lineTo(-5, -6);
+  ctx.closePath();
+  var ag = ctx.createLinearGradient(-7, -17, 7, 17);
+  ag.addColorStop(0, c0); ag.addColorStop(0.5, c1); ag.addColorStop(1, c2);
+  ctx.fillStyle = ag; ctx.fill();
+  ctx.strokeStyle = trim; ctx.lineWidth = 1.4; ctx.stroke();
+
+  // The diadem: five spikes stepped over the nose.
+  var spike = [[-9, -8, -7, -14], [-5, -12, -4, -17], [0, -15, 0, -21], [5, -12, 4, -17], [9, -8, 7, -14]];
+  for (var j = 0; j < 5; j++) {
+    var s = spike[j];
+    ctx.beginPath();
+    ctx.moveTo(s[0], s[1]); ctx.lineTo(s[2], s[3]); ctx.lineTo(s[0] * 0.45, s[1] - 1);
+    ctx.closePath();
+    ctx.fillStyle = c0; ctx.fill();
+    ctx.strokeStyle = trim; ctx.lineWidth = 0.9; ctx.stroke();
+  }
+
+  // Filigree down the flanks.
+  ctx.beginPath();
+  ctx.moveTo(-4, -2); ctx.quadraticCurveTo(-8, 4, -4, 12);
+  ctx.moveTo(4, -2); ctx.quadraticCurveTo(8, 4, 4, 12);
+  ctx.strokeStyle = c0; ctx.lineWidth = 0.9; ctx.stroke();
+
+  // Heart jewel — a slow, faint pulse.
+  ctx.beginPath();
+  ctx.moveTo(0, -8); ctx.lineTo(4, -2); ctx.lineTo(0, 5); ctx.lineTo(-4, -2);
+  ctx.closePath();
+  ctx.fillStyle = '#ffffff'; ctx.fill();
+  ctx.strokeStyle = trim; ctx.lineWidth = 1; ctx.stroke();
+  ctx.save();
+  ctx.globalAlpha = 0.3 + 0.2 * Math.sin(frame * 0.06);
+  ctx.beginPath();
+  ctx.moveTo(0, -11); ctx.lineTo(6, -2); ctx.lineTo(0, 8); ctx.lineTo(-6, -2);
+  ctx.closePath();
+  ctx.strokeStyle = c0; ctx.lineWidth = 0.9; ctx.stroke();
+  ctx.restore();
+};
+
 function drawShip(x, y, invincible, shield, t, muzzle, shipDef) {
   const def = shipDef || currentShip();
   const [c0, c1, c2] = def.hull;
