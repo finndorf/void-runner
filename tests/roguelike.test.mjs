@@ -2390,3 +2390,74 @@ test('the level below the threshold is unrestricted and the threshold itself is 
   assert.equal(core.canFireAt('grunt', core.ARC_FROM_LEVEL - 1, 3), true);
   assert.equal(core.canFireAt('grunt', core.ARC_FROM_LEVEL, 3), false);
 });
+
+// ---------------------------------------------------------------------------
+// DIFFICULTY CURVE
+// ---------------------------------------------------------------------------
+// These exist because the original curves were linear and unbounded, which is
+// fine for eight levels and catastrophic for 2,500: at the Mothership an enemy
+// bullet crossed the whole screen in under two frames. Not hard — undodgeable.
+
+test('the early difficulty curve is unchanged from the hand-tuned original', () => {
+  // Below the knees the formulas must still be exactly 1.2 + 0.2*lv and
+  // 2.5 + 0.15*lv, so the opening levels play as they were tuned to.
+  for (let lv = 1; lv <= core.ENEMY_SPEED_KNEE; lv++) {
+    close(core.difficultyAt(lv).enemySpeed, 1.2 + lv * 0.2, `enemy speed at ${lv}`);
+  }
+  for (let lv = 1; lv <= core.BULLET_SPEED_KNEE; lv++) {
+    close(core.difficultyAt(lv).bulletSpeed, 2.5 + lv * 0.15, `bullet speed at ${lv}`);
+  }
+});
+
+test('both speed curves are continuous across their knee', () => {
+  close(core.difficultyAt(core.ENEMY_SPEED_KNEE).enemySpeed, core.ENEMY_SPEED_CAP);
+  close(core.difficultyAt(core.BULLET_SPEED_KNEE).bulletSpeed, core.BULLET_SPEED_CAP);
+  // No jump on either side of the join — one level past the knee the curve has
+  // only crept, not stepped. (close() is exact to 1e-6; a knee is a change of
+  // slope, not of value, so this needs a slope-sized tolerance instead.)
+  const eStep = core.difficultyAt(core.ENEMY_SPEED_KNEE + 1).enemySpeed - core.ENEMY_SPEED_CAP;
+  const bStep = core.difficultyAt(core.BULLET_SPEED_KNEE + 1).bulletSpeed - core.BULLET_SPEED_CAP;
+  assert.ok(eStep >= 0 && eStep < 0.02, `enemy speed steps by ${eStep} across the knee`);
+  assert.ok(bStep >= 0 && bStep < 0.02, `bullet speed steps by ${bStep} across the knee`);
+});
+
+test('speeds saturate rather than growing without bound', () => {
+  for (const lv of [100, 500, 1000, 2500, 100000, 1e9]) {
+    const d = core.difficultyAt(lv);
+    assert.ok(d.enemySpeed <= core.ENEMY_SPEED_CAP + 1.5 + 1e-9, `enemy speed at ${lv} is ${d.enemySpeed}`);
+    assert.ok(d.bulletSpeed <= core.BULLET_SPEED_CAP + 0.5 + 1e-9, `bullet speed at ${lv} is ${d.bulletSpeed}`);
+  }
+});
+
+test('an enemy bullet is always dodgeable — it never crosses the screen in under a second', () => {
+  // 720px canvas at 60fps. Anything under ~60 frames is not a reaction, it is
+  // a coin flip. The old curve managed 1.9 frames at level 2500.
+  for (const lv of [1, 50, 200, 500, 1000, 2500, 10000]) {
+    const frames = 720 / core.difficultyAt(lv).bulletSpeed;
+    assert.ok(frames >= 60, `at level ${lv} a bullet crosses in ${frames.toFixed(1)} frames`);
+  }
+});
+
+test('enemy bullets never outrun the player own bullets', () => {
+  for (const lv of [1, 24, 50, 500, 2500, 1e6]) {
+    assert.ok(core.difficultyAt(lv).bulletSpeed < core.PLAYER_BULLET_SPEED,
+      `enemy bullet speed at level ${lv} reaches the player's own ${core.PLAYER_BULLET_SPEED}`);
+  }
+});
+
+test('speeds are monotonically non-decreasing with depth', () => {
+  let pe = 0, pb = 0;
+  for (let lv = 1; lv <= 3000; lv++) {
+    const d = core.difficultyAt(lv);
+    assert.ok(d.enemySpeed >= pe - 1e-9, `enemy speed dipped at ${lv}`);
+    assert.ok(d.bulletSpeed >= pb - 1e-9, `bullet speed dipped at ${lv}`);
+    pe = d.enemySpeed; pb = d.bulletSpeed;
+  }
+});
+
+test('spawn and asteroid rates stay clamped at their floors', () => {
+  for (const lv of [1, 20, 100, 2500]) {
+    const d = core.difficultyAt(lv);
+    assert.ok(d.spawnRate >= 35 && d.asteroidRate >= 50, `level ${lv}`);
+  }
+});

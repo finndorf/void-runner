@@ -222,6 +222,42 @@ RLCore.enemyScale = function (level) {
   return Math.min(RLCore.ENEMY_SCALE_CAP, 1 + Math.pow(Math.max(1, level), 0.35) / 11);
 };
 
+// ---------------------------------------------------------------------------
+// DIFFICULTY CURVE
+// ---------------------------------------------------------------------------
+// Speeds saturate. The original curves were linear in level and unbounded:
+// `1.2 + level*0.2` and `2.5 + level*0.15`. That is fine for eight levels and
+// catastrophic for 2,500 — at the Mothership an enemy bullet moved 377 px per
+// frame and crossed the whole 720px screen in under two frames. Not "hard":
+// literally undodgeable, and invisible on the way. Everything past roughly
+// level 150 was unplayable.
+//
+// Both curves are unchanged up to their knee, so the early game plays exactly
+// as it was tuned, and then creep gently so depth still reads as faster
+// without ever outrunning reaction time. Enemy bullets stay slower than the
+// player's own (11 px/frame) at every depth.
+
+RLCore.PLAYER_BULLET_SPEED = 11;
+RLCore.ENEMY_SPEED_KNEE = 24;    // where 1.2 + 0.2*level reaches the cap
+RLCore.ENEMY_SPEED_CAP = 6.0;
+RLCore.BULLET_SPEED_KNEE = 50;   // where 2.5 + 0.15*level reaches the cap
+RLCore.BULLET_SPEED_CAP = 10.0;
+
+RLCore.difficultyAt = function (level) {
+  const lv = Math.max(1, level || 1);
+  const enemySpeed = lv <= RLCore.ENEMY_SPEED_KNEE
+    ? 1.2 + lv * 0.2
+    : RLCore.ENEMY_SPEED_CAP + Math.min(1.5, (lv - RLCore.ENEMY_SPEED_KNEE) * 0.002);
+  const bulletSpeed = lv <= RLCore.BULLET_SPEED_KNEE
+    ? 2.5 + lv * 0.15
+    : RLCore.BULLET_SPEED_CAP + Math.min(0.5, (lv - RLCore.BULLET_SPEED_KNEE) * 0.0004);
+  return {
+    spawnRate: Math.max(35, 90 - lv * 5),
+    asteroidRate: Math.max(50, 120 - lv * 6),
+    enemySpeed, bulletSpeed
+  };
+};
+
 RLCore.METEORS = [
   { id: 'ice',        name: 'ICE',               from:    1, hp:   30, behaviour: 'shatter' },
   { id: 'iron',       name: 'IRON',              from:   25, hp:  120, behaviour: 'solid' },
@@ -1330,14 +1366,7 @@ let touchX = null;
 
 // ---- DIFFICULTY ----
 let spawnTimer = 0, asteroidTimer = 0, levelTimer = 0, spawnCycle = 0;
-function difficulty() {
-  return {
-    spawnRate: Math.max(35, 90 - level*5),
-    asteroidRate: Math.max(50, 120 - level*6),
-    enemySpeed: 1.2 + level*0.2,
-    bulletSpeed: 2.5 + level*0.15
-  };
-}
+function difficulty() { return RLCore.difficultyAt(level); }
 
 // ===== SYSTEMS =====
 
@@ -2793,6 +2822,2319 @@ BOSS.choir = {
   title(b) { return 'HEADS ' + b.heads.filter(h => !h.dead).length + ' / 3'; }
 };
 
+// ---- boss pack: boss_c ----
+// ===========================================================================
+// VOID RUNNER — boss set C
+//   L300  SEVEN ANGLES        a polygon that gains a side, and a gun, a phase
+//   L350  THE WIDOW           a tether that hurts while taut
+//   L400  ASHEN CHOIRMASTER   everything lands on an audible four-beat bar
+//   L500  THE THRESHOLD       copies your build and fights you with it
+//
+// Every helper below is prefixed with its boss key so nothing in this file can
+// collide with another boss file spliced into the same script.
+// ===========================================================================
+
+
+// ---------------------------------------------------------------------------
+// L300 — SEVEN ANGLES
+// Mechanic: the hull IS the weapon. It is a rotating regular polygon whose
+// side count rises with the phase — a triangle at phase 1, a heptagon at
+// phase 5 — and every side is an independent turret firing along its own
+// outward normal. So the shot pattern is a rotating star that gains a point
+// every phase, and rotation reverses direction each time, which means the
+// safe wedge you learned last phase sweeps the other way in this one.
+//
+// Two firing modes share the same geometry:
+//   SEQUENCER  one face at a time, lit for the full interval before it fires,
+//              walking around the polygon. That lit face IS the wind-up.
+//   VOLLEY     every face at once, after a 36-frame charge where all muzzles
+//              glow and the hull pulses. Punctuation, not chip damage.
+//
+// Damage: a face that just fired is glowing hot and takes 60% more. It never
+// blocks — the shape is a target, not a shield.
+// ---------------------------------------------------------------------------
+
+function sevenanglesSideCount(ph) { return Math.max(3, Math.min(7, 2 + ph)); }
+
+// Outward normal of face i on an n-gon rotated by rot.
+function sevenanglesFaceAngle(rot, n, i) { return rot + (i + 0.5) * Math.PI * 2 / n; }
+
+// Distance from centre to the midpoint of a face (the apothem).
+function sevenanglesApothem(n, R) { return R * Math.cos(Math.PI / n); }
+
+// Which face is a world point sitting over?
+function sevenanglesFaceAt(b, wx, wy) {
+  var n = b.sevN;
+  // Face i spans the arc [rot + i*step, rot + (i+1)*step].
+  var step = Math.PI * 2 / n;
+  var a = Math.atan2(wy - b.y, wx - b.x) - b.sevRot;
+  var i = Math.floor(a / step) % n;
+  while (i < 0) i += n;
+  return i;
+}
+
+function sevenanglesFireFace(b, i, ph, heavy) {
+  var R = b.sevR;
+  var ang = sevenanglesFaceAngle(b.sevRot, b.sevN, i);
+  var ap = sevenanglesApothem(b.sevN, R);
+  var mx = b.x + Math.cos(ang) * (ap + 6);
+  var my = b.y + Math.sin(ang) * (ap + 6);
+  var f = b.sevFaces[i];
+  if (f) { f.heat = 60; f.muzzle = 9; }
+  if (heavy) {
+    // volley shot: a tight three-lance out of every muzzle
+    bossShot(mx, my, ang - 0.13, 1.05, 5);
+    bossShot(mx, my, ang, 1.20, 6);
+    bossShot(mx, my, ang + 0.13, 1.05, 5);
+  } else {
+    bossShot(mx, my, ang, 1.05, 5);
+    if (ph >= 4) bossShot(mx, my, ang + (ph === 5 ? 0.22 : 0.16) * (i % 2 ? 1 : -1), 0.9, 4);
+  }
+  spawnParticles(mx, my, '#ffd27a', 3);
+}
+
+BOSS.sevenangles = {
+  w: 122, h: 116,
+  init: function (b) {
+    b.sevR = 58;
+    b.sevRot = -Math.PI / 2;
+    b.sevSpeed = 0.011;
+    b.sevN = 3;
+    b.sevFaces = [];
+    b.sevSeq = 0;          // index of the face currently lit / about to fire
+    b.sevSeqT = 0;
+    b.sevVolley = 0;       // charge counter for the all-faces volley
+    b.sevPulse = 0;
+    for (var i = 0; i < 7; i++) b.sevFaces.push({ heat: 0, muzzle: 0 });
+  },
+
+  onPhase: function (b, ph) {
+    b.sevN = sevenanglesSideCount(ph);
+    // Rotation reverses and quickens every phase, so a learned safe wedge
+    // does not survive the transition.
+    b.sevSpeed = (0.010 + ph * 0.0045) * (ph % 2 === 0 ? -1 : 1);
+    b.sevSeq = b.sevSeq % b.sevN;
+    b.sevSeqT = 0;
+    b.sevVolley = 0;
+    b.sevPulse = 26;
+    addFlashText(b.sevN + ' ANGLES', b.x, b.y - 74, '#ffcc55');
+    FX.addShake(10);
+  },
+
+  damage: function (b, bl, dmg) {
+    var i = sevenanglesFaceAt(b, bl.x, bl.y);
+    var f = b.sevFaces[i];
+    if (f && f.heat > 0) {
+      spawnParticles(bl.x, bl.y, '#ff8833', 4);
+      return dmg * 1.6;                       // a vented face is soft
+    }
+    return dmg;
+  },
+
+  think: function (b, ph) {
+    b.sevRot += b.sevSpeed;
+    if (b.sevPulse > 0) b.sevPulse--;
+    var i;
+    for (i = 0; i < b.sevFaces.length; i++) {
+      if (b.sevFaces[i].heat > 0) b.sevFaces[i].heat--;
+      if (b.sevFaces[i].muzzle > 0) b.sevFaces[i].muzzle--;
+    }
+
+    // ---- sequencer: one face, lit for its whole interval, then it fires ----
+    var interval = Math.max(30, 46 - ph * 3);
+    b.sevSeqT++;
+    if (b.sevSeqT >= interval) {
+      b.sevSeqT = 0;
+      sevenanglesFireFace(b, b.sevSeq, ph, false);
+      Sound.play('hit');
+      // walk two faces on, so the lit muzzle skips around the shape rather
+      // than crawling in lockstep with the spin
+      b.sevSeq = (b.sevSeq + (ph >= 3 ? 2 : 1)) % b.sevN;
+    }
+
+    // ---- volley: all faces at once, after a 36-frame visible charge ----
+    var cycle = 175 - ph * 12;
+    if (b.attackTimer >= cycle) {
+      b.sevVolley++;
+      if (b.sevVolley === 1) Sound.play('warning');
+      if (b.sevVolley >= 36) {
+        for (i = 0; i < b.sevN; i++) sevenanglesFireFace(b, i, ph, true);
+        Sound.play('laser');
+        FX.addShake(9);
+        b.sevPulse = 18;
+        b.sevVolley = 0;
+        b.attackTimer = 0;
+      }
+    }
+  },
+
+  paint: function (b) {
+    var n = b.sevN, R = b.sevR + (b.sevPulse > 0 ? Math.sin(b.sevPulse * 0.5) * 4 : 0);
+    var charging = b.sevVolley > 0 ? b.sevVolley / 36 : 0;
+    var edge = bossTint(b, '#6fe0ff', '#ffbb44', '#ff5533');
+    var i, a0, a1, k;
+
+    ctx.save();
+
+    // --- plated faces: each side is its own trapezoid segment ---
+    for (i = 0; i < n; i++) {
+      a0 = b.sevRot + i * Math.PI * 2 / n;
+      a1 = b.sevRot + (i + 1) * Math.PI * 2 / n;
+      var f = b.sevFaces[i];
+      var lit = (i === b.sevSeq) ? (0.35 + 0.35 * Math.sin(frame * 0.25)) : 0;
+      var hot = f.heat > 0 ? f.heat / 60 : 0;
+
+      ctx.beginPath();
+      ctx.moveTo(Math.cos(a0) * R, Math.sin(a0) * R);
+      ctx.lineTo(Math.cos(a1) * R, Math.sin(a1) * R);
+      ctx.lineTo(Math.cos(a1) * R * 0.42, Math.sin(a1) * R * 0.42);
+      ctx.lineTo(Math.cos(a0) * R * 0.42, Math.sin(a0) * R * 0.42);
+      ctx.closePath();
+      // alternating plate tone so the facets read as separate armour, and a
+      // face that has just vented glows through it
+      ctx.fillStyle = i % 2 ? '#1d2634' : '#141b26';
+      ctx.fill();
+      if (hot > 0) { ctx.fillStyle = 'rgba(255,110,40,' + (0.42 * hot) + ')'; ctx.fill(); }
+      if (lit > 0) { ctx.fillStyle = 'rgba(255,230,120,' + (0.30 * lit) + ')'; ctx.fill(); }
+      if (charging > 0) { ctx.fillStyle = 'rgba(255,90,60,' + (0.30 * charging) + ')'; ctx.fill(); }
+      ctx.strokeStyle = 'rgba(120,160,200,0.5)';
+      ctx.lineWidth = 1;
+      ctx.stroke();
+    }
+
+    // --- the outer silhouette, stroked hard so the shape reads as geometry ---
+    ctx.beginPath();
+    for (i = 0; i <= n; i++) {
+      a0 = b.sevRot + i * Math.PI * 2 / n;
+      k = (i === 0 ? 'moveTo' : 'lineTo');
+      ctx[k](Math.cos(a0) * R, Math.sin(a0) * R);
+    }
+    ctx.closePath();
+    ctx.strokeStyle = edge;
+    ctx.lineWidth = 3;
+    ctx.stroke();
+    bossFlash(b);
+
+    // --- muzzles at every face midpoint ---
+    var ap = sevenanglesApothem(n, R);
+    for (i = 0; i < n; i++) {
+      var ang = sevenanglesFaceAngle(b.sevRot, n, i);
+      var mx = Math.cos(ang) * ap, my = Math.sin(ang) * ap;
+      var f2 = b.sevFaces[i];
+      ctx.save();
+      ctx.translate(mx, my);
+      ctx.rotate(ang);
+      // barrel block
+      ctx.fillStyle = '#39485c';
+      ctx.fillRect(-2, -6, 13, 12);
+      ctx.strokeStyle = edge; ctx.lineWidth = 1.4;
+      ctx.strokeRect(-2, -6, 13, 12);
+      // bore: dark, unless lit / charging / just fired
+      var bore = '#05070b';
+      if (f2.muzzle > 0) bore = '#ffffff';
+      else if (i === b.sevSeq) bore = 'rgba(255,235,120,' + (0.5 + 0.5 * Math.sin(frame * 0.3)) + ')';
+      else if (charging > 0) bore = 'rgba(255,90,50,' + charging + ')';
+      ctx.fillStyle = bore;
+      ctx.fillRect(9, -3.2, 5, 6.4);
+      if (f2.muzzle > 0) {
+        ctx.globalAlpha = f2.muzzle / 9;
+        ctx.fillStyle = '#ffe8a0';
+        ctx.beginPath();
+        ctx.moveTo(12, -7); ctx.lineTo(30, 0); ctx.lineTo(12, 7);
+        ctx.closePath(); ctx.fill();
+        ctx.globalAlpha = 1;
+      }
+      ctx.restore();
+    }
+
+    // --- core: a counter-rotating inner polygon, one side fewer ---
+    ctx.save();
+    ctx.rotate(-b.sevRot * 1.7);
+    ctx.beginPath();
+    var m = Math.max(3, n - 1);
+    for (i = 0; i <= m; i++) {
+      a0 = i * Math.PI * 2 / m;
+      k = (i === 0 ? 'moveTo' : 'lineTo');
+      ctx[k](Math.cos(a0) * 19, Math.sin(a0) * 19);
+    }
+    ctx.closePath();
+    ctx.fillStyle = charging > 0 ? 'rgba(255,120,60,' + (0.4 + 0.6 * charging) + ')' : '#0b1018';
+    ctx.fill();
+    ctx.strokeStyle = edge; ctx.lineWidth = 2; ctx.stroke();
+    ctx.restore();
+
+    ctx.restore();
+  },
+
+  title: function (b) {
+    return b.sevN + ' SIDES · ' + b.sevN + ' GUNS · SPIN ' + (b.sevSpeed < 0 ? 'CCW' : 'CW');
+  }
+};
+
+
+// ---------------------------------------------------------------------------
+// L350 — THE WIDOW
+// Mechanic: she spins a filament onto your hull. Past a threshold distance the
+// tether goes TAUT and burns you every 45 frames; inside it, it hangs slack
+// and does nothing. The only way to make it slack is to fly AT her, which is
+// the exact opposite of what every other fight has taught you. She also
+// braces while taut — she takes 45% damage — so running away is both the
+// thing that hurts you and the thing that stops you killing her.
+//
+// She fires far more while the tether is slack, so closing in is not free:
+// the fight is a rhythm of dive in, eat the bullet fan, drift out, take the
+// burn, dive in again.
+//
+// The filament is drawn in world space: a drooping catenary when slack, a
+// straight vibrating white-hot line when taut.
+// ---------------------------------------------------------------------------
+
+function widowThreshold(ph) { return [275, 245, 218, 192][Math.max(0, Math.min(3, ph - 1))]; }
+
+function widowSpinneret(b) { return { x: b.x, y: b.y + 26 }; }
+
+function widowDist(b) {
+  var s = widowSpinneret(b);
+  var dx = player.x - s.x, dy = player.y - s.y;
+  return Math.sqrt(dx * dx + dy * dy);
+}
+
+BOSS.widow = {
+  w: 148, h: 66,
+  init: function (b) {
+    b.wState = 'wait';     // wait -> aim -> on -> wait
+    b.wT = 90;             // frames left in the current state
+    b.wTaut = false;
+    b.wTautT = 0;
+    b.wHurtCd = 0;
+    b.wLegT = 0;
+    b.wSpin = 0;           // spinneret glow
+    b.wShot = 0;
+    b.wBrood = 0;
+    b.wWarned = false;
+  },
+
+  onPhase: function (b, ph) {
+    // Every phase she cuts and re-casts, so the threshold change is announced
+    // by a re-attach rather than silently moving under you.
+    b.wState = 'wait'; b.wT = 70; b.wTaut = false; b.wTautT = 0; b.wWarned = false;
+    b.wSpin = 30;
+    addFlashText('SHE RE-SPINS', b.x, b.y - 54, '#ff88cc');
+  },
+
+  // Braced against the line: while it is taut she is anchored and hard, while
+  // it is slack she is a spider with her weight on one leg.
+  damage: function (b, bl, dmg) {
+    if (b.wState === 'on' && b.wTaut) {
+      spawnParticles(bl.x, bl.y, '#cc88ff', 2);
+      return dmg * 0.45;
+    }
+    return dmg;
+  },
+
+  move: function (b) {
+    // She sidles rather than tracking, so the tether length is something you
+    // control and she only nudges.
+    b.x += Math.sin(frame * 0.011) * 1.5;
+    b.x = Math.max(76, Math.min(W - 76, b.x));
+  },
+
+  think: function (b, ph) {
+    b.wLegT += 0.04;
+    if (b.wSpin > 0) b.wSpin--;
+    if (b.wHurtCd > 0) b.wHurtCd--;
+
+    // ---- tether state machine ----
+    b.wT--;
+    if (b.wState === 'wait') {
+      if (b.wT <= 0) {
+        b.wState = 'aim';
+        b.wT = 70;                       // 70-frame visible cast wind-up
+        b.wSpin = 70;
+        Sound.play('warning');
+        addFlashText('CASTING', b.x, b.y - 40, '#ff99dd');
+      }
+    } else if (b.wState === 'aim') {
+      if (b.wT <= 0) {
+        b.wState = 'on';
+        b.wT = 640 - ph * 60;            // it holds, then perishes on its own
+        b.wTaut = false; b.wTautT = 0; b.wWarned = false;
+        Sound.play('shieldBreak');
+        addFlashText('TETHERED — CLOSE IN', player.x, player.y - 46, '#ff5599');
+      }
+    } else if (b.wState === 'on') {
+      var d = widowDist(b);
+      var thr = widowThreshold(ph);
+      var taut = d > thr;
+      if (taut !== b.wTaut) {
+        b.wTaut = taut;
+        b.wTautT = 0;
+        if (taut) {
+          Sound.play('warning');
+          if (!b.wWarned) { addFlashText('LINE TAUT', player.x, player.y - 46, '#ffdd44'); b.wWarned = true; }
+        } else {
+          spawnParticles(player.x, player.y, '#66ffcc', 8);
+          addFlashText('SLACK', player.x, player.y - 46, '#66ffcc');
+        }
+      }
+      if (b.wTaut) {
+        b.wTautT++;
+        // 60 frames of grace before the first burn, then every 45. The
+        // cooldown is what keeps a persistent hazard from eating a whole run.
+        if (b.wTautT >= 60 && b.wHurtCd <= 0) {
+          b.wHurtCd = 45;
+          b.wTautT = 60;
+          FX.addShake(9);
+          spawnParticles(player.x, player.y, '#ff4488', 14);
+          Sound.play('explode');
+          hitPlayer();
+        }
+      }
+      if (b.wT <= 0) {
+        b.wState = 'wait';
+        b.wT = 170;                       // a few seconds, then she re-casts
+        b.wTaut = false;
+        spawnParticles(player.x, player.y, '#ffffff', 12);
+        Sound.play('shieldBreak');
+        addFlashText('LINE SNAPS', player.x, player.y - 46, '#ffffff');
+      }
+    }
+
+    // ---- guns: she is far busier when the line is slack ----
+    var slack = !(b.wState === 'on' && b.wTaut);
+    b.wShot++;
+    var gap = slack ? (66 - ph * 6) : (128 - ph * 8);
+    if (b.wShot >= gap) {
+      b.wShot = 0;
+      var s = widowSpinneret(b);
+      if (slack) {
+        // webbing: a wide fan you have to thread while you are up close
+        bossAimed(s.x, s.y, [-0.46, -0.23, 0, 0.23, 0.46], 0.85, 5);
+        if (ph >= 3) bossRing(b.x, b.y, 6 + ph, 0.6, frame * 0.02, 4);
+      } else {
+        // at range she barely bothers — the line is doing the work
+        bossAimed(s.x, s.y, [-0.14, 0.14], 1.1, 6);
+      }
+      Sound.play('hit');
+    }
+
+    // ---- brood: she drops weavers down the line ----
+    b.wBrood++;
+    if (ph >= 2 && b.wBrood >= 300 - ph * 30) {
+      b.wBrood = 0;
+      if (enemies.length < 14) {
+        bossMinion(ph >= 3 ? 'weaver' : 'swarmling', b.x - 30, b.y + 30);
+        bossMinion(ph >= 3 ? 'weaver' : 'swarmling', b.x + 30, b.y + 30);
+      }
+    }
+  },
+
+  paint: function (b) {
+    var edge = bossTint(b, '#cc77ff', '#ff77bb', '#ff4466');
+    var i, t = b.wLegT;
+
+    ctx.save();
+
+    // --- eight long jointed legs, four a side ---
+    ctx.strokeStyle = 'rgba(60,20,55,0.95)';
+    ctx.lineCap = 'round';
+    for (i = 0; i < 8; i++) {
+      var side = i < 4 ? -1 : 1;
+      var k = i % 4;
+      var base = side * 22;
+      var sway = Math.sin(t * (1 + k * 0.23) + i) * 7;
+      var kneeX = base + side * (34 + k * 6);
+      var kneeY = -26 + k * 9 + sway;
+      var tipX = base + side * (62 + k * 9);
+      var tipY = 22 + k * 7 - sway * 1.4;
+      ctx.lineWidth = 5.5 - k * 0.5;
+      ctx.beginPath();
+      ctx.moveTo(base, -6 + k * 5);
+      ctx.lineTo(kneeX, kneeY);
+      ctx.lineTo(tipX, tipY);
+      ctx.stroke();
+      ctx.lineWidth = 2 - k * 0.15;
+      ctx.strokeStyle = 'rgba(255,140,210,0.35)';
+      ctx.beginPath();
+      ctx.moveTo(base, -6 + k * 5);
+      ctx.lineTo(kneeX, kneeY);
+      ctx.lineTo(tipX, tipY);
+      ctx.stroke();
+      ctx.strokeStyle = 'rgba(60,20,55,0.95)';
+    }
+
+    // --- abdomen (rear bulb) ---
+    ctx.beginPath();
+    ctx.ellipse(0, 12, 34, 22, 0, 0, Math.PI * 2);
+    var ag = ctx.createRadialGradient(-10, 4, 4, 0, 12, 38);
+    ag.addColorStop(0, '#5a1f4a'); ag.addColorStop(1, '#160610');
+    ctx.fillStyle = ag; ctx.fill();
+    ctx.strokeStyle = edge; ctx.lineWidth = 2; ctx.stroke();
+    // hourglass marking
+    ctx.beginPath();
+    ctx.moveTo(-8, 4); ctx.lineTo(8, 4); ctx.lineTo(-8, 22); ctx.lineTo(8, 22);
+    ctx.closePath();
+    ctx.fillStyle = b.wTaut ? '#ffffff' : edge;
+    ctx.fill();
+
+    // --- cephalothorax ---
+    ctx.beginPath();
+    ctx.moveTo(-30, -8); ctx.lineTo(-18, -28); ctx.lineTo(18, -28);
+    ctx.lineTo(30, -8); ctx.lineTo(16, 4); ctx.lineTo(-16, 4);
+    ctx.closePath();
+    var hg = ctx.createLinearGradient(0, -28, 0, 4);
+    hg.addColorStop(0, '#3b1030'); hg.addColorStop(1, '#0d040a');
+    ctx.fillStyle = hg; ctx.fill();
+    ctx.strokeStyle = edge; ctx.lineWidth = 2.5; ctx.stroke();
+    bossFlash(b);
+
+    // --- six eyes ---
+    ctx.fillStyle = b.wState === 'on' ? '#ff3366' : '#883355';
+    for (i = 0; i < 6; i++) {
+      var ex = -15 + (i % 3) * 15;
+      var ey = -22 + Math.floor(i / 3) * 8;
+      ctx.beginPath(); ctx.arc(ex, ey, i < 3 ? 3.4 : 2.2, 0, Math.PI * 2); ctx.fill();
+    }
+
+    // --- spinnerets, glowing while casting ---
+    var glow = b.wSpin > 0 ? b.wSpin / 70 : 0;
+    for (i = -1; i <= 1; i++) {
+      ctx.beginPath();
+      ctx.arc(i * 9, 26, 4.5, 0, Math.PI * 2);
+      ctx.fillStyle = glow > 0 ? 'rgba(255,220,255,' + (0.35 + 0.65 * glow) + ')' : '#2a0c22';
+      ctx.fill();
+      ctx.strokeStyle = edge; ctx.lineWidth = 1.4; ctx.stroke();
+    }
+    if (glow > 0) {
+      ctx.strokeStyle = 'rgba(255,150,220,' + (0.5 * glow) + ')';
+      ctx.lineWidth = 2;
+      ctx.beginPath(); ctx.arc(0, 26, 10 + 16 * (1 - glow), 0, Math.PI * 2); ctx.stroke();
+    }
+
+    ctx.restore();
+  },
+
+  // The filament has to escape the hull, so it is drawn in world space.
+  paintWorld: function (b) {
+    if (b.entering || b.dying > 0) return;
+    if (b.wState === 'wait') return;
+    var s = widowSpinneret(b);
+    var px = player.x, py = player.y;
+    var i;
+
+    ctx.save();
+    ctx.lineCap = 'round';
+
+    if (b.wState === 'aim') {
+      // a thin dashed line reaching for you, growing over the 70-frame cast
+      var g = 1 - Math.max(0, b.wT) / 70;
+      ctx.globalAlpha = 0.35 + 0.4 * g;
+      ctx.strokeStyle = '#ff88cc';
+      ctx.lineWidth = 1.4;
+      var steps = 16;
+      for (i = 0; i < steps; i += 2) {
+        var t0 = (i / steps) * g, t1 = ((i + 1) / steps) * g;
+        ctx.beginPath();
+        ctx.moveTo(s.x + (px - s.x) * t0, s.y + (py - s.y) * t0);
+        ctx.lineTo(s.x + (px - s.x) * t1, s.y + (py - s.y) * t1);
+        ctx.stroke();
+      }
+      ctx.restore();
+      return;
+    }
+
+    var d = widowDist(b);
+    var thr = widowThreshold(b.phase);
+
+    if (!b.wTaut) {
+      // SLACK — a heavy drooping catenary. Sag scales with how much rope is
+      // spare, so you can read how close to taut you are without a number.
+      var sag = Math.max(10, (thr - d) * 0.55 + 14);
+      var mx = (s.x + px) / 2, my = (s.y + py) / 2 + sag;
+      ctx.strokeStyle = 'rgba(190,150,220,0.55)';
+      ctx.lineWidth = 4;
+      ctx.beginPath();
+      ctx.moveTo(s.x, s.y);
+      ctx.quadraticCurveTo(mx, my, px, py);
+      ctx.stroke();
+      ctx.strokeStyle = 'rgba(255,220,255,0.75)';
+      ctx.lineWidth = 1.4;
+      ctx.beginPath();
+      ctx.moveTo(s.x, s.y);
+      ctx.quadraticCurveTo(mx, my, px, py);
+      ctx.stroke();
+      // beads of silk hanging on the curve
+      ctx.fillStyle = 'rgba(255,225,255,0.5)';
+      for (i = 1; i < 5; i++) {
+        var u = i / 5, iu = 1 - u;
+        var bx = iu * iu * s.x + 2 * iu * u * mx + u * u * px;
+        var by = iu * iu * s.y + 2 * iu * u * my + u * u * py;
+        ctx.beginPath(); ctx.arc(bx, by, 2.2, 0, Math.PI * 2); ctx.fill();
+      }
+    } else {
+      // TAUT — straight, bright, vibrating, with the burn charge running down
+      // it. Unmistakably a different object from the slack rope.
+      var amp = 5 + 3 * Math.sin(frame * 0.9);
+      var nx = -(py - s.y), ny = (px - s.x);
+      var nl = Math.sqrt(nx * nx + ny * ny) || 1;
+      nx /= nl; ny /= nl;
+      var segs = 14;
+      ctx.strokeStyle = 'rgba(255,60,110,0.9)';
+      ctx.lineWidth = 5;
+      ctx.beginPath();
+      for (i = 0; i <= segs; i++) {
+        var u2 = i / segs;
+        var j = Math.sin(u2 * Math.PI) * Math.sin(frame * 0.75 + u2 * 12) * amp;
+        var x2 = s.x + (px - s.x) * u2 + nx * j;
+        var y2 = s.y + (py - s.y) * u2 + ny * j;
+        if (i === 0) ctx.moveTo(x2, y2); else ctx.lineTo(x2, y2);
+      }
+      ctx.stroke();
+      ctx.strokeStyle = '#ffffff';
+      ctx.lineWidth = 1.6;
+      ctx.stroke();
+      // the charge crawling toward your hull tells you the tick is coming
+      var prog = b.wTautT < 60 ? b.wTautT / 60 : ((45 - b.wHurtCd) / 45);
+      prog = Math.max(0, Math.min(1, prog));
+      var cx = s.x + (px - s.x) * prog, cy = s.y + (py - s.y) * prog;
+      ctx.fillStyle = '#ffee88';
+      ctx.beginPath(); ctx.arc(cx, cy, 5, 0, Math.PI * 2); ctx.fill();
+      ctx.strokeStyle = 'rgba(255,230,120,0.5)'; ctx.lineWidth = 2;
+      ctx.beginPath(); ctx.arc(cx, cy, 10, 0, Math.PI * 2); ctx.stroke();
+      // and an arrow telling you which way is safety
+      ctx.strokeStyle = 'rgba(255,255,255,0.8)'; ctx.lineWidth = 2;
+      var a = Math.atan2(s.y - py, s.x - px);
+      ctx.beginPath();
+      ctx.moveTo(px + Math.cos(a) * 26, py + Math.sin(a) * 26);
+      ctx.lineTo(px + Math.cos(a) * 44, py + Math.sin(a) * 44);
+      ctx.stroke();
+    }
+    ctx.restore();
+  },
+
+  title: function (b) {
+    if (b.wState === 'wait') return 'LINE CUT — SHE IS RE-SPINNING';
+    if (b.wState === 'aim') return 'CASTING FILAMENT';
+    if (b.wTaut) return 'TAUT — FLY TOWARD HER (SHE IS BRACED, 45% DMG)';
+    return 'SLACK — SAFE, BUT SHE FIRES FASTER THIS CLOSE';
+  }
+};
+
+
+// ---------------------------------------------------------------------------
+// L400 — ASHEN CHOIRMASTER
+// Mechanic: a metronome you can learn. A beat every 34 frames, four beats to
+// the bar, forever — it never speeds up, never stutters, never syncopates.
+// What changes per phase is only WHICH beats of the bar are the loud ones:
+//
+//   phase 1   . . . X        the fourth beat
+//   phase 2   . X . X        two and four
+//   phase 3   X . X .        one and three
+//   phase 4   . X X X        everything but the downbeat
+//   phase 5   X X X X        the whole bar
+//
+// Quiet beats tick, flash the robe and swing the baton and do nothing else.
+// Loud beats fire. The baton rises through the entire 34-frame beat before a
+// loud one and a red charge grows at its tip — that is the wind-up, and it is
+// the same wind-up every single time, which is the point.
+// ---------------------------------------------------------------------------
+
+var CHOIRMASTER_BEAT = 34;
+
+function choirmasterPattern(ph) {
+  return [
+    [false, false, false, true],
+    [false, true, false, true],
+    [true, false, true, false],
+    [false, true, true, true],
+    [true, true, true, true]
+  ][Math.max(0, Math.min(4, ph - 1))];
+}
+
+function choirmasterAsh(b) {
+  var i, m;
+  for (i = 0; i < b.cmAsh.length; i++) {
+    m = b.cmAsh[i];
+    m.y += m.v;
+    m.x += Math.sin((frame + m.p) * 0.02) * 0.5;
+    m.r += m.s;
+    if (m.y > H + 12) { m.y = -12; m.x = Math.random() * W; }
+  }
+}
+
+// One of five voices. Kept in a helper so the beat handler reads as a score.
+function choirmasterVoice(b, ph, name) {
+  var hx = b.x, hy = b.y + 34;
+  if (name === 'chord') {
+    bossAimed(hx, hy, [-0.4, -0.2, 0, 0.2, 0.4], 0.85, 5);
+  } else if (name === 'swell') {
+    bossRing(b.x, b.y, 10 + ph * 2, 0.7, frame * 0.013, 5);
+  } else if (name === 'descant') {
+    // a wall of six voices stepping down out of the dark above her
+    for (var i = 0; i < 6; i++) {
+      bossShot(40 + i * 80, 26, Math.PI / 2 + (i - 2.5) * 0.045, 0.8, 5);
+    }
+  } else if (name === 'coda') {
+    bossRing(b.x, b.y, 14 + ph, 0.62, frame * 0.02, 5);
+    bossAimed(hx, hy, [-0.16, 0, 0.16], 1.15, 6);
+  }
+  Sound.play('laser');
+  FX.addShake(6);
+}
+
+BOSS.choirmaster = {
+  w: 104, h: 128,
+  init: function (b) {
+    b.cmBar = 0;
+    b.cmBeat = -1;
+    b.cmBars = 0;
+    b.cmHit = 0;          // frames since the last beat landed, for the flash
+    b.cmBaton = 0;        // 0..1 baton raise
+    b.cmAsh = [];
+    for (var i = 0; i < 46; i++) {
+      b.cmAsh.push({
+        x: Math.random() * W, y: Math.random() * H,
+        v: 0.35 + Math.random() * 0.9, r: Math.random() * 6.28,
+        s: (Math.random() - 0.5) * 0.05, z: 1 + Math.random() * 2,
+        p: Math.random() * 600
+      });
+    }
+  },
+
+  onPhase: function (b, ph) {
+    // The bar is never reset by a phase change — the metronome is the one
+    // thing in the fight that does not react to you.
+    addFlashText('NEW MOVEMENT', b.x, b.y - 82, '#ffeecc');
+  },
+
+  think: function (b, ph) {
+    choirmasterAsh(b);
+    if (b.cmHit > 0) b.cmHit--;
+
+    b.cmBar++;
+    var within = b.cmBar % CHOIRMASTER_BEAT;
+    var idx = Math.floor(b.cmBar / CHOIRMASTER_BEAT) % 4;
+    var pat = choirmasterPattern(ph);
+
+    // Baton: falls onto the beat, then rises again over the rest of it. The
+    // rise is steeper (and the tip charges) when the next beat is loud.
+    var u = within / CHOIRMASTER_BEAT;
+    b.cmBaton = 1 - Math.cos(u * Math.PI * 0.5);
+
+    if (idx !== b.cmBeat) {
+      b.cmBeat = idx;
+      b.cmHit = 10;
+      if (idx === 0) b.cmBars++;
+      if (pat[idx]) {
+        // LOUD. Which voice sings is a property of the beat and the phase, so
+        // the same bar position always means the same attack within a phase.
+        if (ph <= 1) choirmasterVoice(b, ph, 'chord');
+        else if (ph === 2) choirmasterVoice(b, ph, idx === 1 ? 'swell' : 'chord');
+        else if (ph === 3) choirmasterVoice(b, ph, idx === 0 ? 'descant' : 'swell');
+        else if (ph === 4) choirmasterVoice(b, ph, idx === 1 ? 'chord' : idx === 2 ? 'descant' : 'swell');
+        else choirmasterVoice(b, ph, idx === 0 ? 'swell' : idx === 1 ? 'chord' : idx === 2 ? 'descant' : 'coda');
+      } else {
+        Sound.play('hit');                      // the quiet tick
+        spawnParticles(b.x, b.y - 52, '#ddccbb', 4);
+      }
+      // Choristers, on the downbeat of every fourth bar, never off it.
+      if (ph >= 3 && idx === 0 && b.cmBars % 4 === 0 && enemies.length < 12) {
+        bossMinion(ph >= 5 ? 'harbinger' : 'weaver', b.x, b.y + 48);
+      }
+    }
+  },
+
+  paint: function (b) {
+    var edge = bossTint(b, '#9fd8ff', '#ffcf88', '#ff6a5a');
+    var pat = choirmasterPattern(b.phase);
+    var nextIdx = (b.cmBeat + 1) % 4;
+    var charging = pat[nextIdx] ? (b.cmBar % CHOIRMASTER_BEAT) / CHOIRMASTER_BEAT : 0;
+    var hit = b.cmHit > 0 ? b.cmHit / 10 : 0;
+    var i;
+
+    ctx.save();
+
+    // --- robe: a tall tapering silhouette, hem frayed ---
+    ctx.beginPath();
+    ctx.moveTo(0, -62);
+    ctx.lineTo(26, -22);
+    ctx.lineTo(38, 52);
+    for (i = 0; i <= 8; i++) {
+      var hx = 38 - i * 9.5;
+      var hy = 52 + (i % 2 ? 10 : 2) + Math.sin(frame * 0.03 + i) * 2;
+      ctx.lineTo(hx, hy);
+    }
+    ctx.lineTo(-38, 52);
+    ctx.lineTo(-26, -22);
+    ctx.closePath();
+    var rg = ctx.createLinearGradient(0, -62, 0, 62);
+    rg.addColorStop(0, '#2b2a33'); rg.addColorStop(0.6, '#15141a'); rg.addColorStop(1, '#05050a');
+    ctx.fillStyle = rg; ctx.fill();
+    ctx.strokeStyle = edge; ctx.lineWidth = 2; ctx.stroke();
+    bossFlash(b);
+    // the robe pulses on every beat, loud or quiet
+    if (hit > 0) { ctx.fillStyle = 'rgba(255,240,210,' + (0.20 * hit) + ')'; ctx.fill(); }
+
+    // --- hood, deep and empty but for two coals ---
+    ctx.beginPath();
+    ctx.moveTo(0, -76);
+    ctx.quadraticCurveTo(24, -66, 22, -34);
+    ctx.quadraticCurveTo(0, -26, -22, -34);
+    ctx.quadraticCurveTo(-24, -66, 0, -76);
+    ctx.closePath();
+    ctx.fillStyle = '#0a0a10'; ctx.fill();
+    ctx.strokeStyle = edge; ctx.lineWidth = 2; ctx.stroke();
+    ctx.fillStyle = charging > 0.5 ? '#ffdd66' : edge;
+    ctx.beginPath(); ctx.arc(-8, -50, 3.2, 0, Math.PI * 2); ctx.fill();
+    ctx.beginPath(); ctx.arc(8, -50, 3.2, 0, Math.PI * 2); ctx.fill();
+
+    // --- conducting arm + baton ---
+    // The hand traces a small conductor's box; the baton points where the
+    // next beat will land.
+    var lift = b.cmBaton;                       // 0 at the beat, 1 just before
+    var sx = 22, sy = -22;                      // shoulder
+    var hxp = sx + 22 + 8 * Math.sin(b.cmBeat * 1.6);
+    var hyp = sy + 26 - 34 * lift;
+    ctx.strokeStyle = '#3a3844'; ctx.lineWidth = 7; ctx.lineCap = 'round';
+    ctx.beginPath(); ctx.moveTo(sx, sy); ctx.lineTo(hxp, hyp); ctx.stroke();
+    ctx.strokeStyle = edge; ctx.lineWidth = 2;
+    ctx.beginPath(); ctx.moveTo(sx, sy); ctx.lineTo(hxp, hyp); ctx.stroke();
+    // baton, angled by the raise
+    var ba = -1.1 - lift * 0.9;
+    var tipx = hxp + Math.cos(ba) * 34, tipy = hyp + Math.sin(ba) * 34;
+    ctx.strokeStyle = '#f6efe0'; ctx.lineWidth = 3;
+    ctx.beginPath(); ctx.moveTo(hxp, hyp); ctx.lineTo(tipx, tipy); ctx.stroke();
+    // the charge on the tip when the NEXT beat is a loud one
+    if (charging > 0) {
+      ctx.fillStyle = 'rgba(255,80,60,' + (0.25 + 0.75 * charging) + ')';
+      ctx.beginPath(); ctx.arc(tipx, tipy, 3 + 7 * charging, 0, Math.PI * 2); ctx.fill();
+      ctx.strokeStyle = 'rgba(255,180,120,' + (0.6 * charging) + ')'; ctx.lineWidth = 1.5;
+      ctx.beginPath(); ctx.arc(tipx, tipy, 12 + 10 * (1 - charging), 0, Math.PI * 2); ctx.stroke();
+    }
+    if (hit > 0) {
+      ctx.fillStyle = 'rgba(255,255,255,' + (0.8 * hit) + ')';
+      ctx.beginPath(); ctx.arc(tipx, tipy, 5 * hit + 2, 0, Math.PI * 2); ctx.fill();
+    }
+    // the other arm, hanging
+    ctx.strokeStyle = '#2c2b34'; ctx.lineWidth = 6;
+    ctx.beginPath(); ctx.moveTo(-22, -22); ctx.lineTo(-30, 12); ctx.stroke();
+
+    // --- the four-beat indicator: the whole mechanic, stated plainly ---
+    ctx.lineCap = 'butt';
+    for (i = 0; i < 4; i++) {
+      var dx = -33 + i * 22, dy = -96;
+      var loud = pat[i];
+      var now = (i === b.cmBeat);
+      ctx.beginPath();
+      ctx.arc(dx, dy, now ? 8 : 6, 0, Math.PI * 2);
+      ctx.fillStyle = now
+        ? (loud ? '#ff5544' : '#ffffff')
+        : (loud ? 'rgba(255,85,68,0.30)' : 'rgba(255,255,255,0.16)');
+      ctx.fill();
+      ctx.strokeStyle = loud ? '#ff8877' : 'rgba(255,255,255,0.45)';
+      ctx.lineWidth = 1.6;
+      ctx.stroke();
+      // the next beat swells as its charge builds
+      if (i === nextIdx && charging > 0) {
+        ctx.strokeStyle = 'rgba(255,90,70,' + charging + ')';
+        ctx.lineWidth = 2;
+        ctx.beginPath(); ctx.arc(dx, dy, 8 + 8 * (1 - charging), 0, Math.PI * 2); ctx.stroke();
+      }
+    }
+    // bar line under the four dots
+    ctx.strokeStyle = 'rgba(255,255,255,0.25)'; ctx.lineWidth = 1;
+    ctx.beginPath(); ctx.moveTo(-42, -84); ctx.lineTo(42, -84); ctx.stroke();
+
+    ctx.restore();
+  },
+
+  // Ash falls across the whole arena, so it lives in world space.
+  paintWorld: function (b) {
+    if (b.entering || b.dying > 0) choirmasterAsh(b);
+    var i, m;
+    ctx.save();
+    for (i = 0; i < b.cmAsh.length; i++) {
+      m = b.cmAsh[i];
+      ctx.globalAlpha = 0.10 + 0.16 * m.z;
+      ctx.fillStyle = i % 5 === 0 ? '#ffd9a8' : '#cfc7bb';
+      ctx.save();
+      ctx.translate(m.x, m.y);
+      ctx.rotate(m.r);
+      ctx.fillRect(-m.z, -m.z * 0.5, m.z * 2, m.z);
+      ctx.restore();
+    }
+    ctx.restore();
+  },
+
+  title: function (b) {
+    var pat = choirmasterPattern(b.phase);
+    var s = '';
+    for (var i = 0; i < 4; i++) s += (pat[i] ? 'X' : '.') + (i === b.cmBeat ? '<' : ' ');
+    return 'BAR ' + s + '  BEAT ' + (b.cmBeat + 1) + '/4';
+  }
+};
+
+
+// ---------------------------------------------------------------------------
+// L500 — THE THRESHOLD
+// Mechanic: at spawn it reads the live `stats` object and becomes you. Fire
+// rate, shot count, homing, pierce, split, rear gun, side guns, drones,
+// singularity — whatever you bought on the way down here is what it shoots
+// back. A player who came in naked fights a slow, single-shot mirror. A
+// player who stacked everything fights the build they are proud of.
+//
+// Everything mirrored is CLAMPED, because the point is a hard fight, not an
+// impossible one:
+//   fire interval  floor 26 frames (a MIN_FIRE_RATE=6 player would map to 20)
+//   shot count     +6 max, so 7 forward shots even at extraShots 8+
+//   homing turn    0.05 rad/frame max
+//   drones         3 max, spawned once per phase
+//   split          one generation only, never recursive
+//   singularity    2 max, and only one well is ever live at a time
+// Its own bullets are steered by this file, pruned by age and hard-capped, so
+// a mirrored homing build cannot fill the arena.
+// ---------------------------------------------------------------------------
+
+function thresholdNum(v, d) { return (typeof v === 'number' && isFinite(v)) ? v : d; }
+function thresholdClamp(v, lo, hi) { return Math.max(lo, Math.min(hi, v)); }
+
+// bossShot does not hand back the bullet it made, so take the newest one.
+function thresholdShot(b, x, y, ang, spd, r) {
+  var before = enemyBullets.length;
+  bossShot(x, y, ang, spd, r);
+  if (enemyBullets.length > before) {
+    var nb = enemyBullets[enemyBullets.length - 1];
+    nb.thAge = 0;
+    nb.thSplit = false;
+    b.thMine.push(nb);
+    if (b.thMine.length > 110) b.thMine.shift();
+    return nb;
+  }
+  return null;
+}
+
+function thresholdSteer(bl, rate) {
+  var cur = Math.atan2(bl.vy, bl.vx);
+  var want = Math.atan2(player.y - bl.y, player.x - bl.x);
+  var d = want - cur;
+  while (d > Math.PI) d -= Math.PI * 2;
+  while (d < -Math.PI) d += Math.PI * 2;
+  var na = cur + thresholdClamp(d, -rate, rate);
+  var sp = Math.sqrt(bl.vx * bl.vx + bl.vy * bl.vy);
+  bl.vx = Math.cos(na) * sp;
+  bl.vy = Math.sin(na) * sp;
+}
+
+// The player's hull, drawn around the origin, already flipped to face down.
+// Deliberately re-declared here rather than calling drawShip, so the mirror
+// keeps its own chrome palette and never touches player render state.
+function thresholdHull(ctx2, k) {
+  ctx2.beginPath();
+  ctx2.moveTo(0, -18 * k);
+  ctx2.lineTo(14 * k, 14 * k); ctx2.lineTo(10 * k, 10 * k); ctx2.lineTo(10 * k, 18 * k);
+  ctx2.lineTo(-10 * k, 18 * k); ctx2.lineTo(-10 * k, 10 * k); ctx2.lineTo(-14 * k, 14 * k);
+  ctx2.closePath();
+}
+
+BOSS.threshold = {
+  w: 134, h: 100,
+  init: function (b) {
+    var s = (typeof stats !== 'undefined' && stats) ? stats : {};
+
+    var rawRate = thresholdNum(s.fireRate, 10);
+    var rawShots = Math.floor(thresholdNum(s.extraShots, 0));
+    var homing = thresholdNum(s.homing, 0);
+
+    b.thM = {
+      // The player's fireRate is a frame interval; a boss on that exact clock
+      // would be a wall, so it fires on 3.4x it — and never faster than 26.
+      rate: Math.round(thresholdClamp(rawRate * 3.4, 26, 96)),
+      shots: 1 + thresholdClamp(rawShots, 0, 6),
+      homing: homing > 0,
+      homeRate: thresholdClamp(0.014 + homing * 0.55, 0.014, 0.05),
+      pierce: thresholdClamp(Math.floor(thresholdNum(s.pierce, 0)), 0, 4),
+      split: !!s.split,
+      rear: !!s.rear,
+      sides: !!s.sides,
+      drones: thresholdClamp(Math.floor(thresholdNum(s.drones, 0)), 0, 3),
+      sing: thresholdClamp(Math.floor(thresholdNum(s.singularityCount, 0)), 0, 2),
+      dmg: thresholdNum(s.damage, 10)
+    };
+    // Damage becomes calibre: heavier rounds, not more of them.
+    b.thM.r = thresholdClamp(4 + b.thM.dmg / 45 + b.thM.pierce * 0.5, 4, 9);
+    b.thM.spd = thresholdClamp(0.85 + b.thM.pierce * 0.06, 0.85, 1.15);
+
+    var tags = ['RATE ' + b.thM.rate, 'x' + b.thM.shots];
+    if (b.thM.homing) tags.push('HOMING');
+    if (b.thM.pierce) tags.push('PIERCE ' + b.thM.pierce);
+    if (b.thM.split) tags.push('SPLIT');
+    if (b.thM.rear) tags.push('REAR');
+    if (b.thM.sides) tags.push('SIDES');
+    if (b.thM.drones) tags.push('DRONES ' + b.thM.drones);
+    if (b.thM.sing) tags.push('SINGULARITY');
+    b.thTags = tags.join(' · ');
+
+    b.thMine = [];
+    b.thFire = 0;
+    b.thParry = 0;
+    b.thWell = null;
+    b.thWellCd = 260;
+    b.thSheen = 0;
+    b.thRecoil = 0;
+  },
+
+  onPhase: function (b, ph) {
+    // A mirror parry: a hard, bounded 30-frame reflection on the phase turn.
+    // Bounded on purpose — five phases is 150 blocked frames total, which can
+    // never add up to unkillable.
+    b.thParry = 30;
+    b.thSheen = 40;
+    Sound.play('shieldBreak');
+    addFlashText('REFLECT', b.x, b.y - 62, '#ffffff');
+    // Drone escort is re-cast per phase rather than topped up on a timer, so
+    // the count can never run away.
+    for (var i = 0; i < b.thM.drones; i++) {
+      if (enemies.length < 16) bossMinion('turret', b.x - 60 + i * 60, b.y + 54);
+    }
+  },
+
+  damage: function (b, bl, dmg) {
+    if (b.thParry > 0) {
+      spawnParticles(bl.x, bl.y, '#ffffff', 3);
+      return 0;
+    }
+    return dmg;
+  },
+
+  think: function (b, ph) {
+    if (b.thParry > 0) b.thParry--;
+    if (b.thSheen > 0) b.thSheen--;
+    if (b.thRecoil > 0) b.thRecoil--;
+
+    // ---- its own rounds: homing, splitting, ageing out ----
+    var keep = [], i, bl;
+    for (i = 0; i < b.thMine.length; i++) {
+      bl = b.thMine[i];
+      if (!bl || bl.dead) continue;
+      bl.thAge++;
+      if (bl.thAge > 150) continue;               // stop steering, let it go
+      if (b.thM.homing) thresholdSteer(bl, b.thM.homeRate);
+      if (b.thM.split && !bl.thSplit && bl.thAge === 42 && enemyBullets.length < 220) {
+        bl.thSplit = true;
+        var a = Math.atan2(bl.vy, bl.vx);
+        bossShot(bl.x, bl.y, a - 0.5, 0.8, Math.max(3, b.thM.r - 2));
+        bossShot(bl.x, bl.y, a + 0.5, 0.8, Math.max(3, b.thM.r - 2));
+      }
+      keep.push(bl);
+    }
+    b.thMine = keep;
+
+    // ---- the mirrored gun ----
+    b.thFire++;
+    // Phase pressure is applied to the CADENCE, never below the 26-frame
+    // floor, so a maxed player does not get an unreadable wall.
+    var rate = Math.max(26, b.thM.rate - (ph - 1) * 3);
+    if (b.thFire >= rate && b.thParry <= 0) {
+      b.thFire = 0;
+      b.thRecoil = 6;
+      var aim = Math.atan2(player.y - (b.y + 34), player.x - b.x);
+      var n = b.thM.shots;
+      var spread = 0.12;
+      for (i = 0; i < n; i++) {
+        var off = (i - (n - 1) / 2) * spread;
+        thresholdShot(b, b.x + (i - (n - 1) / 2) * 9, b.y + 34, aim + off, b.thM.spd, b.thM.r);
+      }
+      if (b.thM.rear) thresholdShot(b, b.x, b.y - 34, aim + Math.PI, b.thM.spd * 0.8, b.thM.r);
+      if (b.thM.sides) {
+        thresholdShot(b, b.x - 46, b.y, aim - Math.PI / 2, b.thM.spd * 0.8, b.thM.r);
+        thresholdShot(b, b.x + 46, b.y, aim + Math.PI / 2, b.thM.spd * 0.8, b.thM.r);
+      }
+      Sound.play('hit');
+    }
+
+    // ---- mirrored singularity: one well at a time, telegraphed 60 frames ----
+    if (b.thM.sing > 0) {
+      if (b.thWell) {
+        b.thWell.t++;
+        if (b.thWell.t >= 60) {
+          bossRing(b.thWell.x, b.thWell.y, 10 + b.thM.sing * 4 + ph, 0.6, frame * 0.02, 5);
+          FX.explode(b.thWell.x, b.thWell.y, 44, '#aa66ff');
+          FX.addShake(10);
+          Sound.play('bigExplode');
+          b.thWell = null;
+          b.thWellCd = 380 - ph * 20;
+        }
+      } else if (b.thWellCd > 0) {
+        b.thWellCd--;
+      } else {
+        b.thWell = { x: thresholdClamp(player.x, 40, W - 40), y: thresholdClamp(player.y - 40, 120, H - 60), t: 0 };
+        Sound.play('warning');
+      }
+    }
+  },
+
+  paint: function (b) {
+    var col = bossTint(b, '#7fd8ff', '#ffc55a', '#ff5a4a');
+    var k = 3.3;                            // the player's hull, three times over
+    var i;
+
+    ctx.save();
+    ctx.rotate(Math.PI);                    // a reflection faces you
+
+    // --- polished chrome hull ---
+    thresholdHull(ctx, k);
+    var g = ctx.createLinearGradient(-14 * k, -18 * k, 14 * k, 18 * k);
+    g.addColorStop(0, '#f2f6fa');
+    g.addColorStop(0.28, '#8fa2b4');
+    g.addColorStop(0.46, '#2b3440');
+    g.addColorStop(0.52, '#eef4fb');
+    g.addColorStop(0.72, '#63707e');
+    g.addColorStop(1, '#0d1218');
+    ctx.fillStyle = g;
+    ctx.fill();
+    // the phase colour is what the chrome reflects
+    ctx.globalAlpha = 0.30;
+    ctx.fillStyle = col;
+    ctx.fill();
+    ctx.globalAlpha = 1;
+    ctx.strokeStyle = '#eaf4ff'; ctx.lineWidth = 2.4; ctx.stroke();
+    bossFlash(b);
+
+    // --- a highlight sweeping the plate, so it reads polished not painted ---
+    ctx.save();
+    thresholdHull(ctx, k);
+    ctx.clip();
+    var sw = ((frame % 190) / 190) * (28 * k * 2) - 28 * k;
+    ctx.globalAlpha = 0.5;
+    ctx.strokeStyle = '#ffffff';
+    ctx.lineWidth = 7;
+    ctx.beginPath(); ctx.moveTo(sw - 22, -22 * k); ctx.lineTo(sw + 22, 22 * k); ctx.stroke();
+    ctx.globalAlpha = 0.22;
+    ctx.lineWidth = 18;
+    ctx.beginPath(); ctx.moveTo(sw - 44, -22 * k); ctx.lineTo(sw, 22 * k); ctx.stroke();
+    ctx.restore();
+
+    // --- visor where the cockpit would be: a dark mirror, not a window ---
+    ctx.beginPath();
+    ctx.ellipse(0, -4 * k, 6 * k, 8 * k, 0, 0, Math.PI * 2);
+    var cg = ctx.createRadialGradient(-3 * k, -7 * k, 2, 0, -4 * k, 9 * k);
+    cg.addColorStop(0, '#ffffff'); cg.addColorStop(0.35, col); cg.addColorStop(1, '#050810');
+    ctx.fillStyle = cg; ctx.fill();
+    ctx.strokeStyle = '#dceaf6'; ctx.lineWidth = 1.6; ctx.stroke();
+
+    // --- wings ---
+    [-1, 1].forEach(function (d) {
+      ctx.beginPath();
+      ctx.moveTo(10 * k * d, 6 * k);
+      ctx.lineTo(22 * k * d, 18 * k);
+      ctx.lineTo(10 * k * d, 14 * k);
+      ctx.closePath();
+      var wg = ctx.createLinearGradient(10 * k * d, 6 * k, 22 * k * d, 18 * k);
+      wg.addColorStop(0, '#d8e6f2'); wg.addColorStop(1, '#1a2330');
+      ctx.fillStyle = wg; ctx.fill();
+      ctx.strokeStyle = '#eaf4ff'; ctx.lineWidth = 1.4; ctx.stroke();
+    });
+
+    // --- cannons, one visible barrel per mirrored shot ---
+    var n = b.thM.shots;
+    for (i = 0; i < n; i++) {
+      var bx = (i - (n - 1) / 2) * 9;
+      ctx.fillStyle = b.thRecoil > 0 ? '#ffffff' : '#c7d6e4';
+      ctx.fillRect(bx - 2.4, -4 * k, 4.8, 15 * k);
+      ctx.strokeStyle = 'rgba(20,30,40,0.6)'; ctx.lineWidth = 1;
+      ctx.strokeRect(bx - 2.4, -4 * k, 4.8, 15 * k);
+    }
+    if (b.thM.rear) { ctx.fillStyle = '#9fb4c6'; ctx.fillRect(-3, -22 * k, 6, 10); }
+    if (b.thM.sides) {
+      ctx.fillStyle = '#9fb4c6';
+      ctx.fillRect(-15 * k - 8, -3, 10, 6);
+      ctx.fillRect(15 * k - 2, -3, 10, 6);
+    }
+
+    // --- the parry: a flat sheet of mirror across the whole hull ---
+    if (b.thParry > 0) {
+      ctx.globalAlpha = 0.35 + 0.45 * (b.thParry / 30);
+      thresholdHull(ctx, k * 1.06);
+      ctx.fillStyle = '#ffffff'; ctx.fill();
+      ctx.globalAlpha = 1;
+      ctx.strokeStyle = col; ctx.lineWidth = 3;
+      thresholdHull(ctx, k * 1.14); ctx.stroke();
+    }
+    if (b.thSheen > 0) {
+      ctx.globalAlpha = b.thSheen / 40;
+      ctx.strokeStyle = '#ffffff'; ctx.lineWidth = 2;
+      thresholdHull(ctx, k * (1.1 + (1 - b.thSheen / 40) * 0.5));
+      ctx.stroke();
+      ctx.globalAlpha = 1;
+    }
+
+    ctx.restore();
+  },
+
+  paintWorld: function (b) {
+    if (!b.thWell) return;
+    var w = b.thWell, t = w.t / 60;
+    ctx.save();
+    // A mirrored singularity: a well drawn where yours would go, winding in
+    // for a full second before it lets go.
+    ctx.strokeStyle = 'rgba(180,110,255,' + (0.3 + 0.6 * t) + ')';
+    ctx.lineWidth = 2;
+    for (var i = 0; i < 3; i++) {
+      var r = 58 * (1 - t) + 10 + i * 9;
+      ctx.beginPath(); ctx.arc(w.x, w.y, r, frame * 0.05 + i, frame * 0.05 + i + 4.4); ctx.stroke();
+    }
+    ctx.fillStyle = 'rgba(120,60,200,' + (0.15 + 0.45 * t) + ')';
+    ctx.beginPath(); ctx.arc(w.x, w.y, 8 + 14 * t, 0, Math.PI * 2); ctx.fill();
+    ctx.restore();
+  },
+
+  title: function (b) {
+    if (b.thParry > 0) return 'REFLECTING — NOTHING LANDS';
+    return 'YOUR BUILD: ' + b.thTags;
+  }
+};
+// ---- end boss pack: boss_c ----
+
+// ---- boss pack: boss_a ----
+// ===========================================================================
+// VOID RUNNER — boss pack A
+//
+//   L40  MAGNETAR       polarity. the arena has a magnetic sign, and it flips.
+//   L50  VOIDGATE PRIME mirrors. it opens portals and your own ship comes out.
+//   L75  RUSTFALL       accretion. it sheds junk that never goes away.
+//
+// Three completely different verbs: MAGNETAR moves YOU, VOIDGATE spawns
+// something that fights like you, RUSTFALL permanently rewrites the arena.
+// Nothing is shared between them except the game's own firing helpers.
+//
+// Every helper below is prefixed with its boss key so this file can never
+// collide with the game or with another pack.
+// ===========================================================================
+
+
+// ---------------------------------------------------------------------------
+// L40 — MAGNETAR
+//
+// Mechanic: POLARITY. A dark iron core with two poles. Every few seconds the
+// field inverts, with a 45-frame collapse-and-invert telegraph you can both
+// see (the poles bleed toward the incoming colour, the field rings stall) and
+// hear. While a polarity is live it drags the player each frame — ATTRACT
+// hauls you up into the swirl, REPEL pins you against the floor — and every
+// bullet it has fired obeys the same field, so its shots spiral in during
+// ATTRACT and slingshot out during REPEL. You never dodge a straight line in
+// this fight; you dodge a current.
+//
+// blue = ATTRACT (pull)   red = REPEL (push)
+// ---------------------------------------------------------------------------
+
+const MAGNETAR_TELE = 45;      // frames of inversion warning
+const MAGNETAR_REACH = 340;    // how far the field bends bullets
+
+// Field falloff: full authority at the core, nothing past MAGNETAR_REACH.
+function magnetarFalloff(d) {
+  const t = 1 - d / MAGNETAR_REACH;
+  return t <= 0 ? 0 : t * t;
+}
+
+// Where a pole sits, in hull-local coordinates.
+function magnetarPole(side) { return side * 54; }
+
+// The colour of a polarity. Kept in one place so the hull, the field rings,
+// the status line and the warning text can never disagree about what is
+// happening.
+function magnetarColour(mode) { return mode < 0 ? '#4aa8ff' : '#ff4a3a'; }
+
+// Draw one field line arcing from pole to pole. `bow` is how far it bulges,
+// `t` animates the dash crawl.
+function magnetarArc(x0, x1, bow, t, col, alpha) {
+  ctx.beginPath();
+  ctx.moveTo(x0, 0);
+  ctx.quadraticCurveTo((x0 + x1) / 2, bow, x1, 0);
+  ctx.strokeStyle = col;
+  ctx.globalAlpha = alpha;
+  ctx.lineWidth = 1.6;
+  ctx.setLineDash([6, 7]);
+  ctx.lineDashOffset = -t;
+  ctx.stroke();
+  ctx.setLineDash([]);
+  ctx.globalAlpha = 1;
+}
+
+BOSS.magnetar = {
+  w: 136, h: 66,
+
+  init(b) {
+    b.mgMode = -1;              // -1 ATTRACT (pull in), +1 REPEL (push out)
+    b.mgCycle = 0;              // frames into the current polarity
+    b.mgPeriod = 360;           // ~6s at 60fps, tightens per phase
+    b.mgWarned = false;
+    b.mgSpin = 1;               // which way the field swirls
+    b.mgT = 0;                  // own clock (the global `frame` is not ours)
+    b.mgFire = 0;
+    b.mgLance = 0;
+    b.mgHomeY = H - 120;        // the ship's canonical resting line
+    b.mgFlip = 0;               // white-out frames right after an inversion
+  },
+
+  onPhase(b, ph) {
+    b.mgPeriod = 360 - (ph - 1) * 60;   // 360 / 300 / 240
+    b.mgSpin = -b.mgSpin;               // the swirl reverses too
+    b.mgCycle = 0;
+    b.mgWarned = false;
+    b.mgFlip = 12;
+  },
+
+  damage(b, bl, dmg) {
+    // The field lets go of the pilot the instant the core is killed. This
+    // matters: think() stops running the moment the death cascade starts, and
+    // nothing outside a boss fight ever restores player.y, so without an
+    // explicit release the ship would fly the rest of the run on a shifted
+    // line. Full damage always — MAGNETAR has no armour to speak of.
+    if (b.hp - dmg <= 0) player.y = b.mgHomeY;
+    return dmg;
+  },
+
+  move(b) {
+    // Heavy. It leans toward you rather than chasing.
+    b.x += Math.sign(player.x - b.x) * Math.min(0.7, Math.abs(player.x - b.x));
+    b.x = Math.max(72, Math.min(W - 72, b.x));
+    b.y = b.targetY + Math.sin(b.mgT * 0.021) * 6;
+  },
+
+  think(b, ph) {
+    b.mgT++;
+    if (b.mgFlip > 0) b.mgFlip--;
+
+    // ---- the inversion clock -------------------------------------------
+    b.mgCycle++;
+    const telegraphing = b.mgCycle > b.mgPeriod - MAGNETAR_TELE;
+    if (telegraphing && !b.mgWarned) {
+      b.mgWarned = true;
+      const next = -b.mgMode;
+      Sound.play('warning');
+      FX.addShake(6);
+      addFlashText(next < 0 ? 'ATTRACT' : 'REPEL', b.x, b.y + 58, magnetarColour(next));
+    }
+    if (b.mgCycle >= b.mgPeriod) {
+      b.mgCycle = 0;
+      b.mgWarned = false;
+      b.mgMode = -b.mgMode;
+      b.mgFlip = 14;
+      Sound.play('bossPhase');
+      FX.addShake(11);
+      spawnParticles(b.x, b.y, magnetarColour(b.mgMode), 24);
+    }
+
+    // The field collapses while it is inverting — that gap is the whole
+    // reason the telegraph is readable, and the only time you get to reposition
+    // under your own power.
+    const strength = (0.6 + (ph - 1) * 0.4) * (telegraphing ? 0.22 : 1);
+
+    // ---- the field moves the pilot --------------------------------------
+    const pdx = b.x - player.x, pdy = b.y - player.y;
+    const pd = Math.sqrt(pdx * pdx + pdy * pdy) || 1;
+    const sign = b.mgMode < 0 ? 1 : -1;
+    player.x += (pdx / pd) * strength * sign;
+    player.y += (pdy / pd) * strength * sign;
+    // A constant spring home, so the displacement is a leash and not a
+    // one-way trip: you can never be parked somewhere you cannot get back from.
+    player.y += (b.mgHomeY - player.y) * 0.03;
+    player.x = Math.max(22, Math.min(W - 22, player.x));
+    player.y = Math.max(H * 0.40, Math.min(H - 34, player.y));
+
+    // ---- the field bends its own bullets ---------------------------------
+    const capSpeed = bossSpeed(2.1);
+    for (let i = 0; i < enemyBullets.length; i++) {
+      const eb = enemyBullets[i];
+      if (eb.dead) continue;
+      const dx = eb.x - b.x, dy = eb.y - b.y;
+      const d = Math.sqrt(dx * dx + dy * dy) || 1;
+      if (d > MAGNETAR_REACH) continue;
+      eb.mgAge = (eb.mgAge || 0) + 1;
+      const f = magnetarFalloff(d);
+      const rad = 0.055 * strength * f * (b.mgMode < 0 ? -1 : 1);
+      eb.vx += (dx / d) * rad;
+      eb.vy += (dy / d) * rad;
+      const tan = 0.030 * strength * f * b.mgSpin;
+      eb.vx += (-dy / d) * tan;
+      eb.vy += (dx / d) * tan;
+      const sp = Math.sqrt(eb.vx * eb.vx + eb.vy * eb.vy);
+      if (sp > capSpeed) { eb.vx = eb.vx / sp * capSpeed; eb.vy = eb.vy / sp * capSpeed; }
+      // A shot that has orbited the core long enough is eaten by it. Without
+      // this, ATTRACT would slowly fill the bullet cap with a permanent halo
+      // and the boss would go quiet.
+      if (eb.mgAge > 420) { eb.dead = true; spawnParticles(eb.x, eb.y, '#88bbff', 2); }
+    }
+
+    // ---- flux burst: slow shots handed straight to the field --------------
+    b.mgFire++;
+    if (!telegraphing && b.mgFire >= 96 - ph * 12) {
+      b.mgFire = 0;
+      bossRing(b.x, b.y, 8 + ph * 2, 0.55, b.mgCycle * 0.02, 5);
+      Sound.play('hit');
+    }
+
+    // ---- pole lance: the poles spool visibly for 30 frames, then spit -----
+    if (ph >= 2) {
+      b.mgLance++;
+      if (!telegraphing && b.mgLance >= 210) {
+        b.mgLance = 0;
+        const spread = ph >= 3 ? [-0.14, 0.14] : [0];
+        bossAimed(b.x + magnetarPole(-1), b.y, spread, 1.25, 6);
+        bossAimed(b.x + magnetarPole(1), b.y, spread, 1.25, 6);
+        Sound.play('laser');
+        FX.addShake(5);
+      }
+    }
+  },
+
+  paint(b) {
+    b.mgVis = (b.mgVis || 0) + 1;
+    const live = magnetarColour(b.mgMode);
+    const other = magnetarColour(-b.mgMode);
+    const inverting = b.mgCycle > b.mgPeriod - MAGNETAR_TELE;
+    // During the telegraph the poles bleed toward the incoming colour.
+    const bleed = inverting ? (b.mgCycle - (b.mgPeriod - MAGNETAR_TELE)) / MAGNETAR_TELE : 0;
+    const poleCol = bleed > 0.5 ? other : live;
+    const charging = b.mgLance > 180 ? (b.mgLance - 180) / 30 : 0;
+
+    // --- field lines behind the hull ---
+    for (let i = 0; i < 3; i++) {
+      const bow = 40 + i * 22;
+      const a = 0.30 - i * 0.07;
+      magnetarArc(magnetarPole(-1), magnetarPole(1), -bow, b.mgVis * b.mgSpin * (b.mgMode < 0 ? -1.4 : 1.4), poleCol, a * (inverting ? 0.35 : 1));
+      magnetarArc(magnetarPole(-1), magnetarPole(1), bow, b.mgVis * b.mgSpin * (b.mgMode < 0 ? -1.4 : 1.4), poleCol, a * (inverting ? 0.35 : 1));
+    }
+
+    // --- iron slab hull ---
+    ctx.beginPath();
+    ctx.moveTo(-68, -8);
+    ctx.lineTo(-50, -33);
+    ctx.lineTo(50, -33);
+    ctx.lineTo(68, -8);
+    ctx.lineTo(68, 8);
+    ctx.lineTo(50, 33);
+    ctx.lineTo(-50, 33);
+    ctx.lineTo(-68, 8);
+    ctx.closePath();
+    const g = ctx.createLinearGradient(0, -33, 0, 33);
+    g.addColorStop(0, '#3b414c');
+    g.addColorStop(0.45, '#20242c');
+    g.addColorStop(1, '#080a0e');
+    ctx.fillStyle = g;
+    ctx.fill();
+    ctx.strokeStyle = '#565f6d';
+    ctx.lineWidth = 2;
+    ctx.stroke();
+    bossFlash(b);
+
+    // --- ribbing ---
+    ctx.strokeStyle = 'rgba(0,0,0,0.45)';
+    ctx.lineWidth = 3;
+    for (let i = -3; i <= 3; i++) {
+      ctx.beginPath();
+      ctx.moveTo(i * 12, -30);
+      ctx.lineTo(i * 12, 30);
+      ctx.stroke();
+    }
+
+    // --- the two poles ---
+    for (let s = -1; s <= 1; s += 2) {
+      const px = magnetarPole(s);
+      ctx.beginPath();
+      ctx.moveTo(px - 13, -24);
+      ctx.lineTo(px + 13, -24);
+      ctx.lineTo(px + 16, 0);
+      ctx.lineTo(px + 13, 24);
+      ctx.lineTo(px - 13, 24);
+      ctx.lineTo(px - 16, 0);
+      ctx.closePath();
+      ctx.fillStyle = '#14171d';
+      ctx.fill();
+      ctx.strokeStyle = poleCol;
+      ctx.lineWidth = 2.5 + charging * 2.5;
+      ctx.stroke();
+      // pole face
+      ctx.beginPath();
+      ctx.arc(px, 0, 8 + charging * 3, 0, Math.PI * 2);
+      ctx.fillStyle = poleCol;
+      ctx.globalAlpha = 0.5 + 0.5 * Math.abs(Math.sin(b.mgVis * 0.09));
+      ctx.fill();
+      ctx.globalAlpha = 1;
+      // N / S ident, so the polarity is legible even to a colourblind pilot
+      ctx.fillStyle = '#05070a';
+      ctx.font = 'bold 11px monospace';
+      ctx.textAlign = 'center';
+      ctx.fillText(b.mgMode < 0 ? (s < 0 ? 'N' : 'S') : (s < 0 ? 'S' : 'N'), px, 4);
+    }
+
+    // --- core ---
+    ctx.beginPath();
+    ctx.arc(0, 0, 17, 0, Math.PI * 2);
+    const cg = ctx.createRadialGradient(0, -4, 2, 0, 0, 20);
+    cg.addColorStop(0, '#eaf2ff');
+    cg.addColorStop(0.5, live);
+    cg.addColorStop(1, '#05070c');
+    ctx.fillStyle = cg;
+    ctx.fill();
+    ctx.strokeStyle = bossTint(b, '#88ccff', '#ffbb55', '#ff5544');
+    ctx.lineWidth = 2;
+    ctx.stroke();
+
+    if (b.mgFlip > 0) {
+      ctx.beginPath();
+      ctx.arc(0, 0, 24 + (14 - b.mgFlip) * 4, 0, Math.PI * 2);
+      ctx.strokeStyle = live;
+      ctx.globalAlpha = b.mgFlip / 14;
+      ctx.lineWidth = 4;
+      ctx.stroke();
+      ctx.globalAlpha = 1;
+    }
+  },
+
+  paintWorld(b) {
+    if (b.entering) return;
+    const live = magnetarColour(b.mgMode);
+    const inverting = b.mgCycle > b.mgPeriod - MAGNETAR_TELE;
+    const t = b.mgVis || 0;
+    ctx.save();
+
+    // Concentric field shells travelling in the direction the field pushes.
+    // ATTRACT: rings march inward. REPEL: rings march outward. That single
+    // read tells you which way you are about to be thrown.
+    const flow = (t * (b.mgMode < 0 ? -1 : 1) * 1.1) % 70;
+    for (let i = 0; i < 5; i++) {
+      let r = 60 + i * 70 + flow;
+      while (r < 50) r += 350;
+      while (r > 400) r -= 350;
+      ctx.beginPath();
+      ctx.arc(b.x, b.y, r, 0, Math.PI * 2);
+      ctx.strokeStyle = live;
+      ctx.globalAlpha = (inverting ? 0.05 : 0.14) * (1 - r / 430);
+      ctx.lineWidth = 2;
+      ctx.stroke();
+    }
+
+    // The leash on the pilot, drawn so you can see you are being moved.
+    const dx = b.x - player.x, dy = b.y - player.y;
+    const d = Math.sqrt(dx * dx + dy * dy) || 1;
+    const dir = b.mgMode < 0 ? 1 : -1;
+    ctx.globalAlpha = inverting ? 0.12 : 0.34;
+    ctx.strokeStyle = live;
+    ctx.lineWidth = 1.5;
+    ctx.setLineDash([5, 9]);
+    ctx.lineDashOffset = -t * dir * 2;
+    ctx.beginPath();
+    ctx.moveTo(player.x, player.y);
+    ctx.lineTo(b.x, b.y);
+    ctx.stroke();
+    ctx.setLineDash([]);
+    // arrowhead at the pilot showing which way they are being dragged
+    const ax = player.x + (dx / d) * dir * 26, ay = player.y + (dy / d) * dir * 26;
+    ctx.globalAlpha = inverting ? 0.2 : 0.7;
+    ctx.beginPath();
+    ctx.arc(ax, ay, 4, 0, Math.PI * 2);
+    ctx.fillStyle = live;
+    ctx.fill();
+    ctx.globalAlpha = 1;
+    ctx.restore();
+  },
+
+  title(b) {
+    if (b.mgCycle > b.mgPeriod - MAGNETAR_TELE) {
+      return '>> INVERTING TO ' + (b.mgMode < 0 ? 'REPEL' : 'ATTRACT') + ' <<';
+    }
+    return 'POLARITY: ' + (b.mgMode < 0 ? 'ATTRACT' : 'REPEL');
+  }
+};
+
+
+// ---------------------------------------------------------------------------
+// L50 — VOIDGATE PRIME   (the gate on the first VOIDBIRTH)
+//
+// Mechanic: MIRRORS. It tears rifts in the arena and your own ship comes back
+// out of them, upside down, shooting your pattern down at you. Mirrors are not
+// spawned enemies — they are objects the gate owns, drawn and flown and fired
+// by this file, so they genuinely track and mirror the pilot instead of running
+// a stock enemy AI. One per phase, up to four.
+//
+// The gate hardens while its reflections are alive, so the fastest route
+// through the fight is to kill yourself, repeatedly. It can always be damaged
+// — the hardening bottoms out at half — so there is no lock-out.
+// ---------------------------------------------------------------------------
+
+const VOIDGATE_OPEN = 54;      // frames a rift takes to widen before it delivers
+const VOIDGATE_LIFE = 900;     // a mirror you ignore eventually collapses
+const VOIDGATE_MAX = 4;
+
+function voidgateMirror(x, y, hp) {
+  return {
+    x: x, y: y, homeY: y, vx: 0,
+    hp: hp, maxHp: hp, flash: 0,
+    life: VOIDGATE_LIFE,
+    fire: 20 + Math.floor(Math.random() * 30),
+    state: 'hunt',              // hunt -> wind -> dive -> hunt
+    wind: 0,
+    t: Math.random() * 6.28
+  };
+}
+
+// Where a mirror wants to be: reflected across the arena's spine. Chase the
+// pilot's reflection, not the pilot.
+function voidgateTargetX(m) {
+  return Math.max(34, Math.min(W - 34, W - player.x));
+}
+
+// The gate's ring: one segment.
+function voidgateSegment(i, n, rIn, rOut, spin) {
+  const a0 = (i / n) * Math.PI * 2 + spin;
+  const a1 = ((i + 0.72) / n) * Math.PI * 2 + spin;
+  ctx.beginPath();
+  ctx.moveTo(Math.cos(a0) * rIn, Math.sin(a0) * rIn);
+  ctx.lineTo(Math.cos(a0) * rOut, Math.sin(a0) * rOut);
+  ctx.lineTo(Math.cos(a1) * rOut, Math.sin(a1) * rOut);
+  ctx.lineTo(Math.cos(a1) * rIn, Math.sin(a1) * rIn);
+  ctx.closePath();
+}
+
+// A mirror hull: the player's silhouette, inverted. Drawn in world space.
+function voidgateShip(m, col) {
+  ctx.save();
+  ctx.translate(m.x, m.y);
+  ctx.scale(1, -1);                       // the mirror, literally
+  ctx.beginPath();
+  ctx.moveTo(0, 19);
+  ctx.lineTo(-13, -9);
+  ctx.lineTo(-6, -14);
+  ctx.lineTo(0, -6);
+  ctx.lineTo(6, -14);
+  ctx.lineTo(13, -9);
+  ctx.closePath();
+  const g = ctx.createLinearGradient(0, -16, 0, 19);
+  g.addColorStop(0, '#1a0a2e');
+  g.addColorStop(1, col);
+  ctx.fillStyle = g;
+  ctx.fill();
+  ctx.strokeStyle = '#f0e0ff';
+  ctx.lineWidth = 1.6;
+  ctx.stroke();
+  if (m.flash > 0) {
+    ctx.fillStyle = 'rgba(255,255,255,' + Math.min(0.7, m.flash * 0.16) + ')';
+    ctx.fill();
+  }
+  ctx.restore();
+}
+
+BOSS.voidgate = {
+  w: 126, h: 108,
+
+  init(b) {
+    b.vgMirrors = [];
+    b.vgPortals = [];
+    b.vgSpin = 0;
+    b.vgT = 0;
+    b.vgLastOpen = -999;
+    b.vgHurtCd = 0;
+    b.vgAtk = 0;
+    b.vgCharge = 0;
+    b.vgKilled = 0;
+  },
+
+  onPhase(b, ph) {
+    b.vgAtk = 0;
+    b.vgCharge = 0;
+    FX.explode(b.x, b.y, 44, '#aa66ff');
+    addFlashText('THE GATE WIDENS', b.x, b.y - 62, '#cc99ff');
+  },
+
+  move(b) {
+    // The gate barely moves — it is a fixed hole in space. It only breathes.
+    b.x += Math.sign(W / 2 - b.x) * Math.min(0.35, Math.abs(W / 2 - b.x));
+    b.y = b.targetY + Math.sin(b.vgT * 0.017) * 8;
+  },
+
+  damage(b, bl, dmg) {
+    // Hardened by its own reflections, floored at half so the fight can never
+    // stall out no matter how many mirrors are up.
+    const n = b.vgMirrors.length;
+    return dmg * Math.max(0.5, 1 - 0.13 * n);
+  },
+
+  think(b, ph) {
+    b.vgT++;
+    b.vgSpin += 0.02;
+    if (b.vgHurtCd > 0) b.vgHurtCd--;
+
+    // ---- rifts open, then deliver ----------------------------------------
+    for (let i = b.vgPortals.length - 1; i >= 0; i--) {
+      const p = b.vgPortals[i];
+      p.t++;
+      if (p.t >= VOIDGATE_OPEN) {
+        b.vgPortals.splice(i, 1);
+        b.vgMirrors.push(voidgateMirror(p.x, p.y, b.maxHp * 0.018));
+        FX.explode(p.x, p.y, 30, '#cc88ff');
+        Sound.play('shieldBreak');
+        addFlashText('MIRROR', p.x, p.y - 26, '#cc99ff');
+      }
+    }
+
+    const want = Math.min(VOIDGATE_MAX, ph);
+    if (b.vgMirrors.length + b.vgPortals.length < want && b.vgT - b.vgLastOpen > 75) {
+      b.vgLastOpen = b.vgT;
+      b.vgPortals.push({
+        x: 66 + Math.random() * (W - 132),
+        y: 236 + Math.random() * 86,
+        t: 0
+      });
+      Sound.play('warning');
+    }
+
+    // ---- the mirrors fly ---------------------------------------------------
+    for (let i = b.vgMirrors.length - 1; i >= 0; i--) {
+      const m = b.vgMirrors[i];
+      m.t += 0.05;
+      m.life--;
+      if (m.flash > 0) m.flash--;
+
+      if (m.state === 'hunt') {
+        const tx = voidgateTargetX(m);
+        m.vx += (tx - m.x) * 0.007;
+        m.vx *= 0.91;
+        if (m.vx > 4.4) m.vx = 4.4;
+        if (m.vx < -4.4) m.vx = -4.4;
+        m.x += m.vx;
+        m.y += (m.homeY - m.y) * 0.04 + Math.sin(m.t) * 0.3;
+        // From phase 3 a mirror will occasionally run at you. It stops dead
+        // and glows for 40 frames first — that is the tell.
+        if (ph >= 3 && Math.random() < 0.0035) { m.state = 'wind'; m.wind = 40; Sound.play('warning'); }
+      } else if (m.state === 'wind') {
+        m.wind--;
+        m.vx *= 0.8;
+        m.x += m.vx;
+        if (m.wind <= 0) { m.state = 'dive'; Sound.play('laser'); }
+      } else {
+        m.y += 5.4;
+        m.x += (player.x - m.x) * 0.03;
+        if (m.y > H - 70) { m.state = 'hunt'; }
+      }
+      m.x = Math.max(24, Math.min(W - 24, m.x));
+
+      // ---- the mirror shoots your pattern, pointed the other way ----------
+      m.fire++;
+      const rate = 66 - ph * 6;
+      if (m.state !== 'wind' && m.fire >= rate) {
+        m.fire = 0;
+        const down = Math.PI / 2;
+        if (ph >= 2) {
+          bossShot(m.x, m.y + 18, down - 0.16, 1, 4);
+          bossShot(m.x, m.y + 18, down, 1.05, 4);
+          bossShot(m.x, m.y + 18, down + 0.16, 1, 4);
+        } else {
+          bossShot(m.x, m.y + 18, down, 1, 4);
+        }
+        if (ph >= 3) {              // side pods, same as a kitted-out runner
+          bossShot(m.x - 12, m.y + 6, down - 0.55, 0.85, 3.5);
+          bossShot(m.x + 12, m.y + 6, down + 0.55, 0.85, 3.5);
+        }
+      }
+
+      // ---- ramming --------------------------------------------------------
+      if (b.vgHurtCd <= 0 &&
+          Math.abs(player.x - m.x) < 15 + player.w * 0.3 &&
+          Math.abs(player.y - m.y) < 19 + player.h * 0.26) {
+        hitPlayer();
+        b.vgHurtCd = 45;
+        FX.addShake(10);
+        spawnParticles(m.x, m.y, '#cc88ff', 14);
+      }
+
+      if (m.life <= 0) {
+        spawnParticles(m.x, m.y, '#8855cc', 18);
+        b.vgMirrors.splice(i, 1);
+      }
+    }
+
+    // ---- mirrors take fire (they are not part of the boss hitbox) ---------
+    if (b.vgMirrors.length) {
+      const arr = bullets;
+      for (let i = 0; i < arr.length; i++) {
+        const bl = arr[i];
+        if (bl.dead) continue;
+        for (let j = b.vgMirrors.length - 1; j >= 0; j--) {
+          const m = b.vgMirrors[j];
+          if (Math.abs(bl.x - m.x) > 16 || Math.abs(bl.y - m.y) > 21) continue;
+          if (bl.pierce > 0) bl.pierce--; else bl.dead = true;
+          m.hp -= bl.damage * stats.bossDamageMul;
+          m.flash = 4;
+          spawnParticles(bl.x, bl.y, '#cc88ff', 3);
+          if (m.hp <= 0) {
+            b.vgMirrors.splice(j, 1);
+            b.vgKilled++;
+            FX.explode(m.x, m.y, 32, '#cc88ff');
+            FX.addShake(9);
+            Sound.play('explode');
+            addFlashText('MIRROR SHATTERED', m.x, m.y - 24, '#ddaaff');
+            // The gate feels its reflection die. Floored at 1: the game only
+            // ever checks for death inside its own bullet-vs-hull loop, so
+            // draining the last point from out here would park the gate at
+            // zero HP and leave it fighting until someone clipped the hull.
+            b.hp = Math.max(1, b.hp - b.maxHp * 0.01);
+          }
+          break;
+        }
+      }
+    }
+
+    // ---- the gate's own attack: a collapsing event horizon ----------------
+    b.vgAtk++;
+    const cycle = 270 - ph * 20;
+    if (b.vgAtk === cycle - 55) { b.vgCharge = 55; Sound.play('warning'); }
+    if (b.vgCharge > 0) b.vgCharge--;
+    if (b.vgAtk >= cycle) {
+      b.vgAtk = 0;
+      bossRing(b.x, b.y, 12 + ph * 2, 0.62, b.vgSpin, 5);
+      if (ph >= 3) bossRing(b.x, b.y, 12 + ph * 2, 0.95, b.vgSpin + 0.26, 4);
+      Sound.play('laser');
+      FX.addShake(9);
+    }
+  },
+
+  paint(b) {
+    b.vgVis = (b.vgVis || 0) + 1;
+    const rim = bossTint(b, '#7fd8ff', '#c07cff', '#ff5ec8');
+    const spin = b.vgSpin;
+
+    // --- event horizon ---
+    ctx.beginPath();
+    ctx.arc(0, 0, 44, 0, Math.PI * 2);
+    const hg = ctx.createRadialGradient(0, 0, 3, 0, 0, 46);
+    hg.addColorStop(0, '#ffffff');
+    hg.addColorStop(0.16, rim);
+    hg.addColorStop(0.42, '#2a0d55');
+    hg.addColorStop(1, '#05010c');
+    ctx.fillStyle = hg;
+    ctx.fill();
+
+    // swirling accretion streaks
+    ctx.lineWidth = 2;
+    for (let i = 0; i < 7; i++) {
+      const a = spin * (1 + i * 0.13) + (i / 7) * Math.PI * 2;
+      const r = 12 + i * 4.4;
+      ctx.beginPath();
+      ctx.arc(0, 0, r, a, a + 1.5 + i * 0.1);
+      ctx.strokeStyle = rim;
+      ctx.globalAlpha = 0.16 + i * 0.05;
+      ctx.stroke();
+    }
+    ctx.globalAlpha = 1;
+
+    // charging horizon: a bright ring collapsing into the middle
+    if (b.vgCharge > 0) {
+      const k = 1 - b.vgCharge / 55;
+      ctx.beginPath();
+      ctx.arc(0, 0, 8 + (1 - k) * 46, 0, Math.PI * 2);
+      ctx.strokeStyle = '#ffffff';
+      ctx.globalAlpha = 0.25 + k * 0.55;
+      ctx.lineWidth = 2 + k * 3;
+      ctx.stroke();
+      ctx.globalAlpha = 1;
+    }
+
+    // --- the ring structure ---
+    for (let i = 0; i < 14; i++) {
+      voidgateSegment(i, 14, 45, 60, spin * 0.35);
+      const sg = ctx.createLinearGradient(0, -60, 0, 60);
+      sg.addColorStop(0, '#565070');
+      sg.addColorStop(1, '#14101f');
+      ctx.fillStyle = sg;
+      ctx.fill();
+      ctx.strokeStyle = rim;
+      ctx.globalAlpha = 0.55;
+      ctx.lineWidth = 1;
+      ctx.stroke();
+      ctx.globalAlpha = 1;
+    }
+
+    // outer shell — the whole boss silhouette, so bossFlash lands on it
+    ctx.beginPath();
+    ctx.arc(0, 0, 61, 0, Math.PI * 2);
+    ctx.strokeStyle = rim;
+    ctx.lineWidth = 3;
+    ctx.stroke();
+    bossFlash(b);
+
+    // pylons at the cardinal points, one lit per phase reached
+    for (let i = 0; i < 4; i++) {
+      const a = (i / 4) * Math.PI * 2 + Math.PI / 4;
+      const px = Math.cos(a) * 60, py = Math.sin(a) * 60;
+      ctx.beginPath();
+      ctx.arc(px, py, 7, 0, Math.PI * 2);
+      ctx.fillStyle = i < b.phase ? rim : '#241d33';
+      ctx.fill();
+      ctx.strokeStyle = '#0a0714';
+      ctx.lineWidth = 1.5;
+      ctx.stroke();
+    }
+  },
+
+  paintWorld(b) {
+    ctx.save();
+
+    // --- tethers from the gate to every reflection ---
+    ctx.strokeStyle = '#aa66ff';
+    ctx.lineWidth = 1;
+    for (let i = 0; i < b.vgMirrors.length; i++) {
+      const m = b.vgMirrors[i];
+      ctx.globalAlpha = 0.16;
+      ctx.beginPath();
+      ctx.moveTo(b.x, b.y);
+      ctx.lineTo(m.x, m.y);
+      ctx.stroke();
+    }
+    ctx.globalAlpha = 1;
+
+    // --- rifts widening ---
+    for (let i = 0; i < b.vgPortals.length; i++) {
+      const p = b.vgPortals[i];
+      const k = p.t / VOIDGATE_OPEN;
+      const hh = 10 + k * 34;
+      const hw = 2 + k * k * 20;
+      ctx.beginPath();
+      ctx.moveTo(p.x, p.y - hh);
+      ctx.quadraticCurveTo(p.x + hw, p.y, p.x, p.y + hh);
+      ctx.quadraticCurveTo(p.x - hw, p.y, p.x, p.y - hh);
+      ctx.closePath();
+      const pg = ctx.createLinearGradient(p.x - hw, 0, p.x + hw, 0);
+      pg.addColorStop(0, '#2a0a4a');
+      pg.addColorStop(0.5, '#ffffff');
+      pg.addColorStop(1, '#2a0a4a');
+      ctx.fillStyle = pg;
+      ctx.globalAlpha = 0.35 + k * 0.55;
+      ctx.fill();
+      ctx.globalAlpha = 0.8;
+      ctx.strokeStyle = '#e0b0ff';
+      ctx.lineWidth = 1.5;
+      ctx.stroke();
+      ctx.globalAlpha = 1;
+    }
+
+    // --- the mirrors themselves ---
+    for (let i = 0; i < b.vgMirrors.length; i++) {
+      const m = b.vgMirrors[i];
+      if (m.state === 'wind') {
+        // the dive tell: a hard white halo that tightens
+        const k = 1 - m.wind / 40;
+        ctx.beginPath();
+        ctx.arc(m.x, m.y, 34 - k * 16, 0, Math.PI * 2);
+        ctx.strokeStyle = '#ffffff';
+        ctx.globalAlpha = 0.25 + k * 0.5;
+        ctx.lineWidth = 2;
+        ctx.stroke();
+        ctx.globalAlpha = 1;
+      }
+      voidgateShip(m, m.state === 'dive' ? '#ff66cc' : '#7a3fd0');
+      // health pip
+      const f = Math.max(0, m.hp / m.maxHp);
+      ctx.fillStyle = 'rgba(0,0,0,0.55)';
+      ctx.fillRect(m.x - 14, m.y + 22, 28, 3);
+      ctx.fillStyle = '#cc88ff';
+      ctx.fillRect(m.x - 14, m.y + 22, 28 * f, 3);
+    }
+    ctx.restore();
+  },
+
+  title(b) {
+    const n = b.vgMirrors.length;
+    return 'MIRRORS ' + n + ' / ' + Math.min(VOIDGATE_MAX, b.phase) +
+           (n ? '   GATE HARDENED' : '   GATE EXPOSED');
+  }
+};
+
+
+// ---------------------------------------------------------------------------
+// L75 — RUSTFALL
+//
+// Mechanic: ACCRETION. It is falling apart, and the pieces stay where they
+// land. Every shed drops a chunk of hull that tumbles down for ~100 frames
+// (with a marked landing site) and then becomes permanent terrain: it eats
+// your bullets and it hurts to touch. By the last phase the arena is a
+// scrapyard and you are shooting through gaps you made yourself.
+//
+// Wreckage has its own health, so a lane can always be cleared, and the count
+// is hard-capped so the arena can never seal shut.
+// ---------------------------------------------------------------------------
+
+const RUSTFALL_CAP = 18;
+const RUSTFALL_TOP = 272;      // wreck never settles above this...
+const RUSTFALL_BOT = 542;      // ...or below this. keeps the boss and the
+                               // pilot's own lane out of the debris field.
+
+function rustfallChunk(x, y, tx, ty, hp) {
+  const r = 15 + Math.random() * 11;
+  const n = 7 + Math.floor(Math.random() * 3);
+  const pts = [];
+  for (let i = 0; i < n; i++) {
+    const a = (i / n) * Math.PI * 2;
+    const rr = r * (0.62 + Math.random() * 0.52);
+    pts.push([Math.cos(a) * rr, Math.sin(a) * rr]);
+  }
+  return {
+    x: x, y: y, tx: tx, ty: ty,
+    vx: (tx - x) / 96, vy: 0,
+    r: r, rot: Math.random() * 6.28, spin: (Math.random() - 0.5) * 0.012,
+    hp: hp, maxHp: hp, flash: 0, pts: pts,
+    settled: false
+  };
+}
+
+// Try a few times for a landing site that is not on top of existing wreckage,
+// so the field spreads out instead of stacking into one impassable blob.
+function rustfallSite(b) {
+  let bx = 0, by = 0, best = -1;
+  for (let k = 0; k < 8; k++) {
+    const cx = 44 + Math.random() * (W - 88);
+    const cy = RUSTFALL_TOP + Math.random() * (RUSTFALL_BOT - RUSTFALL_TOP);
+    let near = 1e9;
+    for (let i = 0; i < b.wreck.length; i++) {
+      const dx = b.wreck[i].x - cx, dy = b.wreck[i].y - cy;
+      const d = dx * dx + dy * dy;
+      if (d < near) near = d;
+    }
+    if (near > best) { best = near; bx = cx; by = cy; }
+  }
+  return { x: bx, y: by };
+}
+
+function rustfallDrawChunk(w, alpha, ghost) {
+  ctx.save();
+  ctx.translate(w.x, w.y);
+  ctx.rotate(w.rot);
+  ctx.globalAlpha = alpha;
+  ctx.beginPath();
+  ctx.moveTo(w.pts[0][0], w.pts[0][1]);
+  for (let i = 1; i < w.pts.length; i++) ctx.lineTo(w.pts[i][0], w.pts[i][1]);
+  ctx.closePath();
+  const f = Math.max(0, w.hp / w.maxHp);
+  const g = ctx.createLinearGradient(-w.r, -w.r, w.r, w.r);
+  g.addColorStop(0, ghost ? '#6a4a30' : '#a46230');
+  g.addColorStop(0.55, '#6b3a1c');
+  g.addColorStop(1, '#241611');
+  ctx.fillStyle = g;
+  ctx.fill();
+  ctx.strokeStyle = f > 0.5 ? '#c9803f' : '#ffb060';
+  ctx.lineWidth = 1.6;
+  ctx.stroke();
+  if (w.flash > 0) {
+    ctx.fillStyle = 'rgba(255,220,180,' + Math.min(0.65, w.flash * 0.16) + ')';
+    ctx.fill();
+  }
+  // exposed girders in the middle of the chunk
+  ctx.strokeStyle = 'rgba(20,12,8,0.7)';
+  ctx.lineWidth = 2.5;
+  ctx.beginPath();
+  ctx.moveTo(-w.r * 0.5, -w.r * 0.2);
+  ctx.lineTo(w.r * 0.4, w.r * 0.3);
+  ctx.moveTo(-w.r * 0.2, w.r * 0.45);
+  ctx.lineTo(w.r * 0.35, -w.r * 0.4);
+  ctx.stroke();
+  // damage read: a chunk you have chewed on glows at the cracks
+  if (f < 1) {
+    ctx.strokeStyle = 'rgba(255,150,60,' + (0.65 * (1 - f)) + ')';
+    ctx.lineWidth = 1.2;
+    ctx.beginPath();
+    ctx.arc(0, 0, w.r * 0.55, 0, Math.PI * 2 * (1 - f));
+    ctx.stroke();
+  }
+  ctx.globalAlpha = 1;
+  ctx.restore();
+}
+
+BOSS.rustfall = {
+  w: 158, h: 78,
+
+  init(b) {
+    b.wreck = [];
+    b.rfFalling = [];
+    b.rfT = 0;
+    b.rfShed = 0;
+    b.rfShedT = 0;
+    b.rfHurtCd = 0;
+    b.rfAtk = 0;
+    b.rfSweep = 0;
+    b.rfWind = 0;
+    b.rfDrift = 1;
+  },
+
+  onPhase(b, ph) {
+    b.rfDrift = -b.rfDrift;
+    b.rfShedT = 999;             // a phase change immediately costs it plating
+    FX.addShake(16);
+    addFlashText('STRUCTURE FAILING', b.x, b.y - 52, '#dd8844');
+  },
+
+  move(b) {
+    // Slow and heavy, and it lists as it loses plating.
+    b.x += Math.sign(player.x - b.x) * Math.min(0.5, Math.abs(player.x - b.x));
+    b.x += Math.sin(b.rfT * 0.011) * 0.35 * b.rfDrift;
+    b.x = Math.max(84, Math.min(W - 84, b.x));
+    b.y = b.targetY + Math.sin(b.rfT * 0.015) * 5;
+  },
+
+  think(b, ph) {
+    b.rfT++;
+    if (b.rfHurtCd > 0) b.rfHurtCd--;
+    if (b.rfWind > 0) b.rfWind--;
+
+    // ---- shedding ---------------------------------------------------------
+    b.rfShedT++;
+    const every = 260 - ph * 50;                  // 210 / 160 / 110
+    const total = b.wreck.length + b.rfFalling.length;
+    if (b.rfShedT >= every && total < RUSTFALL_CAP) {
+      b.rfShedT = 0;
+      const n = Math.min(ph >= 3 ? 2 : 1, RUSTFALL_CAP - total);
+      for (let k = 0; k < n; k++) {
+        const site = rustfallSite(b);
+        b.rfFalling.push(rustfallChunk(
+          b.x + (Math.random() - 0.5) * 120, b.y + 18,
+          site.x, site.y, 300 + level * 4
+        ));
+      }
+      b.rfShed++;
+      Sound.play('explode');
+      FX.addShake(8);
+      addFlashText('HULL SHEDDING', b.x, b.y + 52, '#cc7733');
+    }
+
+    // ---- falling plate -> permanent terrain -------------------------------
+    for (let i = b.rfFalling.length - 1; i >= 0; i--) {
+      const p = b.rfFalling[i];
+      p.vy += 0.06;
+      if (p.vy > 3.2) p.vy = 3.2;
+      p.y += p.vy;
+      p.x += p.vx;
+      p.rot += p.spin * 3;
+      if (p.y >= p.ty) {
+        p.y = p.ty;
+        p.x = p.tx;
+        p.settled = true;
+        b.rfFalling.splice(i, 1);
+        b.wreck.push(p);
+        spawnParticles(p.x, p.y, '#cc7733', 14);
+        FX.addShake(5);
+        Sound.play('hit');
+      }
+    }
+
+    // ---- wreckage eats your bullets ---------------------------------------
+    if (b.wreck.length) {
+      const arr = bullets;
+      for (let i = 0; i < arr.length; i++) {
+        const bl = arr[i];
+        if (bl.dead) continue;
+        if (bl.y < RUSTFALL_TOP - 30 || bl.y > RUSTFALL_BOT + 30) continue;
+        for (let j = b.wreck.length - 1; j >= 0; j--) {
+          const w = b.wreck[j];
+          const dx = bl.x - w.x, dy = bl.y - w.y;
+          if (dx * dx + dy * dy > w.r * w.r) continue;
+          if (bl.pierce > 0) bl.pierce--; else bl.dead = true;
+          w.hp -= bl.damage * 0.6;
+          w.flash = 4;
+          spawnParticles(bl.x, bl.y, '#c07a3a', 3);
+          if (w.hp <= 0) {
+            b.wreck.splice(j, 1);
+            FX.explode(w.x, w.y, 26, '#cc8844');
+            Sound.play('explode');
+            spawnParticles(w.x, w.y, '#8a5a30', 16);
+          }
+          break;
+        }
+      }
+      for (let j = 0; j < b.wreck.length; j++) {
+        const w = b.wreck[j];
+        if (w.flash > 0) w.flash--;
+        w.rot += w.spin;                     // settled junk still tumbles
+      }
+    }
+
+    // ---- wreckage hurts to touch ------------------------------------------
+    if (b.rfHurtCd <= 0) {
+      for (let j = 0; j < b.wreck.length; j++) {
+        const w = b.wreck[j];
+        if (Math.abs(player.x - w.x) < w.r * 0.8 + player.w * 0.3 &&
+            Math.abs(player.y - w.y) < w.r * 0.8 + player.h * 0.25) {
+          hitPlayer();
+          b.rfHurtCd = 45;
+          FX.addShake(9);
+          spawnParticles(player.x, player.y, '#cc7733', 12);
+          break;
+        }
+      }
+    }
+
+    // ---- rust slugs -------------------------------------------------------
+    b.rfAtk++;
+    if (b.rfAtk >= 126 - ph * 12) {
+      b.rfAtk = 0;
+      bossAimed(b.x, b.y + 28, ph >= 2 ? [-0.3, -0.1, 0.1, 0.3] : [-0.18, 0.18], 0.85, 6);
+      Sound.play('hit');
+    }
+
+    // ---- corrosion sweep: 40-frame vent glow, then a wall of slag ---------
+    if (ph >= 2) {
+      b.rfSweep++;
+      if (b.rfSweep === 210 - 40) { b.rfWind = 40; Sound.play('warning'); }
+      if (b.rfSweep >= 210) {
+        b.rfSweep = 0;
+        for (let i = 0; i <= 12; i++) {
+          bossShot(b.x, b.y + 24, Math.PI * 0.22 + (i / 12) * Math.PI * 0.56, 0.7, 7);
+        }
+        Sound.play('laser');
+        FX.addShake(10);
+      }
+    }
+  },
+
+  paint(b) {
+    b.rfVis = (b.rfVis || 0) + 1;
+    const trim = bossTint(b, '#cc8844', '#ff8833', '#ff5522');
+    const holes = Math.min(6, b.rfShed);
+
+    // --- asymmetric corroded hulk ---
+    ctx.beginPath();
+    ctx.moveTo(-79, 2);
+    ctx.lineTo(-64, -28);
+    ctx.lineTo(-22, -39);
+    ctx.lineTo(26, -34);
+    ctx.lineTo(58, -22);
+    ctx.lineTo(79, 4);
+    ctx.lineTo(62, 24);
+    ctx.lineTo(30, 39);
+    ctx.lineTo(-18, 36);
+    ctx.lineTo(-52, 26);
+    ctx.closePath();
+    const g = ctx.createLinearGradient(-79, -39, 60, 39);
+    g.addColorStop(0, '#7a4623');
+    g.addColorStop(0.4, '#4c2c17');
+    g.addColorStop(1, '#150e0a');
+    ctx.fillStyle = g;
+    ctx.fill();
+    ctx.strokeStyle = '#8a5228';
+    ctx.lineWidth = 2.5;
+    ctx.stroke();
+    bossFlash(b);
+
+    // --- heavy intact plating, port side ---
+    ctx.fillStyle = 'rgba(120,74,40,0.55)';
+    ctx.beginPath();
+    ctx.moveTo(-72, 0); ctx.lineTo(-58, -24); ctx.lineTo(-26, -30);
+    ctx.lineTo(-20, 20); ctx.lineTo(-48, 22); ctx.closePath();
+    ctx.fill();
+    ctx.strokeStyle = 'rgba(20,12,8,0.6)';
+    ctx.lineWidth = 2;
+    ctx.stroke();
+    // rivets
+    ctx.fillStyle = 'rgba(30,18,10,0.8)';
+    for (let i = 0; i < 6; i++) {
+      ctx.beginPath();
+      ctx.arc(-64 + i * 8, -16 + (i % 2) * 30, 2, 0, Math.PI * 2);
+      ctx.fill();
+    }
+
+    // --- cavities opened by shedding, one per shed, up to six ---
+    const holeSpots = [[34, -14], [10, 16], [50, 6], [-4, -22], [26, 24], [-30, -6]];
+    for (let i = 0; i < holes; i++) {
+      const s = holeSpots[i];
+      ctx.beginPath();
+      ctx.ellipse(s[0], s[1], 11, 8, i * 0.6, 0, Math.PI * 2);
+      ctx.fillStyle = '#0a0705';
+      ctx.fill();
+      ctx.strokeStyle = trim;
+      ctx.globalAlpha = 0.5;
+      ctx.lineWidth = 1.4;
+      ctx.stroke();
+      ctx.globalAlpha = 1;
+      // girders inside the hole
+      ctx.strokeStyle = 'rgba(180,110,60,0.55)';
+      ctx.lineWidth = 1.4;
+      ctx.beginPath();
+      ctx.moveTo(s[0] - 8, s[1] - 4); ctx.lineTo(s[0] + 8, s[1] + 4);
+      ctx.moveTo(s[0] - 6, s[1] + 5); ctx.lineTo(s[0] + 7, s[1] - 5);
+      ctx.stroke();
+    }
+
+    // --- corrosion streaks ---
+    ctx.strokeStyle = 'rgba(200,120,60,0.28)';
+    ctx.lineWidth = 1.4;
+    const streaks = [[-40, -20, -34, 24], [-8, -32, -2, 32], [44, -18, 40, 20], [18, -30, 22, 30]];
+    for (let i = 0; i < streaks.length; i++) {
+      const s = streaks[i];
+      ctx.beginPath();
+      ctx.moveTo(s[0], s[1]);
+      ctx.lineTo(s[2], s[3]);
+      ctx.stroke();
+    }
+
+    // --- furnace vent (brightens during the sweep wind-up) ---
+    const heat = b.rfWind > 0 ? 1 - b.rfWind / 40 : 0;
+    ctx.beginPath();
+    ctx.moveTo(-24, 30); ctx.lineTo(24, 30); ctx.lineTo(18, 40); ctx.lineTo(-18, 40);
+    ctx.closePath();
+    const vg = ctx.createLinearGradient(0, 28, 0, 42);
+    vg.addColorStop(0, b.rfWind > 0 ? '#fff0c0' : '#c06020');
+    vg.addColorStop(1, '#2a1005');
+    ctx.fillStyle = vg;
+    ctx.globalAlpha = 0.5 + heat * 0.5;
+    ctx.fill();
+    ctx.globalAlpha = 1;
+    ctx.strokeStyle = trim;
+    ctx.lineWidth = 1.5 + heat * 2.5;
+    ctx.stroke();
+
+    // --- single sensor eye, off-centre, because nothing here is symmetric ---
+    ctx.beginPath();
+    ctx.arc(-40, -6, 7, 0, Math.PI * 2);
+    ctx.fillStyle = trim;
+    ctx.globalAlpha = 0.55 + 0.45 * Math.abs(Math.sin(b.rfVis * 0.05));
+    ctx.fill();
+    ctx.globalAlpha = 1;
+    ctx.strokeStyle = '#150d08';
+    ctx.lineWidth = 2;
+    ctx.stroke();
+  },
+
+  paintWorld(b) {
+    ctx.save();
+
+    // --- landing sites, marked while a plate is still in the air ---
+    for (let i = 0; i < b.rfFalling.length; i++) {
+      const p = b.rfFalling[i];
+      const k = Math.max(0, Math.min(1, (p.y - b.y) / Math.max(1, p.ty - b.y)));
+      ctx.beginPath();
+      ctx.arc(p.tx, p.ty, p.r * (1.6 - k * 0.5), 0, Math.PI * 2);
+      ctx.strokeStyle = '#ff9944';
+      ctx.globalAlpha = 0.25 + k * 0.45;
+      ctx.lineWidth = 2;
+      ctx.setLineDash([5, 6]);
+      ctx.stroke();
+      ctx.setLineDash([]);
+      ctx.globalAlpha = 1;
+    }
+
+    // --- settled wreckage (terrain) ---
+    for (let i = 0; i < b.wreck.length; i++) rustfallDrawChunk(b.wreck[i], 1, false);
+    // --- plates still falling (not yet solid, drawn faded) ---
+    for (let i = 0; i < b.rfFalling.length; i++) rustfallDrawChunk(b.rfFalling[i], 0.65, true);
+
+    ctx.restore();
+  },
+
+  title(b) {
+    return 'WRECKAGE ' + b.wreck.length + ' / ' + RUSTFALL_CAP +
+           (b.rfFalling.length ? '   ( ' + b.rfFalling.length + ' INBOUND )' : '');
+  }
+};
+// ---- end boss pack: boss_a ----
+
 const BOSS_W = 112, BOSS_H = 54;
 
 function bossMaxHp(lv) {
@@ -2901,12 +5243,20 @@ function updateBoss() {
     b.laser = null;
     FX.addShake(14);
     Sound.play('bossPhase');
-    addFlashText('PHASE ' + p, b.x, b.y - 40, '#ffffff');
+    // No generic "PHASE n" banner here: the bar already shows the phase, and
+    // several bosses announce something far more useful of their own. Two
+    // overlapping captions is worse than one good one.
     if (def.onPhase) def.onPhase(b, p);
   }
 
   b.attackTimer++;
   def.think(b, b.phase);
+
+  // Death is checked HERE as well as in the bullet loop below. A boss may damage
+  // itself — Voidgate weakens as its mirrors die — and if the only death check
+  // lived in the bullet loop, such a boss could sit at zero health with an empty
+  // bar and keep fighting until a shot happened to clip its hull.
+  if (b.hp <= 0 && b.dying === 0) bossBeginDeath(b);
 
   // ---- taking fire ----
   const hw = bossHalfW(b), hh = bossHalfH(b);
@@ -2943,16 +5293,30 @@ function updateBoss() {
         }));
       }
 
-      if (b.hp <= 0 && b.dying === 0) {
-        b.hp = 0;
-        b.dying = 45; b.deathTick = 0;
-        runKills++;
-        enemyBullets = [];
-        Sound.play('explode');
-      }
+      if (b.hp <= 0 && b.dying === 0) bossBeginDeath(b);
     }
   });
 }
+
+// One place where a boss starts dying, so every path that can kill one — a
+// bullet, splash, or the boss damaging itself — behaves identically.
+function bossBeginDeath(b) {
+  b.hp = 0;
+  b.dying = 45; b.deathTick = 0;
+  runKills++;
+  enemyBullets = [];
+  // Bosses that displace the pilot (Magnetar drags you around on a magnetic
+  // leash) stop thinking the instant they start dying, so the release has to
+  // happen here or the offset would persist for the rest of the run.
+  releasePlayerPosition();
+  Sound.play('explode');
+}
+
+// The pilot's resting position. Anything that moves the player as a mechanic
+// must be undone against this, not against wherever the ship happened to be.
+const PLAYER_HOME_Y = H - 120;
+
+function releasePlayerPosition() { player.y = PLAYER_HOME_Y; }
 
 let nextFormationId = 1;
 
@@ -3503,6 +5867,18 @@ function update() {
     else if (tx > player.x + 15) dx = 1;
   }
   player.x = Math.max(20, Math.min(W-20, player.x + dx*player.speed));
+
+  // The ship has NO vertical control — ArrowUp/ArrowDown are swallowed but
+  // never move it. So any boss that displaces the pilot vertically (Magnetar
+  // drags you on a magnetic leash) would otherwise leave a permanent offset
+  // for the rest of the run. Easing back to the resting line here means the
+  // displacement self-heals and no boss has to remember to release it; a boss
+  // that keeps pulling simply wins against the spring while it is alive.
+  player.y = Math.max(90, Math.min(H - 24, player.y));
+  if (player.y !== PLAYER_HOME_Y) {
+    player.y += (PLAYER_HOME_Y - player.y) * 0.06;
+    if (Math.abs(player.y - PLAYER_HOME_Y) < 0.4) player.y = PLAYER_HOME_Y;
+  }
 
   // Player trail
   player.trail.push({x: player.x, y: player.y, life: 12});
