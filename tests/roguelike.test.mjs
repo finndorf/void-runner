@@ -48,14 +48,25 @@ function scripted(values) {
   return () => values[Math.min(i++, values.length - 1)];
 }
 
+// rollRarity draws the one-in-a-million SECRET check BEFORE it touches the
+// ladder, so any sequence meant to land on a ladder tier has to start with a
+// value outside that window. `ladder()` prepends one; `flat()` is the
+// constant-value equivalent.
+const ladder = values => scripted([0.5].concat(values));
+const flat = v => scripted([0.5, v]);
+
 const SHIP = { fireMul: 1, speed: 5, spreadMul: 1 };
-const TIER_IDS = core.TIERS.map(t => t.id);
+// The LADDER, not TIERS: almost every rule in this file is about the eleven
+// rungs you climb, and SECRET is deliberately not one of them.
+const TIER_IDS = core.LADDER.map(t => t.id);
 
 const DEFAULTS = () => ({
-  version: 3, hiScore: 0, bestLevel: 1, totalRuns: 0, totalKills: 0,
+  version: core.SAVE_VERSION, hiScore: 0, bestLevel: 1, totalRuns: 0, totalKills: 0,
   credits: 0, unlocked: ['vanguard'], selectedShip: 'vanguard', muted: false,
   bestScrapSpent: 0, apexFound: 0,
-  voidbirths: 0, bestVoidbirth: 0, tiersFound: {}, bossesKilled: {}
+  voidbirths: 0, bestVoidbirth: 0, tiersFound: {}, bossesKilled: {},
+  seenUpgrades: {}, seenEnemies: {}, seenMeteors: {},
+  settings: core.defaultSettings()
 });
 
 const baseStats = over => Object.assign({
@@ -131,8 +142,8 @@ test('the purity scan would still catch a real reference (the scan is not vacuou
 // 1. Save migration
 // ---------------------------------------------------------------------------
 
-test('SAVE_VERSION is 3, as the spec requires', () => {
-  assert.equal(core.SAVE_VERSION, 3);
+test('SAVE_VERSION is 4, as the spec requires', () => {
+  assert.equal(core.SAVE_VERSION, 4);
 });
 
 test('a v1 save keeps its credits, ships and lifetime records', () => {
@@ -181,11 +192,88 @@ test('a v2 save keeps its credits, ships and v2-era records', () => {
 
 test('a v2 save gains the voidbirth fields and the current version', () => {
   const { data } = core.migrateSave({ version: 2, credits: 1 }, DEFAULTS());
-  assert.equal(data.version, 3);
+  assert.equal(data.version, core.SAVE_VERSION);
   assert.equal(data.voidbirths, 0);
   assert.equal(data.bestVoidbirth, 0);
   assert.deepEqual(data.tiersFound, {});
   assert.deepEqual(data.bossesKilled, {});
+});
+
+// v4 adds the bestiary and the settings panel. An old save must come out
+// playable: nothing seen, and every control at its default.
+test('any older save gains an empty bestiary and default settings', () => {
+  [1, 2, 3].forEach(version => {
+    const { data, ok } = core.migrateSave({ version, credits: 5 }, DEFAULTS());
+    assert.equal(ok, true, `v${version} should migrate, not be discarded`);
+    assert.equal(data.version, core.SAVE_VERSION);
+    assert.deepEqual(data.seenUpgrades, {}, `v${version} seenUpgrades`);
+    assert.deepEqual(data.seenEnemies, {}, `v${version} seenEnemies`);
+    assert.deepEqual(data.seenMeteors, {}, `v${version} seenMeteors`);
+    assert.deepEqual(data.settings, core.defaultSettings(), `v${version} settings`);
+    assert.equal(data.credits, 5, 'and it must not lose the credits');
+  });
+});
+
+test('a v4 save keeps the bestiary it already had', () => {
+  const { data } = core.migrateSave({
+    version: 4, seenEnemies: { skiff: 1 }, seenUpgrades: { reload_coil: 'COMMON' }
+  }, DEFAULTS());
+  assert.deepEqual(data.seenEnemies, { skiff: 1 });
+  assert.deepEqual(data.seenUpgrades, { reload_coil: 'COMMON' });
+});
+
+// ---- settings -------------------------------------------------------------
+
+test('the default settings are three full-ish volumes and a full keymap', () => {
+  const st = core.defaultSettings();
+  ['volMusic', 'volAmbient', 'volAttack'].forEach(k => {
+    assert.ok(st[k] > 0 && st[k] <= 1, `${k} is ${st[k]}`);
+  });
+  assert.equal(st.autoSkip, false);
+  core.BIND_ORDER.forEach(k => {
+    assert.ok(Array.isArray(st.binds[k]) && st.binds[k].length > 0, `${k} has no binding`);
+    assert.ok(core.BIND_LABELS[k], `${k} has no label for the settings screen`);
+  });
+});
+
+test('defaultSettings hands back a fresh object every time', () => {
+  const a = core.defaultSettings();
+  a.binds.left.push('zzz');
+  assert.ok(core.defaultSettings().binds.left.indexOf('zzz') === -1,
+    'the defaults were mutated through a returned reference');
+});
+
+// The settings blob is the one piece of save data a player can put into a
+// bad state, so the normalizer always has to return something playable.
+test('normalizeSettings survives anything', () => {
+  [null, undefined, 42, 'nonsense', [], {}].forEach(bad => {
+    const st = core.normalizeSettings(bad);
+    assert.equal(typeof st.volMusic, 'number');
+    core.BIND_ORDER.forEach(k => assert.ok(st.binds[k].length > 0, `${k} from ${JSON.stringify(bad)}`));
+  });
+});
+
+test('normalizeSettings clamps volumes into range', () => {
+  const st = core.normalizeSettings({ volMusic: 5, volAmbient: -3, volAttack: NaN });
+  assert.equal(st.volMusic, 1);
+  assert.equal(st.volAmbient, 0);
+  assert.equal(st.volAttack, core.defaultSettings().volAttack, 'NaN falls back to the default');
+});
+
+// An empty binding list would leave an action unreachable with no way to fix
+// it from inside the game.
+test('an empty or malformed binding falls back to its default', () => {
+  const st = core.normalizeSettings({ binds: { left: [], right: 'nope', up: [7], fire: ['z'] } });
+  assert.deepEqual(st.binds.left, core.DEFAULT_BINDS.left);
+  assert.deepEqual(st.binds.right, core.DEFAULT_BINDS.right);
+  assert.deepEqual(st.binds.up, core.DEFAULT_BINDS.up);
+  assert.deepEqual(st.binds.fire, ['z'], 'a good binding is kept');
+});
+
+test('normalizeSettings keeps a valid blob unchanged', () => {
+  const st = core.defaultSettings();
+  st.volMusic = 0.25; st.autoSkip = true; st.binds.fire = ['q'];
+  assert.deepEqual(core.normalizeSettings(st), st);
 });
 
 test('a v3 save loads untouched, voidbirth progress and all', () => {
@@ -306,13 +394,44 @@ const SPEC_TIERS = [
   ['UBERCLOCKED', 55000, 1], ['DYNACLOCKED', 90000, 1]
 ];
 
-test('there are exactly eleven tiers', () => {
-  assert.equal(core.TIERS.length, 11);
+test('eleven tiers on the ladder, plus SECRET off it', () => {
+  assert.equal(core.LADDER.length, 11);
   assert.equal(core.MAX_TIER_INDEX, 10);
+  assert.equal(core.TIERS.length, 12);
+  assert.equal(core.TIERS[11].id, 'SECRET');
 });
 
 test('the tiers appear in the documented order COMMON…DYNACLOCKED', () => {
-  assert.deepEqual(TIER_IDS, SPEC_TIERS.map(t => t[0]));
+  assert.deepEqual(core.LADDER.map(t => t.id), SPEC_TIERS.map(t => t[0]));
+});
+
+// The whole point of SECRET is that it sits outside every mechanism that
+// walks the ladder. If any of these stop holding it has become an ordinary
+// twelfth tier with a silly price.
+test('SECRET is off the ladder entirely', () => {
+  const secret = core.tierOf('SECRET');
+  assert.equal(secret.offLadder, true);
+  assert.equal(secret.price, 1, 'a SECRET card costs one scrap');
+  assert.ok(!core.LADDER.some(t => t.id === 'SECRET'), 'SECRET must not be on the ladder');
+});
+
+test('SECRET never drifts, shifts or promotes with depth', () => {
+  for (let vb = 0; vb <= core.MAX_VOIDBIRTH; vb++) {
+    const w = core.rarityWeights(500, vb);
+    assert.ok(!w.SECRET, `SECRET picked up ladder weight at voidbirth ${vb}`);
+    const card = core.UPGRADES.find(u => u.tier === 'SECRET');
+    assert.equal(core.effectiveTier(card, vb), 'SECRET',
+      `a SECRET card was promoted off its own tier at voidbirth ${vb}`);
+  }
+});
+
+test('SECRET comes up at one in a million, and only from its own draw', () => {
+  assert.equal(core.SECRET_CHANCE, 1 / 1000000);
+  // Just inside the window -> SECRET; just outside -> the ordinary ladder.
+  assert.equal(core.rollRarity(1, 0, () => 0), 'SECRET');
+  const seq = [core.SECRET_CHANCE, 0];
+  let i = 0;
+  assert.equal(core.rollRarity(1, 0, () => seq[i++]), 'COMMON');
 });
 
 test('every tier price matches the spec price table', () => {
@@ -322,9 +441,9 @@ test('every tier price matches the spec price table', () => {
 });
 
 test('tier prices are strictly increasing up the ladder', () => {
-  for (let i = 1; i < core.TIERS.length; i++) {
-    assert.ok(core.TIERS[i].price > core.TIERS[i - 1].price,
-      `${core.TIERS[i].id} (${core.TIERS[i].price}) must cost more than ${core.TIERS[i - 1].id}`);
+  for (let i = 1; i < core.LADDER.length; i++) {
+    assert.ok(core.LADDER[i].price > core.LADDER[i - 1].price,
+      `${core.LADDER[i].id} (${core.LADDER[i].price}) must cost more than ${core.LADDER[i - 1].id}`);
   }
 });
 
@@ -335,14 +454,14 @@ test('every tier stack limit matches the spec', () => {
 });
 
 test('stack limits never increase as the ladder rises', () => {
-  for (let i = 1; i < core.TIERS.length; i++) {
-    assert.ok(core.TIERS[i].stackLimit <= core.TIERS[i - 1].stackLimit,
-      `${core.TIERS[i].id} stacks more than the tier below it`);
+  for (let i = 1; i < core.LADDER.length; i++) {
+    assert.ok(core.LADDER[i].stackLimit <= core.LADDER[i - 1].stackLimit,
+      `${core.LADDER[i].id} stacks more than the tier below it`);
   }
 });
 
 test('tierIndexOf and tierOf round-trip for every tier', () => {
-  core.TIERS.forEach((t, i) => {
+  core.LADDER.forEach((t, i) => {
     assert.equal(core.tierIndexOf(t.id), i);
     assert.equal(core.tierOf(t.id).id, t.id);
     assert.equal(core.tierOf(core.TIERS[core.tierIndexOf(t.id)].id), t);
@@ -360,14 +479,14 @@ test('tierOf throws on an unknown tier id', () => {
 });
 
 test('every tier carries two distinct display colours', () => {
-  core.TIERS.forEach(t => {
+  core.LADDER.forEach(t => {
     assert.match(t.color, /^#[0-9a-f]{6}$/i, `${t.id} color`);
     assert.match(t.color2, /^#[0-9a-f]{6}$/i, `${t.id} color2`);
   });
 });
 
 test('tier ids are unique', () => {
-  assert.equal(new Set(TIER_IDS).size, core.TIERS.length);
+  assert.equal(new Set(TIER_IDS).size, core.LADDER.length);
 });
 
 // ---------------------------------------------------------------------------
@@ -589,20 +708,23 @@ test('APEX odds are a fixed promise at voidbirth 0, level or no level', () => {
 });
 
 test('drift resets at each voidbirth, so an ascension starts the odds fresh', () => {
-  assert.equal(core.levelsIntoSegment(1, 0), 0);
-  assert.equal(core.levelsIntoSegment(51, 1), 0, 'level 51 is the first level after VB1');
-  assert.equal(core.levelsIntoSegment(101, 2), 0);
-  assert.equal(core.levelsIntoSegment(201, 3), 0);
-  assert.equal(core.levelsIntoSegment(351, 4), 0);
-  assert.equal(core.levelsIntoSegment(501, 5), 0);
-  const fresh = core.rarityWeights(51, 1);
+  // An ascension now drops you back to level 1, so "fresh" is literally
+  // level 1 at every depth rather than a per-segment origin.
+  for (let vb = 0; vb <= core.MAX_VOIDBIRTH; vb++) {
+    assert.equal(core.levelsIntoSegment(1, vb), 0, `depth ${vb}`);
+  }
+  const fresh = core.rarityWeights(1, 1);
   assert.equal(fresh.UNCOMMON, 51.5, 'the new floor tier must start undrifted');
+  const drifted = core.rarityWeights(60, 1);
+  assert.ok(drifted.UNCOMMON < fresh.UNCOMMON, 'and drift off it as the segment runs');
 });
 
-test('levelsIntoSegment counts forward within a segment and never goes negative', () => {
+test('levelsIntoSegment counts from level 1, because an ascension resets there', () => {
   assert.equal(core.levelsIntoSegment(2, 0), 1);
-  assert.equal(core.levelsIntoSegment(60, 1), 9);
-  assert.equal(core.levelsIntoSegment(1, 5), 0, 'a level before the segment start clamps to 0');
+  assert.equal(core.levelsIntoSegment(60, 1), 59, 'depth no longer shifts the origin');
+  assert.equal(core.levelsIntoSegment(1, 5), 0, 'level 1 is always zero levels in');
+  assert.equal(core.levelsIntoSegment(0, 0), 0, 'and it never goes negative');
+  assert.equal(core.levelsIntoSegment(-9, 3), 0);
 });
 
 test('clampVoidbirth keeps depth inside 0..MAX_VOIDBIRTH', () => {
@@ -624,8 +746,8 @@ test('an out-of-range voidbirth still yields a valid 100-sum vector', () => {
 
 for (let vb = 0; vb <= 5; vb++) {
   test(`rollRarity with rnd()=0 returns the floor tier at voidbirth ${vb}`, () => {
-    assert.equal(core.rollRarity(1, vb, () => 0), core.TIERS[vb].id);
-    assert.equal(core.rollRarity(2500, vb, () => 0), core.TIERS[vb].id,
+    assert.equal(core.rollRarity(1, vb, flat(0)), core.LADDER[vb].id);
+    assert.equal(core.rollRarity(2500, vb, flat(0)), core.LADDER[vb].id,
       'drift must not change which tier the very bottom of the range maps to');
   });
 }
@@ -634,20 +756,19 @@ test('rollRarity with rnd() just under 1 returns the deepest reachable tier', ()
   const deepest = ['OVERCLOCKED', 'HYPERCLOCKED', 'UBERCLOCKED',
     'DYNACLOCKED', 'DYNACLOCKED', 'DYNACLOCKED'];
   deepest.forEach((id, vb) => {
-    assert.equal(core.rollRarity(1, vb, () => 0.999999), id, `voidbirth ${vb}`);
+    assert.equal(core.rollRarity(1, vb, flat(0.999999)), id, `voidbirth ${vb}`);
   });
 });
 
 test('rollRarity honours the tier boundaries of the cumulative distribution', () => {
-  assert.equal(core.rollRarity(1, 0, () => 0.0), 'COMMON');
-  assert.equal(core.rollRarity(1, 0, () => 0.514), 'COMMON');
-  assert.equal(core.rollRarity(1, 0, () => 0.516), 'UNCOMMON');
-  assert.equal(core.rollRarity(1, 0, () => 0.784), 'UNCOMMON');
-  assert.equal(core.rollRarity(1, 0, () => 0.786), 'RARE');
-  assert.equal(core.rollRarity(1, 0, () => 0.916), 'EPIC');
-  assert.equal(core.rollRarity(1, 0, () => 0.978), 'LEGENDARY');
-  assert.equal(core.rollRarity(1, 0, () => 0.993), 'MYTHIC');
-  assert.equal(core.rollRarity(1, 0, () => 0.997), 'APEX');
+  assert.equal(core.rollRarity(1, 0, flat(0.0)), 'COMMON');
+  assert.equal(core.rollRarity(1, 0, flat(0.514)), 'COMMON');
+  assert.equal(core.rollRarity(1, 0, flat(0.516)), 'UNCOMMON');
+  assert.equal(core.rollRarity(1, 0, flat(0.784)), 'UNCOMMON');
+  assert.equal(core.rollRarity(1, 0, flat(0.786)), 'RARE');
+  assert.equal(core.rollRarity(1, 0, flat(0.916)), 'EPIC');
+  assert.equal(core.rollRarity(1, 0, flat(0.978)), 'LEGENDARY');
+  assert.equal(core.rollRarity(1, 0, flat(0.997)), 'APEX');
 });
 
 test('rollRarity always returns a tier that exists and is at or above the floor', () => {
@@ -692,7 +813,54 @@ const SPEC_ENEMY_HP = {
 test('the anchors of the HP economy are the spec numbers', () => {
   assert.equal(core.BASE_DAMAGE, 10, 'a base shot deals 10');
   assert.equal(core.enemyHp('grunt', 1), 20, 'a level-1 grunt is exactly two shots');
-  assert.equal(core.HP_EXPONENT, 0.92);
+  assert.equal(core.HP_EXPONENT, 0.95);
+});
+
+// This is the load-bearing fact of the whole expansion. A 1,000 HP first boss
+// and a 1,000,000,000 HP Mothership can only both be true if the FLOOR of the
+// player's damage rides the same curve enemy health does -- otherwise the
+// final fight is a five-hour footrace. Your build is a multiple of the
+// baseline, not a race against it.
+test('a bare shot scales on the same exponent as enemy health', () => {
+  assert.equal(core.baseDamageAt(1), core.BASE_DAMAGE);
+  [1, 10, 100, 500, 2500].forEach(level => {
+    close(core.baseDamageAt(level), 10 * Math.pow(level, core.HP_EXPONENT), `level ${level}`);
+    // Two bare shots kill a level-N grunt at EVERY N. That invariant is what
+    // keeps the early game and the deep game the same game.
+    const shots = core.enemyHp('grunt', level) / core.baseDamageAt(level);
+    assert.ok(shots > 1.9 && shots < 2.1, `a grunt took ${shots} bare shots at level ${level}`);
+  });
+});
+
+test('baseDamageAt never returns less than the base shot', () => {
+  [0, -10, 0.5, 1].forEach(level => {
+    assert.ok(core.baseDamageAt(level) >= core.BASE_DAMAGE, `level ${level}`);
+  });
+});
+
+// Nothing is deleted in a single frame, however large the multiplier stack.
+test('a boss always takes at least MIN_BOSS_HITS hits', () => {
+  assert.equal(core.MIN_BOSS_HITS, 14);
+  const hp = 1000000;
+  assert.equal(core.capDamage(1e12, hp, true), hp / 14);
+  assert.equal(core.capDamage(100, hp, true), 100, 'an ordinary hit is untouched');
+});
+
+test('an enemy worth naming always takes at least two hits', () => {
+  assert.equal(core.capDamage(1e9, 1000, false), 500);
+  assert.equal(core.capDamage(40, 1000, false), 40);
+});
+
+test('the really weak early ones can still pop in one hit', () => {
+  assert.equal(core.FRAGILE_HP, 16);
+  assert.equal(core.capDamage(1e9, 8, false), 1e9, 'a level-1 swarmling is fragile');
+  assert.equal(core.capDamage(1e9, 16, false), 1e9, 'the boundary is inclusive');
+  assert.ok(core.capDamage(1e9, 17, false) < 1e9, 'one past it is not');
+});
+
+test('capDamage is a no-op on a target with no health', () => {
+  assert.equal(core.capDamage(50, 0, true), 50);
+  assert.equal(core.capDamage(50, -1, false), 50);
 });
 
 test('every enemy kind has the base HP the spec table gives it', () => {
@@ -701,27 +869,136 @@ test('every enemy kind has the base HP the spec table gives it', () => {
   });
 });
 
-test('the enemy roster is exactly the ten kinds the spec lists', () => {
+test('the ten legacy kinds are still resolvable — boss minions name them', () => {
   assert.deepEqual(Object.keys(core.ENEMY_HP).sort(), Object.keys(SPEC_ENEMY_HP).sort());
 });
 
-test('enemyHp follows base * level^0.92 at levels 1/10/100/500/2500', () => {
+// ---- the band roster ------------------------------------------------------
+// Ten bands of ten levels, each a wholly new set of ships, each one member
+// larger than the band below it.
+
+test('there are ten bands and they grow by exactly one ship each', () => {
+  assert.equal(core.ENEMY_BANDS.length, 10);
+  core.ENEMY_BANDS.forEach((band, i) => {
+    assert.equal(band.length, 5 + i, `band ${i} should hold ${5 + i} ships`);
+  });
+  assert.equal(core.ENEMY_ROSTER.length, 95);
+});
+
+test('every ship id is unique across the whole roster', () => {
+  const ids = core.ENEMY_ROSTER.map(e => e.id);
+  assert.equal(new Set(ids).size, ids.length);
+});
+
+// The thing this expansion exists to prevent: 95 "different" enemies that
+// are really a handful of shapes with the palette swapped.
+test('no two ships anywhere in the roster share a silhouette', () => {
+  const shapes = core.ENEMY_ROSTER.map(e => {
+    const a = e.art;
+    return [a.nose, a.body, a.wing, a.pods, a.eng, a.fin, a.cock, a.arm].join('/');
+  });
+  assert.equal(new Set(shapes).size, shapes.length,
+    'two hulls have identical geometry — that is a recolour, not a ship');
+});
+
+test('bands share no ships with each other', () => {
+  const seen = new Set();
+  core.ENEMY_BANDS.forEach((band, i) => {
+    band.forEach(e => {
+      assert.ok(!seen.has(e.id), `${e.id} appears in band ${i} and an earlier one`);
+      seen.add(e.id);
+    });
+  });
+});
+
+test('each band is tougher than the one below it', () => {
+  for (let i = 1; i < core.ENEMY_BANDS.length; i++) {
+    const lo = Math.min(...core.ENEMY_BANDS[i - 1].map(e => e.hp));
+    const hi = Math.min(...core.ENEMY_BANDS[i].map(e => e.hp));
+    assert.ok(hi > lo, `band ${i}'s lightest hull is not tougher than band ${i - 1}'s`);
+  }
+});
+
+test('the first band is the five ships the brief names', () => {
+  assert.deepEqual(core.ENEMY_BANDS[0].map(e => e.id),
+    ['skiff', 'hauler', 'dart', 'picket', 'lance']);
+});
+
+test('bandIndex swaps the roster every ten levels', () => {
+  assert.equal(core.bandIndex(1), 0);
+  assert.equal(core.bandIndex(10), 0);
+  assert.equal(core.bandIndex(11), 1);
+  assert.equal(core.bandIndex(20), 1);
+  assert.equal(core.bandIndex(91), 9);
+  assert.equal(core.bandIndex(100), 9);
+});
+
+test('past level 100 the bands cycle rather than running out', () => {
+  assert.equal(core.CYCLE_FROM, 4);
+  assert.equal(core.bandIndex(101), 4);
+  assert.equal(core.bandIndex(111), 5);
+  assert.equal(core.bandIndex(151), 9, 'the cycle runs up to the last band');
+  assert.equal(core.bandIndex(161), 4, 'and then wraps back to CYCLE_FROM');
+  for (let level = 1; level < 5000; level += 7) {
+    const b = core.bandIndex(level);
+    assert.ok(b >= 0 && b < core.ENEMY_BANDS.length, `level ${level} -> band ${b}`);
+    assert.ok(core.rosterFor(level).length > 0);
+  }
+});
+
+test('every band has a theme name and every level resolves to one', () => {
+  assert.equal(core.BAND_THEMES.length, core.ENEMY_BANDS.length);
+  [1, 15, 55, 99, 250, 2500].forEach(level => {
+    assert.equal(typeof core.bandTheme(level), 'string');
+    assert.ok(core.bandTheme(level).length > 0);
+  });
+});
+
+test('enemyHp resolves every roster ship, not just the legacy ten', () => {
+  core.ENEMY_ROSTER.forEach(e => {
+    assert.equal(core.enemyHp(e.id, 1), e.hp, e.id);
+    assert.ok(core.enemyHp(e.id, 100) > e.hp, e.id + ' at depth');
+  });
+});
+
+test('a band-5 hull at level 50 is a real fight, not a popped balloon', () => {
+  // The brief: by level 50 an enemy should take a serious number of hits.
+  const band = core.ENEMY_BANDS[core.bandIndex(50)];
+  const heavy = Math.max(...band.map(e => e.hp));
+  const hits = (heavy * Math.pow(50, core.HP_EXPONENT)) / core.baseDamageAt(50);
+  assert.ok(hits > 40, `the heaviest band-5 hull took only ${Math.round(hits)} bare shots`);
+});
+
+test('weights always cover the whole roster and are never zero', () => {
+  [1, 12, 47, 96, 300].forEach(level => {
+    const w = core.enemyWeightsFor(level);
+    assert.equal(w.length, core.rosterFor(level).length, `level ${level}`);
+    w.forEach(([id, weight]) => {
+      assert.ok(core.ENEMY_BY_ID[id], `${id} is not in the roster`);
+      assert.ok(weight > 0, `${id} had weight ${weight} at level ${level}`);
+    });
+  });
+});
+
+test('heavy hulls crowd in towards the end of a band', () => {
+  const heaviest = core.ENEMY_BANDS[2].reduce((a, b) => (a.hp > b.hp ? a : b)).id;
+  const at21 = core.enemyWeightsFor(21).find(x => x[0] === heaviest)[1];
+  const at30 = core.enemyWeightsFor(30).find(x => x[0] === heaviest)[1];
+  assert.ok(at30 > at21, 'the heaviest hull should be commoner late in its band');
+});
+
+test('enemyHp follows base * level^0.95 at levels 1/10/100/500/2500', () => {
   ['grunt', 'elite', 'swarmling', 'harbinger'].forEach(kind => {
     [1, 10, 100, 500, 2500].forEach(level => {
-      const want = Math.max(1, Math.round(SPEC_ENEMY_HP[kind] * Math.pow(level, 0.92)));
+      const want = Math.max(1, Math.round(SPEC_ENEMY_HP[kind] * Math.pow(level, 0.95)));
       assert.equal(core.enemyHp(kind, level), want, `${kind} at level ${level}`);
     });
   });
 });
 
-test('a level-100 grunt is about 1,384 HP and an elite about 4,152, as the spec states', () => {
-  assert.equal(core.enemyHp('grunt', 100), 1384);
-  assert.equal(core.enemyHp('elite', 100), 4151);
-});
-
 test('the level-2500 grunt is far past the level-1 one but not absurd', () => {
-  assert.ok(core.enemyHp('grunt', 2500) > 20000);
-  assert.ok(core.enemyHp('grunt', 2500) < 40000);
+  assert.ok(core.enemyHp('grunt', 2500) > 25000);
+  assert.ok(core.enemyHp('grunt', 2500) < 60000);
 });
 
 test('enemyHp is monotonically increasing in level for every kind', () => {
@@ -799,23 +1076,54 @@ test('enemyScale is monotonically non-decreasing', () => {
   }
 });
 
-test('meteorite classes appear at the levels the spec gives them', () => {
-  const spec = [['ice', 1, 30], ['iron', 25, 120], ['obsidian', 100, 400],
-    ['voidglass', 400, 1400], ['shard', 1000, 5000]];
-  assert.equal(core.METEORS.length, 5);
-  spec.forEach(([id, from, hp], i) => {
-    assert.equal(core.METEORS[i].id, id);
-    assert.equal(core.METEORS[i].from, from);
-    assert.equal(core.METEORS[i].hp, hp);
-    assert.ok(core.METEORS[i].behaviour.length > 0, `${id} needs a behaviour`);
+test('every meteorite class carries a payload, a weight and a behaviour', () => {
+  assert.equal(core.METEORS.length, 8);
+  const drops = ['scrap', 'shield', 'life', 'rage', 'freeze'];
+  core.METEORS.forEach(m => {
+    assert.ok(m.behaviour.length > 0, `${m.id} needs a behaviour`);
+    assert.ok(drops.indexOf(m.drop) !== -1, `${m.id} drops "${m.drop}", which is not a pickup`);
+    assert.ok(m.drops >= 1, `${m.id} drops nothing`);
+    assert.ok(m.weight > 0, `${m.id} can never be rolled`);
+    assert.equal(m.col.length, 3, `${m.id} needs three hull colours`);
   });
+  assert.equal(new Set(core.METEORS.map(m => m.id)).size, 8, 'ids must be unique');
+});
+
+test('meteorite classes phase in as you descend, cheapest first', () => {
+  for (let i = 1; i < core.METEORS.length; i++) {
+    assert.ok(core.METEORS[i].from >= core.METEORS[i - 1].from, 'the table must be ordered by depth');
+    assert.ok(core.METEORS[i].hp > core.METEORS[i - 1].hp, 'and get tougher with it');
+  }
+  assert.equal(core.METEORS[0].from, 1, 'something must be available on level 1');
+});
+
+test('rollMeteor only ever returns a class the level has reached', () => {
+  const rnd = makeRnd(7);
+  [1, 5, 30, 150, 900].forEach(level => {
+    const allowed = new Set(core.meteorsFor(level).map(m => m.id));
+    for (let i = 0; i < 400; i++) {
+      assert.ok(allowed.has(core.rollMeteor(level, rnd).id), `level ${level}`);
+    }
+  });
+});
+
+test('rollMeteor survives the boundaries of the random range', () => {
+  assert.ok(core.rollMeteor(1, () => 0).id);
+  assert.ok(core.rollMeteor(1, () => 0.999999).id);
+  assert.ok(core.rollMeteor(0, () => 0.5).id, 'even below level 1 it returns something');
+});
+
+test('meteor health rides the same depth curve as everything else', () => {
+  assert.ok(core.meteorHp('ice', 100) > core.meteorHp('ice', 1));
+  assert.ok(core.meteorHp('shard', 300) > core.meteorHp('ice', 300));
+  assert.throws(() => core.meteorHp('cheese', 1), /unknown meteor/);
 });
 
 test('meteorsFor only ever offers classes the level has reached', () => {
   assert.deepEqual(core.meteorsFor(1).map(m => m.id), ['ice']);
-  assert.deepEqual(core.meteorsFor(24).map(m => m.id), ['ice']);
-  assert.deepEqual(core.meteorsFor(25).map(m => m.id), ['ice', 'iron']);
-  assert.equal(core.meteorsFor(1000).length, 5);
+  assert.deepEqual(core.meteorsFor(5).map(m => m.id), ['ice']);
+  assert.deepEqual(core.meteorsFor(6).map(m => m.id), ['ice', 'iron']);
+  assert.equal(core.meteorsFor(1000).length, 8);
   assert.equal(core.meteorsFor(0).length, 0);
 });
 
@@ -823,16 +1131,26 @@ test('meteorsFor only ever offers classes the level has reached', () => {
 // 5. The boss table
 // ---------------------------------------------------------------------------
 
+// Health follows hp = 1000 * (level/10)^2.5, fitted to the two fixed points
+// the brief gives: 1,000 for the first boss and 1,000,000,000 for the
+// Mothership. The ORDER is also load-bearing -- both shield-mechanic fights
+// sit past level 100.
 const SPEC_BOSSES = [
-  [10, 'SCRAPJAW', 6600, 2], [20, 'HALO WARDEN', 14000, 3], [30, 'THE CHOIR', 21000, 3],
-  [40, 'MAGNETAR', 30000, 3], [50, 'VOIDGATE PRIME', 38000, 4], [75, 'RUSTFALL', 62000, 3],
-  [100, 'THE LONG SILENCE', 88000, 4], [150, 'HIVE EMPRESS', 148000, 4],
-  [200, 'THE CARTOGRAPHER', 217000, 4], [250, 'NULLPOINT', 295000, 4],
-  [300, 'SEVEN ANGLES', 381000, 5], [350, 'THE WIDOW', 474000, 4],
-  [400, 'ASHEN CHOIRMASTER', 576000, 5], [500, 'THE THRESHOLD', 800000, 5],
-  [750, 'PALE HERALD', 1500000, 5], [1000, 'IRON LITANY', 2300000, 6],
-  [2500, 'THE DREADED SCOURGE OF HUMANITY — WARR MOTHERSHIP', 10000000, 7]
+  [10, 'TRIAD', 1000, 3], [20, 'MAGNETAR', 5600, 3], [30, 'RUSTFALL', 15000, 3],
+  [40, 'THE LONG SILENCE', 32000, 4], [50, 'MIRRORGATE', 56000, 4],
+  [75, 'THE WIDOW', 154000, 4], [100, 'SEVEN ANGLES', 316000, 5],
+  [150, 'HALO WARDEN', 870000, 3], [200, 'SCRAPJAW TITAN', 1790000, 2],
+  [250, 'HIVE EMPRESS', 3125000, 4], [300, 'THE CARTOGRAPHER', 4930000, 4],
+  [350, 'NULLPOINT', 7240000, 4], [400, 'ASHEN CHOIRMASTER', 10100000, 5],
+  [500, 'THE THRESHOLD', 17700000, 5], [750, 'PALE HERALD', 48700000, 5],
+  [1000, 'IRON LITANY', 100000000, 6],
+  [2500, 'THE DREADED SCOURGE OF HUMANITY — WARR MOTHERSHIP', 1000000000, 7]
 ];
+
+// The two shield fights are HALO WARDEN's rotating ring and SCRAPJAW's
+// armour plates. Neither belongs in the first hundred levels, where the
+// player has no build capable of breaking one quickly.
+const SHIELD_BOSSES = ['halowarden', 'scrapjaw'];
 
 test('there are seventeen hand-built bosses', () => {
   assert.equal(core.BOSS_TABLE.length, 17);
@@ -863,11 +1181,42 @@ test('boss HP is strictly increasing up the table', () => {
   }
 });
 
-test('the level-2500 Mothership is exactly 10,000,000 HP — the anchor of the curve', () => {
+test('the level-2500 Mothership is exactly 1,000,000,000 HP — the anchor of the curve', () => {
   const m = core.BOSS_TABLE.find(b => b.level === 2500);
-  assert.equal(m.hp, 10000000);
+  assert.equal(m.hp, 1000000000);
   assert.equal(m.key, 'mothership');
   assert.equal(m.phases, 7);
+});
+
+test('the first boss is exactly 1,000 HP — the other anchor', () => {
+  const first = core.BOSS_TABLE[0];
+  assert.equal(first.level, 10);
+  assert.equal(first.hp, 1000);
+});
+
+test('boss health is strictly increasing down the table', () => {
+  for (let i = 1; i < core.BOSS_TABLE.length; i++) {
+    assert.ok(core.BOSS_TABLE[i].hp > core.BOSS_TABLE[i - 1].hp,
+      `${core.BOSS_TABLE[i].name} is not tougher than ${core.BOSS_TABLE[i - 1].name}`);
+    assert.ok(core.BOSS_TABLE[i].level > core.BOSS_TABLE[i - 1].level, 'and deeper');
+  }
+});
+
+// Both damage-blocking fights belong past level 100. Before that the player
+// has no build capable of breaking a shield in reasonable time, and "why is
+// nothing happening" is the worst thing a first boss can teach.
+test('no shield boss appears in the first hundred levels', () => {
+  SHIELD_BOSSES.forEach(key => {
+    const b = core.BOSS_TABLE.find(x => x.key === key);
+    assert.ok(b, `${key} is missing from the table`);
+    assert.ok(b.level > 100, `${b.name} sits at level ${b.level}`);
+  });
+});
+
+test('no boss name contains the word void', () => {
+  core.BOSS_TABLE.forEach(b => {
+    assert.ok(!/void/i.test(b.name), `${b.name} still says "void"`);
+  });
 });
 
 test('boss phase counts match the spec', () => {
@@ -981,7 +1330,7 @@ test('ARMADA HP sits between IRON LITANY and the Mothership', () => {
   for (let level = 1100; level <= 2400; level += 100) {
     const hp = core.bossFor(level).hp;
     assert.ok(hp > litany, `level ${level} is easier than IRON LITANY`);
-    assert.ok(hp < 10000000, `level ${level} outguns the Mothership`);
+    assert.ok(hp < 1000000000, `level ${level} outguns the Mothership`);
   }
 });
 
@@ -1036,7 +1385,9 @@ test('fittedBossHp is monotonically non-decreasing', () => {
 });
 
 test('fittedBossHp lands near the hand-set numbers it was fitted from', () => {
-  [[100, 88000], [500, 800000], [1000, 2300000]].forEach(([level, actual]) => {
+  assert.equal(core.BOSS_HP_BASE, 1000);
+  assert.equal(core.BOSS_HP_EXPONENT, 2.5);
+  [[100, 316000], [500, 17700000], [1000, 100000000], [2500, 1000000000]].forEach(([level, actual]) => {
     const fit = core.fittedBossHp(level);
     assert.ok(Math.abs(fit - actual) / actual < 0.35,
       `fitted ${fit} is nowhere near the hand-set ${actual} at level ${level}`);
@@ -1160,58 +1511,74 @@ test('shops thin out as you ascend — never more frequent at greater depth', ()
 // 7. Voidbirth
 // ---------------------------------------------------------------------------
 
-test('voidbirth happens at levels 50, 100, 200, 350 and 500', () => {
-  assert.deepEqual(core.VOIDBIRTH_LEVELS, [50, 100, 200, 350, 500]);
+// Ascension is no longer five fixed levels. The first one is handed to you
+// the moment the level-50 boss dies, and after that EVERY boss is an
+// ascension point -- the ladder is climbed by beating things.
+test('the first ascension is the level-50 boss, and it is a boss level', () => {
+  assert.equal(core.FIRST_VOIDBIRTH_LEVEL, 50);
   assert.equal(core.MAX_VOIDBIRTH, 5);
+  assert.equal(core.isBossLevel(50), true, 'level 50 must be a boss level');
+  assert.equal(core.isVoidbirthLevel(50), true);
 });
 
-test('every voidbirth level is also a boss level — an ascension follows a summit', () => {
-  core.VOIDBIRTH_LEVELS.forEach(level => {
-    assert.equal(core.isBossLevel(level), true, `level ${level} is not a boss level`);
+test('every boss from 50 up is an ascension point', () => {
+  core.BOSS_TABLE.filter(b => b.level >= 50).forEach(b => {
+    assert.equal(core.isVoidbirthLevel(b.level), true, `level ${b.level} (${b.name})`);
   });
 });
 
-test('isVoidbirthLevel and voidbirthIndexAt agree with the ladder', () => {
-  core.VOIDBIRTH_LEVELS.forEach((level, i) => {
-    assert.equal(core.isVoidbirthLevel(level), true);
-    assert.equal(core.voidbirthIndexAt(level), i);
-  });
-  [1, 49, 51, 99, 201, 500 + 1, 2500].forEach(level => {
+test('nothing below level 50 is an ascension point, boss or not', () => {
+  [1, 10, 20, 30, 40, 49].forEach(level => {
     assert.equal(core.isVoidbirthLevel(level), false, `level ${level}`);
-    assert.equal(core.voidbirthIndexAt(level), -1);
   });
 });
 
-test('clearing a voidbirth level at the matching depth grants the ascension', () => {
-  core.VOIDBIRTH_LEVELS.forEach((level, i) => {
-    const vbirth = core.voidbirthAfterClearing(level, i);
-    assert.notEqual(vbirth, null, `level ${level} at depth ${i}`);
-    assert.equal(vbirth.to, i + 1);
-    assert.equal(vbirth.numeral, core.ROMAN[i]);
+test('an ordinary level is never an ascension point', () => {
+  [1, 11, 49, 51, 99, 101, 251, 501, 1001, 2499].forEach(level => {
+    assert.equal(core.isVoidbirthLevel(level), core.isBossLevel(level) && level >= 50,
+      `level ${level}`);
   });
+});
+
+test('clearing any qualifying boss grants the next ascension', () => {
+  [50, 75, 100, 150, 250, 500, 1000, 2500].forEach(level => {
+    for (let vb = 0; vb < core.MAX_VOIDBIRTH; vb++) {
+      const vbirth = core.voidbirthAfterClearing(level, vb);
+      assert.notEqual(vbirth, null, `level ${level} at depth ${vb}`);
+      assert.equal(vbirth.to, vb + 1);
+      assert.equal(vbirth.numeral, core.ROMAN[vb]);
+    }
+  });
+});
+
+test('a sliver of the treasury survives an ascension', () => {
+  assert.equal(core.VOIDBIRTH_SCRAP_KEPT, 0.05);
+  assert.equal(core.scrapAfterVoidbirth(10000), 500);
+  assert.equal(core.scrapAfterVoidbirth(19), 0, 'rounds down');
+  assert.equal(core.scrapAfterVoidbirth(0), 0);
+  assert.equal(core.scrapAfterVoidbirth(-100), 0, 'never negative');
 });
 
 test('the roman numerals run I to V', () => {
   assert.deepEqual(core.ROMAN, ['I', 'II', 'III', 'IV', 'V']);
 });
 
-test('an ascension already taken is never granted twice', () => {
-  // The whole point: clearing level 50 again at depth 1 must not push you to 2.
-  assert.equal(core.voidbirthAfterClearing(50, 1), null);
-  assert.equal(core.voidbirthAfterClearing(50, 2), null);
-  assert.equal(core.voidbirthAfterClearing(100, 2), null);
-  assert.equal(core.voidbirthAfterClearing(500, 5), null);
+test('the ladder tops out — a sixth ascension is never granted', () => {
+  [50, 100, 500, 2500].forEach(level => {
+    assert.equal(core.voidbirthAfterClearing(level, core.MAX_VOIDBIRTH), null, `level ${level}`);
+    assert.equal(core.voidbirthAfterClearing(level, 99), null, 'nor past it');
+  });
 });
 
-test('an ascension out of sequence is refused', () => {
-  // Reaching level 200 while still at depth 0 must not skip you to depth 3.
-  assert.equal(core.voidbirthAfterClearing(200, 0), null);
-  assert.equal(core.voidbirthAfterClearing(100, 0), null);
-  assert.equal(core.voidbirthAfterClearing(500, 0), null);
+test('an ascension always advances by exactly one, never skips', () => {
+  for (let vb = 0; vb < core.MAX_VOIDBIRTH; vb++) {
+    assert.equal(core.voidbirthAfterClearing(2500, vb).to, vb + 1,
+      'a very deep boss must not grant more than one rung');
+  }
 });
 
 test('ordinary levels never grant an ascension', () => {
-  [1, 49, 51, 99, 101, 199, 351, 501, 1000, 2500].forEach(level => {
+  [1, 49, 51, 99, 101, 199, 351, 501, 1001, 2499].forEach(level => {
     for (let vb = 0; vb <= 5; vb++) {
       assert.equal(core.voidbirthAfterClearing(level, vb), null, `level ${level} vb ${vb}`);
     }
@@ -1220,10 +1587,10 @@ test('ordinary levels never grant an ascension', () => {
 
 test('each ascension reports the tier it newly unlocks', () => {
   assert.equal(core.voidbirthAfterClearing(50, 0).unlocks, 'HYPERCLOCKED');
-  assert.equal(core.voidbirthAfterClearing(100, 1).unlocks, 'UBERCLOCKED');
-  assert.equal(core.voidbirthAfterClearing(200, 2).unlocks, 'DYNACLOCKED');
-  assert.equal(core.voidbirthAfterClearing(350, 3).unlocks, null, 'there is nothing above DYNACLOCKED');
-  assert.equal(core.voidbirthAfterClearing(500, 4).unlocks, null);
+  assert.equal(core.voidbirthAfterClearing(75, 1).unlocks, 'UBERCLOCKED');
+  assert.equal(core.voidbirthAfterClearing(100, 2).unlocks, 'DYNACLOCKED');
+  assert.equal(core.voidbirthAfterClearing(150, 3).unlocks, null, 'there is nothing above DYNACLOCKED');
+  assert.equal(core.voidbirthAfterClearing(200, 4).unlocks, null);
 });
 
 test('tierUnlockedAt returns the three locked tiers at depths 1, 2 and 3', () => {
@@ -1324,7 +1691,11 @@ test('effectiveTier climbs one rung per voidbirth', () => {
   core.UPGRADES.forEach(u => {
     const base = core.tierIndexOf(u.tier);
     for (let vb = 0; vb <= 5; vb++) {
-      const want = core.TIERS[Math.min(core.MAX_TIER_INDEX, base + vb)].id;
+      if (u.tier === 'SECRET') {
+        assert.equal(core.effectiveTier(u, vb), 'SECRET', `${u.id} must never climb`);
+        continue;
+      }
+      const want = core.LADDER[Math.min(core.MAX_TIER_INDEX, base + vb)].id;
       assert.equal(core.effectiveTier(u, vb), want, `${u.id} at voidbirth ${vb}`);
     }
   });
@@ -1610,7 +1981,7 @@ test('rollSlot respects the exclude list', () => {
 
 test('an exhausted tier promotes upward rather than coming up empty', () => {
   const owned = exhaust(['COMMON']);
-  const u = core.rollSlot(1, 0, owned, scripted([0, 0]), []);
+  const u = core.rollSlot(1, 0, owned, ladder([0, 0]), []);
   assert.notEqual(u, null);
   assert.equal(u.tier, 'UNCOMMON',
     'a COMMON roll with every COMMON maxed must show better goods, not filler');
@@ -1618,13 +1989,13 @@ test('an exhausted tier promotes upward rather than coming up empty', () => {
 
 test('promotion walks up one tier at a time', () => {
   const owned = exhaust(['COMMON', 'UNCOMMON', 'RARE']);
-  const u = core.rollSlot(1, 0, owned, scripted([0, 0]), []);
+  const u = core.rollSlot(1, 0, owned, ladder([0, 0]), []);
   assert.equal(u.tier, 'EPIC');
 });
 
 test('promotion stops below the three undriftable top positions', () => {
   const owned = exhaust(['COMMON', 'UNCOMMON', 'RARE', 'EPIC']);
-  const u = core.rollSlot(1, 0, owned, scripted([0, 0]), []);
+  const u = core.rollSlot(1, 0, owned, ladder([0, 0]), []);
   assert.equal(u.tier, 'LEGENDARY', 'LEGENDARY is the highest promotion can reach at voidbirth 0');
 });
 
@@ -1637,14 +2008,14 @@ test('promotion must NOT reach into MYTHIC, APEX or OVERCLOCKED from a low roll'
   assert.ok(core.eligible('APEX', owned, 0).length > 0);
   const rnd = makeRnd(8080);
   for (let i = 0; i < 400; i++) {
-    const u = core.rollSlot(1, 0, owned, scripted([0, rnd()]), []);
+    const u = core.rollSlot(1, 0, owned, ladder([0, rnd()]), []);
     assert.equal(u, null, `promotion leaked into ${u && u.tier}`);
   }
 });
 
 test('a roll that lands directly on MYTHIC is still honoured', () => {
   // 0.994 * 100 = 99.4, which falls inside the MYTHIC band at voidbirth 0.
-  const u = core.rollSlot(1, 0, [], scripted([0.994, 0]), []);
+  const u = core.rollSlot(1, 0, [], ladder([0.994, 0]), []);
   assert.equal(u.tier, 'MYTHIC', 'a direct roll into the top three is not blocked, only promotion is');
 });
 
@@ -1654,14 +2025,14 @@ test('promotion at voidbirth 3 stops three rungs below the top of the shifted ve
   const maxed = core.UPGRADES
     .filter(u => ['EPIC', 'LEGENDARY', 'MYTHIC', 'APEX'].indexOf(core.effectiveTier(u, 3)) !== -1)
     .map(u => ({ id: u.id, stacks: core.tierOf(core.effectiveTier(u, 3)).stackLimit }));
-  const u = core.rollSlot(1, 3, maxed, scripted([0, 0]), []);
+  const u = core.rollSlot(1, 3, maxed, ladder([0, 0]), []);
   assert.equal(u && core.effectiveTier(u, 3), 'OVERCLOCKED');
 });
 
 test('when nothing above is available the slot falls back downward', () => {
   // Roll straight into OVERCLOCKED with every OVERCLOCKED upgrade already owned.
   const owned = exhaust(['OVERCLOCKED']);
-  const u = core.rollSlot(1, 0, owned, scripted([0.999999, 0]), []);
+  const u = core.rollSlot(1, 0, owned, ladder([0.999999, 0]), []);
   assert.notEqual(u, null);
   assert.equal(u.tier, 'APEX', 'a top roll with nothing to give should step down, not vanish');
 });
@@ -1750,7 +2121,7 @@ test('rollShop distinguishes an absent slot count from an explicit zero', () => 
 // ---------------------------------------------------------------------------
 
 test('with no upgrades the stats are the bare baseline', () => {
-  const s = core.resolveStats(SHIP, [], 0);
+  const s = core.resolveStats(SHIP, [], 0, 1);
   assert.equal(s.damage, core.BASE_DAMAGE);
   assert.equal(s.fireRate, core.BASE_FIRE_RATE * SHIP.fireMul);
   assert.equal(s.speed, SHIP.speed);
@@ -1760,97 +2131,102 @@ test('with no upgrades the stats are the bare baseline', () => {
   assert.equal(s.scrapMul, 1);
   assert.equal(s.enemyBulletMul, 1);
   assert.equal(s.shopSlots, core.BASE_SHOP_SLOTS);
-  assert.equal(s.strips, 1);
+  assert.equal(s.scrapLoss, core.HIT_SCRAP_LOSS);
   assert.equal(s.critMul, 2);
+  assert.equal(s.bulletSize, 1);
 });
 
 test('with no upgrades every counter is zero and every flag is false', () => {
-  const s = core.resolveStats(SHIP, [], 0);
+  const s = core.resolveStats(SHIP, [], 0, 1);
   ['shieldCharges', 'extraShots', 'extraLives', 'scrapPerLevel', 'scrapPerSecond',
     'critChance', 'pierce', 'homing', 'splash', 'burn', 'chill', 'ricochet',
     'execute', 'verdict', 'shieldRegen', 'drones', 'chain', 'fortress',
     'singularityCount', 'chronostall', 'priceDiscount', 'freeRerolls', 'aimCone']
     .forEach(k => assert.equal(s[k], 0, `${k} should start at 0`));
-  ['split', 'rear', 'sides', 'tracer', 'thorns', 'needle', 'noStrip',
-    'dronesCopyGun', 'phaseDrive', 'twinCore', 'apotheosis', 'singularity']
+  ['split', 'rear', 'sides', 'tracer', 'thorns', 'needle',
+    'dronesCopyGun', 'phaseDrive', 'twinCore', 'apotheosis', 'singularity',
+    'upsideDown', 'mirrored']
     .forEach(k => assert.equal(s[k], false, `${k} should start false`));
+  ['magnetRange', 'dropBonus', 'contactDamage', 'slowField', 'revengeShots',
+    'startScrap', 'luck', 'overkill']
+    .forEach(k => assert.equal(s[k], 0, `${k} should start at 0`));
 });
 
 test('the ship fireMul sets the baseline interval', () => {
-  assert.equal(core.resolveStats({ fireMul: 0.7, speed: 5, spreadMul: 1 }, [], 0).fireRate, 7);
-  assert.equal(core.resolveStats({ fireMul: 1.3, speed: 5, spreadMul: 1 }, [], 0).fireRate, 13);
+  assert.equal(core.resolveStats({ fireMul: 0.7, speed: 5, spreadMul: 1 }, [], 0, 1).fireRate, 7);
+  assert.equal(core.resolveStats({ fireMul: 1.3, speed: 5, spreadMul: 1 }, [], 0, 1).fireRate, 13);
 });
 
 test('fire rate is an interval, so a bonus makes it smaller', () => {
-  const base = core.resolveStats(SHIP, [], 0).fireRate;
-  const one = core.resolveStats(SHIP, [{ id: 'reload_coil', stacks: 1 }], 0).fireRate;
+  const base = core.resolveStats(SHIP, [], 0, 1).fireRate;
+  const one = core.resolveStats(SHIP, [{ id: 'reload_coil', stacks: 1 }], 0, 1).fireRate;
   assert.ok(one < base, 'a fire-rate bonus must shorten the interval');
   close(one, 10 / 1.05);
 });
 
 test('fire rate bonuses add before they divide, and scale with stacks', () => {
-  const s = core.resolveStats(SHIP, [{ id: 'reload_coil', stacks: 3 }], 0);
+  const s = core.resolveStats(SHIP, [{ id: 'reload_coil', stacks: 3 }], 0, 1);
   close(s.fireRate, 10 / 1.15);
   const s2 = core.resolveStats(SHIP,
-    [{ id: 'reload_coil', stacks: 2 }, { id: 'twin_feed', stacks: 1 }], 0);
+    [{ id: 'reload_coil', stacks: 2 }, { id: 'twin_feed', stacks: 1 }], 0, 1);
   close(s2.fireRate, 10 / 1.20);
 });
 
 test('fire rate is floored at MIN_FIRE_RATE so aiming never stops mattering', () => {
   assert.equal(core.MIN_FIRE_RATE, 6, 'the spec raised the floor from 4 frames to 6');
   const s = core.resolveStats(SHIP,
-    [{ id: 'reload_coil', stacks: 5 }, { id: 'twin_feed', stacks: 5 }], 0);
+    [{ id: 'reload_coil', stacks: 5 }, { id: 'twin_feed', stacks: 5 }], 0, 1);
   assert.equal(s.fireRate, core.MIN_FIRE_RATE);
   const absurd = core.resolveStats(SHIP,
     [{ id: 'reload_coil', stacks: 5 }, { id: 'twin_feed', stacks: 5 },
-      { id: 'reload_sing', stacks: 1 }], 5);
+      { id: 'reload_sing', stacks: 1 }], 5, 1);
   assert.equal(absurd.fireRate, core.MIN_FIRE_RATE, 'no build becomes a solid beam');
 });
 
 test('damage multipliers add across stacks and across upgrades', () => {
-  close(core.resolveStats(SHIP, [{ id: 'heavy_rounds', stacks: 1 }], 0).damage, 10.6);
-  close(core.resolveStats(SHIP, [{ id: 'heavy_rounds', stacks: 3 }], 0).damage, 11.8);
+  close(core.resolveStats(SHIP, [{ id: 'heavy_rounds', stacks: 1 }], 0, 1).damage, 10.6);
+  close(core.resolveStats(SHIP, [{ id: 'heavy_rounds', stacks: 3 }], 0, 1).damage, 11.8);
   close(core.resolveStats(SHIP,
-    [{ id: 'heavy_rounds', stacks: 2 }, { id: 'ap_rounds', stacks: 1 }], 0).damage, 12.4);
+    [{ id: 'heavy_rounds', stacks: 2 }, { id: 'ap_rounds', stacks: 1 }], 0, 1).damage, 12.4);
 });
 
 test('stat resolution scales with voidbirth depth', () => {
-  const at0 = core.resolveStats(SHIP, [{ id: 'heavy_rounds', stacks: 1 }], 0).damage;
-  const at1 = core.resolveStats(SHIP, [{ id: 'heavy_rounds', stacks: 1 }], 1).damage;
-  const at3 = core.resolveStats(SHIP, [{ id: 'heavy_rounds', stacks: 1 }], 3).damage;
+  const at0 = core.resolveStats(SHIP, [{ id: 'heavy_rounds', stacks: 1 }], 0, 1).damage;
+  const at1 = core.resolveStats(SHIP, [{ id: 'heavy_rounds', stacks: 1 }], 1, 1).damage;
+  const at3 = core.resolveStats(SHIP, [{ id: 'heavy_rounds', stacks: 1 }], 3, 1).damage;
   close(at1, 10 * 1.13);
   assert.ok(at1 > at0 && at3 > at1, 'the same upgrade must be worth more the deeper you are');
 });
 
 test('shield charges are capped at MAX_SHIELD_CHARGES', () => {
   assert.equal(core.MAX_SHIELD_CHARGES, 4, 'the spec caps shields at 4');
-  assert.equal(core.resolveStats(SHIP, [{ id: 'plating', stacks: 2 }], 0).shieldCharges, 2);
-  assert.equal(core.resolveStats(SHIP, [{ id: 'plating', stacks: 5 }], 0).shieldCharges, 4);
-  assert.equal(core.resolveStats(SHIP, [{ id: 'uc_phalanx', stacks: 1 }], 0).shieldCharges, 4);
+  assert.equal(core.resolveStats(SHIP, [{ id: 'plating', stacks: 2 }], 0, 1).shieldCharges, 2);
+  assert.equal(core.resolveStats(SHIP, [{ id: 'plating', stacks: 5 }], 0, 1).shieldCharges, 4);
+  assert.equal(core.resolveStats(SHIP, [{ id: 'uc_phalanx', stacks: 1 }], 0, 1).shieldCharges, 4);
   assert.equal(core.resolveStats(SHIP,
-    [{ id: 'plating', stacks: 5 }, { id: 'aegis_lattice', stacks: 1 }], 0).shieldCharges, 4);
+    [{ id: 'plating', stacks: 5 }, { id: 'aegis_lattice', stacks: 1 }], 0, 1).shieldCharges, 4);
 });
 
 test('REPAIR KIT cannot contribute more than the spec cap of +2 lives', () => {
   assert.equal(core.REPAIR_KIT_MAX, 2);
-  assert.equal(core.resolveStats(SHIP, [{ id: 'repair_kit', stacks: 1 }], 0).extraLives, 1);
-  assert.equal(core.resolveStats(SHIP, [{ id: 'repair_kit', stacks: 2 }], 0).extraLives, 2);
-  assert.equal(core.resolveStats(SHIP, [{ id: 'repair_kit', stacks: 5 }], 0).extraLives, 2);
+  assert.equal(core.resolveStats(SHIP, [{ id: 'repair_kit', stacks: 1 }], 0, 1).extraLives, 1);
+  assert.equal(core.resolveStats(SHIP, [{ id: 'repair_kit', stacks: 2 }], 0, 1).extraLives, 2);
+  assert.equal(core.resolveStats(SHIP, [{ id: 'repair_kit', stacks: 5 }], 0, 1).extraLives, 2);
 });
 
 test('IMMORTAL ENGINE stacks on top of the REPAIR KIT cap, not inside it', () => {
   const s = core.resolveStats(SHIP,
-    [{ id: 'repair_kit', stacks: 5 }, { id: 'immortal', stacks: 1 }], 0);
+    [{ id: 'repair_kit', stacks: 5 }, { id: 'immortal', stacks: 1 }], 0, 1);
   assert.equal(s.extraLives, 3);
   const u = core.resolveStats(SHIP,
-    [{ id: 'repair_kit', stacks: 5 }, { id: 'dc_undying', stacks: 1 }], 0);
+    [{ id: 'repair_kit', stacks: 5 }, { id: 'dc_undying', stacks: 1 }], 0, 1);
   assert.equal(u.extraLives, 5, 'UNDYING grants three on top of the repair-kit ceiling');
 });
 
 test('APOTHEOSIS doubles summed numeric stats', () => {
-  const plain = core.resolveStats(SHIP, [{ id: 'heavy_rounds', stacks: 1 }], 0);
+  const plain = core.resolveStats(SHIP, [{ id: 'heavy_rounds', stacks: 1 }], 0, 1);
   const doubled = core.resolveStats(SHIP,
-    [{ id: 'heavy_rounds', stacks: 1 }, { id: 'dc_apotheosis', stacks: 1 }], 0);
+    [{ id: 'heavy_rounds', stacks: 1 }, { id: 'dc_apotheosis', stacks: 1 }], 0, 1);
   close(plain.damage, 10.6);
   close(doubled.damage, 11.2, 'every stat you own counts twice');
   assert.equal(doubled.apotheosis, true);
@@ -1860,7 +2236,7 @@ test('APOTHEOSIS doubles summed numeric stats', () => {
 test('APOTHEOSIS does not double booleans into something meaningless', () => {
   const s = core.resolveStats(SHIP,
     [{ id: 'split_shot', stacks: 1 }, { id: 'rear_cannon', stacks: 1 },
-      { id: 'dc_apotheosis', stacks: 1 }], 0);
+      { id: 'dc_apotheosis', stacks: 1 }], 0, 1);
   assert.equal(s.split, true);
   assert.equal(s.rear, true);
   assert.equal(typeof s.split, 'boolean');
@@ -1869,10 +2245,10 @@ test('APOTHEOSIS does not double booleans into something meaningless', () => {
 
 test('APOTHEOSIS doubles shots and drones, which are counted not flagged', () => {
   const plain = core.resolveStats(SHIP,
-    [{ id: 'wide_mount', stacks: 2 }, { id: 'orbital_drone', stacks: 1 }], 0);
+    [{ id: 'wide_mount', stacks: 2 }, { id: 'orbital_drone', stacks: 1 }], 0, 1);
   const doubled = core.resolveStats(SHIP,
     [{ id: 'wide_mount', stacks: 2 }, { id: 'orbital_drone', stacks: 1 },
-      { id: 'dc_apotheosis', stacks: 1 }], 0);
+      { id: 'dc_apotheosis', stacks: 1 }], 0, 1);
   assert.equal(plain.extraShots, 2);
   assert.equal(doubled.extraShots, 4);
   assert.equal(plain.drones, 1);
@@ -1882,100 +2258,101 @@ test('APOTHEOSIS doubles shots and drones, which are counted not flagged', () =>
 test('critChance is clamped at 1 however hard the build pushes', () => {
   const s = core.resolveStats(SHIP,
     [{ id: 'targeting_fin', stacks: 5 }, { id: 'hardened_hull', stacks: 5 },
-      { id: 'deadeye', stacks: 1 }, { id: 'dc_apotheosis', stacks: 1 }], 0);
+      { id: 'deadeye', stacks: 1 }, { id: 'dc_apotheosis', stacks: 1 }], 0, 1);
   assert.equal(s.critChance, 1);
-  close(core.resolveStats(SHIP, [{ id: 'targeting_fin', stacks: 2 }], 0).critChance, 0.06);
+  close(core.resolveStats(SHIP, [{ id: 'targeting_fin', stacks: 2 }], 0, 1).critChance, 0.06);
 });
 
 test('priceDiscount is clamped at 60%', () => {
-  close(core.resolveStats(SHIP, [{ id: 'war_chest', stacks: 1 }], 0).priceDiscount, 0.12);
-  close(core.resolveStats(SHIP, [{ id: 'war_chest', stacks: 3 }], 0).priceDiscount, 0.36);
+  close(core.resolveStats(SHIP, [{ id: 'war_chest', stacks: 1 }], 0, 1).priceDiscount, 0.12);
+  close(core.resolveStats(SHIP, [{ id: 'war_chest', stacks: 3 }], 0, 1).priceDiscount, 0.36);
   assert.equal(core.resolveStats(SHIP,
-    [{ id: 'war_chest', stacks: 3 }, { id: 'dc_apotheosis', stacks: 1 }], 0).priceDiscount, 0.6);
+    [{ id: 'war_chest', stacks: 3 }, { id: 'dc_apotheosis', stacks: 1 }], 0, 1).priceDiscount, 0.6);
 });
 
 test('hitScale is floored at 0.4 so a hitbox never disappears', () => {
-  close(core.resolveStats(SHIP, [{ id: 'ablative_trim', stacks: 2 }], 0).hitScale, 0.92);
+  close(core.resolveStats(SHIP, [{ id: 'ablative_trim', stacks: 2 }], 0, 1).hitScale, 0.92);
   const tiny = core.resolveStats(SHIP,
     [{ id: 'ablative_trim', stacks: 5 }, { id: 'evasion', stacks: 5 },
-      { id: 'dc_apotheosis', stacks: 1 }], 0);
+      { id: 'dc_apotheosis', stacks: 1 }], 0, 1);
   assert.equal(tiny.hitScale, 0.4);
 });
 
 test('enemyBulletMul is floored at 0.25 so bullets never stop moving', () => {
-  close(core.resolveStats(SHIP, [{ id: 'time_dilation', stacks: 1 }], 0).enemyBulletMul, 0.7);
-  assert.equal(core.resolveStats(SHIP, [{ id: 'time_dilation', stacks: 1 }], 2).enemyBulletMul, 0.25);
+  close(core.resolveStats(SHIP, [{ id: 'time_dilation', stacks: 1 }], 0, 1).enemyBulletMul, 0.7);
+  assert.equal(core.resolveStats(SHIP, [{ id: 'time_dilation', stacks: 1 }], 2, 1).enemyBulletMul, 0.25);
 });
 
 test('the max() combinator reads the raw effect value, not a sum and not zero', () => {
-  const s = core.resolveStats(SHIP, [{ id: 'overcharge', stacks: 3 }], 0);
+  const s = core.resolveStats(SHIP, [{ id: 'overcharge', stacks: 3 }], 0, 1);
   assert.equal(s.overcharge, 5, 'max() must ignore stack count');
-  assert.equal(core.resolveStats(SHIP, [{ id: 'chain', stacks: 1 }], 0).chain, 2);
-  assert.equal(core.resolveStats(SHIP, [{ id: 'flak_burst', stacks: 1 }], 0).splash, 30);
-  assert.equal(core.resolveStats(SHIP, [{ id: 'incendiary', stacks: 1 }], 0).burn, 0.4);
-  assert.equal(core.resolveStats(SHIP, [{ id: 'cryo_rounds', stacks: 1 }], 0).chill, 0.35);
-  assert.equal(core.resolveStats(SHIP, [{ id: 'hunter_rounds', stacks: 1 }], 0).homing, 0.03);
+  assert.equal(core.resolveStats(SHIP, [{ id: 'chain', stacks: 1 }], 0, 1).chain, 2);
+  assert.equal(core.resolveStats(SHIP, [{ id: 'flak_burst', stacks: 1 }], 0, 1).splash, 30);
+  assert.equal(core.resolveStats(SHIP, [{ id: 'incendiary', stacks: 1 }], 0, 1).burn, 0.4);
+  assert.equal(core.resolveStats(SHIP, [{ id: 'cryo_rounds', stacks: 1 }], 0, 1).chill, 0.35);
+  assert.equal(core.resolveStats(SHIP, [{ id: 'hunter_rounds', stacks: 1 }], 0, 1).homing, 0.03);
 });
 
 test('max() picks the stronger of two competing upgrades', () => {
   const s = core.resolveStats(SHIP,
-    [{ id: 'executioner', stacks: 1 }, { id: 'dc_lastword', stacks: 1 }], 0);
+    [{ id: 'executioner', stacks: 1 }, { id: 'dc_lastword', stacks: 1 }], 0, 1);
   assert.equal(s.execute, 0.40, 'THE LAST WORD must not be dragged down by EXECUTIONER');
 });
 
 test('drones sum across upgrades but chain does not', () => {
   const s = core.resolveStats(SHIP,
-    [{ id: 'orbital_drone', stacks: 1 }, { id: 'mirror_drones', stacks: 1 }], 0);
+    [{ id: 'orbital_drone', stacks: 1 }, { id: 'mirror_drones', stacks: 1 }], 0, 1);
   assert.equal(s.drones, 3);
   assert.equal(s.dronesCopyGun, true);
 });
 
 test('singularityCount is zero without a singularity and 3 with EVENT HORIZON', () => {
-  assert.equal(core.resolveStats(SHIP, [], 0).singularityCount, 0);
-  assert.equal(core.resolveStats(SHIP, [{ id: 'singularity', stacks: 1 }], 0).singularityCount, 1);
-  const eh = core.resolveStats(SHIP, [{ id: 'uc_eventhorizon', stacks: 1 }], 0);
+  assert.equal(core.resolveStats(SHIP, [], 0, 1).singularityCount, 0);
+  assert.equal(core.resolveStats(SHIP, [{ id: 'singularity', stacks: 1 }], 0, 1).singularityCount, 1);
+  const eh = core.resolveStats(SHIP, [{ id: 'uc_eventhorizon', stacks: 1 }], 0, 1);
   assert.equal(eh.singularityCount, 3);
   assert.equal(eh.singularity, true);
 });
 
 test('the shop-slot and reroll upgrades feed straight into the stats', () => {
-  assert.equal(core.resolveStats(SHIP, [{ id: 'fourth_slot', stacks: 1 }], 0).shopSlots, 4);
-  assert.equal(core.resolveStats(SHIP, [{ id: 'free_reroll', stacks: 1 }], 0).freeRerolls, 1);
+  assert.equal(core.resolveStats(SHIP, [{ id: 'fourth_slot', stacks: 1 }], 0, 1).shopSlots, 4);
+  assert.equal(core.resolveStats(SHIP, [{ id: 'free_reroll', stacks: 1 }], 0, 1).freeRerolls, 1);
 });
 
-test('GREED ENGINE doubles scrap and doubles the strip penalty, as its card says', () => {
-  const s = core.resolveStats(SHIP, [{ id: 'greed', stacks: 1 }], 0);
+test('GREED ENGINE doubles scrap and deepens the scrap penalty, as its card says', () => {
+  const s = core.resolveStats(SHIP, [{ id: 'greed', stacks: 1 }], 0, 1);
   assert.equal(s.scrapMul, 2);
-  assert.equal(s.strips, 2);
+  assert.equal(s.scrapLoss, core.GREED_SCRAP_LOSS);
 });
 
 test('every boolean flag in the catalogue reaches the stats when owned', () => {
   const flags = {
     split_shot: 'split', rear_cannon: 'rear', side_pods: 'sides', tracer_rounds: 'tracer',
-    thorns: 'thorns', oc_needle: 'needle', hc_absolution: 'noStrip',
+    thorns: 'thorns', oc_needle: 'needle',
+    s_upside_down: 'upsideDown', s_mirror: 'mirrored',
     twin_core: 'twinCore', phase_drive: 'phaseDrive', singularity: 'singularity'
   };
   Object.keys(flags).forEach(id => {
-    const s = core.resolveStats(SHIP, [{ id, stacks: 1 }], 0);
+    const s = core.resolveStats(SHIP, [{ id, stacks: 1 }], 0, 1);
     assert.equal(s[flags[id]], true, `${id} did not set ${flags[id]}`);
   });
 });
 
 test('an unknown upgrade in the owned list is ignored rather than crashing', () => {
   const s = core.resolveStats(SHIP,
-    [{ id: 'ghost_upgrade', stacks: 3 }, { id: 'heavy_rounds', stacks: 1 }], 0);
+    [{ id: 'ghost_upgrade', stacks: 3 }, { id: 'heavy_rounds', stacks: 1 }], 0, 1);
   close(s.damage, 10.6);
 });
 
 test('scrap multipliers accumulate across both scrap upgrades', () => {
   const s = core.resolveStats(SHIP,
-    [{ id: 'scrap_magnet', stacks: 2 }, { id: 'salvage_rig', stacks: 1 }], 0);
+    [{ id: 'scrap_magnet', stacks: 2 }, { id: 'salvage_rig', stacks: 1 }], 0, 1);
   close(s.scrapMul, 1 + 0.16 + 0.16);
 });
 
 test('PHASE DRIVE is a self-contained flag with its own recharge period', () => {
   assert.ok(core.PHASE_DRIVE_FRAMES > 0);
-  const on = core.resolveStats(SHIP, [{ id: 'phase_drive', stacks: 1 }], 0);
+  const on = core.resolveStats(SHIP, [{ id: 'phase_drive', stacks: 1 }], 0, 1);
   assert.equal(on.phaseDrive, true);
   assert.equal('phaseBoost' in on, false, 'the old boost-gated key must be gone, not merely unused');
   assert.equal(core.byId('phase_drive').effect.phaseBoost, undefined);
@@ -1985,134 +2362,49 @@ test('PHASE DRIVE is a self-contained flag with its own recharge period', () => 
 test('resolveStats does not mutate the owned list it is given', () => {
   const owned = [Object.freeze({ id: 'heavy_rounds', stacks: 2 })];
   Object.freeze(owned);
-  assert.doesNotThrow(() => core.resolveStats(SHIP, owned, 3));
+  assert.doesNotThrow(() => core.resolveStats(SHIP, owned, 3, 1));
   assert.equal(owned[0].stacks, 2);
 });
 
 // ---------------------------------------------------------------------------
-// 11. stripCheapest / stripN
+// 11. The cost of a hit
 // ---------------------------------------------------------------------------
+// A hit used to strip an upgrade off the build. It now takes half the
+// treasury instead. stripCheapest/stripN were deleted with the rule; what
+// depended on them was hitPlayer, stats.strips, stats.noStrip, two card
+// texts, and this section.
 
-test('a hit removes the lowest-tier upgrade first', () => {
-  const { owned, removed } = core.stripCheapest([
-    { id: 'orbital_drone', stacks: 1 },   // LEGENDARY
-    { id: 'piercing', stacks: 1 },        // RARE
-    { id: 'reload_coil', stacks: 1 }      // COMMON
-  ]);
-  assert.equal(removed.id, 'reload_coil');
-  assert.equal(removed.tier, 'COMMON');
-  assert.equal(owned.length, 2);
-  assert.equal(owned.some(o => o.id === 'reload_coil'), false);
+test('a hit costs half the treasury by default', () => {
+  assert.equal(core.HIT_SCRAP_LOSS, 0.5);
+  assert.equal(core.scrapAfterHit(1000), 500);
+  assert.equal(core.scrapAfterHit(999), 499, 'rounds down, never up');
 });
 
-test('cheap upgrades act as armour around an expensive build', () => {
-  let owned = [{ id: 'orbital_drone', stacks: 1 }, { id: 'reload_coil', stacks: 3 }];
-  for (let i = 0; i < 3; i++) owned = core.stripCheapest(owned).owned;
-  assert.deepEqual(owned, [{ id: 'orbital_drone', stacks: 1 }],
-    'three stacks of a common are three hits the drone does not take');
+test('GREED ENGINE deepens the loss rather than costing upgrades', () => {
+  assert.equal(core.GREED_SCRAP_LOSS, 0.75);
+  assert.equal(core.scrapAfterHit(1000, core.GREED_SCRAP_LOSS), 250);
 });
 
-test('a tie on tier goes to the most recently acquired', () => {
-  const { removed } = core.stripCheapest([
-    { id: 'reload_coil', stacks: 1 },
-    { id: 'thrusters', stacks: 1 },
-    { id: 'plating', stacks: 1 }
-  ]);
-  assert.equal(removed.id, 'plating', 'the newest of the equal-tier upgrades goes first');
+test('a hit can never take more than there is, or leave a negative', () => {
+  assert.equal(core.scrapAfterHit(0), 0);
+  assert.equal(core.scrapAfterHit(-50), 0);
+  assert.equal(core.scrapAfterHit(100, 1), 0);
+  assert.equal(core.scrapAfterHit(100, 5), 0, 'a fraction above 1 clamps');
+  assert.equal(core.scrapAfterHit(100, -1), 100, 'a negative fraction clamps');
 });
 
-test('a tie on tier still prefers the later index when the earlier one has more stacks', () => {
-  const { removed } = core.stripCheapest([
-    { id: 'reload_coil', stacks: 5 },
-    { id: 'heavy_rounds', stacks: 1 }
-  ]);
-  assert.equal(removed.id, 'heavy_rounds');
+test('ABSOLUTION zeroes the loss entirely', () => {
+  const owned = [{ id: 'hc_absolution', stacks: 1 }];
+  assert.equal(core.resolveStats(SHIP, owned, 0, 1, 1).scrapLoss, 0);
 });
 
-test('a stack is decremented rather than the whole entry removed', () => {
-  const { owned, removed } = core.stripCheapest([{ id: 'reload_coil', stacks: 3 }]);
-  assert.equal(removed.id, 'reload_coil');
-  assert.deepEqual(owned, [{ id: 'reload_coil', stacks: 2 }]);
+test('GREED ENGINE resolves to the deeper loss', () => {
+  const owned = [{ id: 'greed', stacks: 1 }];
+  assert.equal(core.resolveStats(SHIP, owned, 0, 1, 1).scrapLoss, core.GREED_SCRAP_LOSS);
 });
 
-test('an entry disappears only when its last stack goes', () => {
-  const { owned } = core.stripCheapest([{ id: 'reload_coil', stacks: 1 }]);
-  assert.deepEqual(owned, []);
-});
-
-test('stripCheapest never mutates the array it was given', () => {
-  const owned = [{ id: 'reload_coil', stacks: 3 }, { id: 'piercing', stacks: 1 }];
-  const snapshot = JSON.parse(JSON.stringify(owned));
-  const result = core.stripCheapest(owned);
-  assert.deepEqual(owned, snapshot, 'the input list was rewritten in place');
-  assert.notEqual(result.owned, owned);
-});
-
-test('stripCheapest never mutates the objects inside the array', () => {
-  const owned = Object.freeze([
-    Object.freeze({ id: 'reload_coil', stacks: 3 }),
-    Object.freeze({ id: 'piercing', stacks: 1 })
-  ]);
-  assert.doesNotThrow(() => core.stripCheapest(owned));
-  assert.equal(owned[0].stacks, 3);
-});
-
-test('stripping an empty build is safe', () => {
-  const { owned, removed } = core.stripCheapest([]);
-  assert.deepEqual(owned, []);
-  assert.equal(removed, null);
-});
-
-test('a build made only of unknown ids strips nothing rather than crashing', () => {
-  const { owned, removed } = core.stripCheapest([{ id: 'ghost', stacks: 2 }]);
-  assert.equal(removed, null);
-  assert.equal(owned.length, 1);
-});
-
-test('once the stackables are gone the lowest-tier unique goes next', () => {
-  let owned = [{ id: 'orbital_drone', stacks: 1 }, { id: 'piercing', stacks: 1 }];
-  const first = core.stripCheapest(owned);
-  assert.equal(first.removed.id, 'piercing', 'RARE goes before LEGENDARY');
-  const second = core.stripCheapest(first.owned);
-  assert.equal(second.removed.id, 'orbital_drone');
-  assert.deepEqual(second.owned, []);
-});
-
-test('stripN removes exactly n stacks', () => {
-  const owned = [{ id: 'reload_coil', stacks: 3 }, { id: 'piercing', stacks: 1 }];
-  const two = core.stripN(owned, 2);
-  assert.deepEqual(two.owned, [{ id: 'reload_coil', stacks: 1 }, { id: 'piercing', stacks: 1 }]);
-  const three = core.stripN(owned, 3);
-  assert.deepEqual(three.owned, [{ id: 'piercing', stacks: 1 }]);
-});
-
-test('stripN reports the last thing it removed', () => {
-  const { removed } = core.stripN(
-    [{ id: 'reload_coil', stacks: 1 }, { id: 'piercing', stacks: 1 }], 2);
-  assert.equal(removed.id, 'piercing');
-});
-
-test('stripN handles an empty list and never returns undefined', () => {
-  const { owned, removed } = core.stripN([], 2);
-  assert.deepEqual(owned, []);
-  assert.equal(removed, null);
-});
-
-test('stripN cannot remove more than the build has', () => {
-  const { owned } = core.stripN([{ id: 'reload_coil', stacks: 1 }], 9);
-  assert.deepEqual(owned, []);
-});
-
-test('stripN with n below 1 still strips once', () => {
-  assert.deepEqual(core.stripN([{ id: 'reload_coil', stacks: 2 }], 0).owned,
-    [{ id: 'reload_coil', stacks: 1 }]);
-});
-
-test('stripN never mutates the array it was given', () => {
-  const owned = [{ id: 'reload_coil', stacks: 3 }];
-  const snapshot = JSON.parse(JSON.stringify(owned));
-  core.stripN(owned, 2);
-  assert.deepEqual(owned, snapshot);
+test('a bare build takes the ordinary loss', () => {
+  assert.equal(core.resolveStats(SHIP, [], 0, 1, 1).scrapLoss, core.HIT_SCRAP_LOSS);
 });
 
 // ---------------------------------------------------------------------------
@@ -2228,12 +2520,34 @@ test('TWIN CORE copies preserve the angles of the originals', () => {
 // ---------------------------------------------------------------------------
 
 test('creditsForScore floors at the divisor', () => {
-  assert.equal(core.CREDIT_DIVISOR, 100);
+  assert.equal(core.CREDIT_DIVISOR, 300);
   assert.equal(core.creditsForScore(0), 0);
-  assert.equal(core.creditsForScore(99), 0, 'a score below the divisor earns nothing');
-  assert.equal(core.creditsForScore(100), 1);
-  assert.equal(core.creditsForScore(199), 1);
-  assert.equal(core.creditsForScore(12400), 124);
+  assert.equal(core.creditsForScore(299), 0, 'a score below the divisor earns nothing');
+  assert.equal(core.creditsForScore(300), 1);
+  assert.equal(core.creditsForScore(599), 1);
+  assert.equal(core.creditsForScore(12400), 41);
+  assert.equal(core.creditsForScore(-500), 0, 'a negative score never pays');
+});
+
+// Credits are the slowest tap in the game, and deliberately compressive: the
+// hangar is meant to take many runs to fill, not one very good one.
+test('credits compress hard above the knee', () => {
+  assert.equal(core.CREDIT_KNEE, 50000);
+  const atKnee = core.creditsForScore(core.CREDIT_KNEE);
+  assert.equal(atKnee, Math.floor(core.CREDIT_KNEE / core.CREDIT_DIVISOR),
+    'the curve is continuous at the knee');
+  // Twenty times the score must not be twenty times the payout.
+  const twenty = core.creditsForScore(core.CREDIT_KNEE * 20);
+  assert.ok(twenty < atKnee * 8, `a 20x score paid ${twenty / atKnee}x the credits`);
+});
+
+test('creditsForScore never decreases as the score rises', () => {
+  let prev = -1;
+  for (let sc = 0; sc < 2000000; sc += 977) {
+    const c = core.creditsForScore(sc);
+    assert.ok(c >= prev, `payout dropped at score ${sc}`);
+    prev = c;
+  }
 });
 
 test('creditsForScore always returns a whole number', () => {
@@ -2250,10 +2564,23 @@ test('scrapForKill scales with the level you are on', () => {
   assert.ok(core.scrapForKill(100, 1, 2500) > core.scrapForKill(100, 1, 500));
 });
 
-test('scrapForKill follows the level^0.55 depth curve', () => {
+test('scrapForKill follows the tightened depth curve', () => {
+  assert.equal(core.SCRAP_DEPTH_EXPONENT, 0.50);
+  assert.equal(core.SCRAP_RATE, 0.8);
   [1, 10, 100, 500, 2500].forEach(level => {
     assert.equal(core.scrapForKill(100, 1, level),
-      Math.max(1, Math.round(100 * Math.pow(level, 0.55))), `level ${level}`);
+      Math.max(1, Math.round(100 * Math.pow(level, 0.50) * 0.8)), `level ${level}`);
+  });
+});
+
+// "Harder, but only by a bit" — the brief. Roughly three-quarters of the old
+// rate, not a tenth of it.
+test('income is tightened by a notch, not strangled', () => {
+  [10, 100, 1000].forEach(level => {
+    const now = core.scrapForKill(100, 1, level);
+    const before = Math.round(100 * Math.pow(level, 0.55));
+    assert.ok(now < before, `level ${level} did not actually get tighter`);
+    assert.ok(now > before * 0.45, `level ${level} fell to ${now / before} of the old rate`);
   });
 });
 
@@ -2334,7 +2661,9 @@ test('a deeper voidbirth costs more, because the ladder shifted up', () => {
 test('the arc rule takes effect at level 15 with a ±0.70 rad cone', () => {
   assert.equal(core.ARC_FROM_LEVEL, 15);
   assert.equal(core.ARC_HALF_ANGLE, 0.70);
-  assert.deepEqual(core.ARC_KINDS, ['grunt', 'elite', 'lancer']);
+  // Keyed on BEHAVIOUR now, not on three hardcoded hull names — the roster
+  // holds ninety-five ships and naming them individually would not scale.
+  assert.deepEqual(core.ARC_KINDS, ['drifter', 'lancer']);
 });
 
 test('below ARC_FROM_LEVEL anything may fire in any direction', () => {
@@ -2370,13 +2699,13 @@ test('only the listed kinds are restricted', () => {
 });
 
 test('the arc boundary is inclusive on the positive side', () => {
-  assert.equal(core.canFireAt('grunt', 15, core.ARC_HALF_ANGLE), true);
-  assert.equal(core.canFireAt('grunt', 15, core.ARC_HALF_ANGLE + 1e-6), false);
+  assert.equal(core.canFireAt('drifter', 15, core.ARC_HALF_ANGLE), true);
+  assert.equal(core.canFireAt('drifter', 15, core.ARC_HALF_ANGLE + 1e-6), false);
 });
 
 test('the arc boundary is inclusive on the negative side', () => {
-  assert.equal(core.canFireAt('grunt', 15, -core.ARC_HALF_ANGLE), true);
-  assert.equal(core.canFireAt('grunt', 15, -core.ARC_HALF_ANGLE - 1e-6), false);
+  assert.equal(core.canFireAt('drifter', 15, -core.ARC_HALF_ANGLE), true);
+  assert.equal(core.canFireAt('drifter', 15, -core.ARC_HALF_ANGLE - 1e-6), false);
 });
 
 test('the arc is symmetric about straight down', () => {
@@ -2387,8 +2716,8 @@ test('the arc is symmetric about straight down', () => {
 });
 
 test('the level below the threshold is unrestricted and the threshold itself is not', () => {
-  assert.equal(core.canFireAt('grunt', core.ARC_FROM_LEVEL - 1, 3), true);
-  assert.equal(core.canFireAt('grunt', core.ARC_FROM_LEVEL, 3), false);
+  assert.equal(core.canFireAt('drifter', core.ARC_FROM_LEVEL - 1, 3), true);
+  assert.equal(core.canFireAt('drifter', core.ARC_FROM_LEVEL, 3), false);
 });
 
 // ---------------------------------------------------------------------------

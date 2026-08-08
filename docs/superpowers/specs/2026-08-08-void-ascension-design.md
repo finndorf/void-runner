@@ -585,3 +585,112 @@ lives between the `ROGUELIKE CORE (PURE)` sentinels and is tested by
 
 Target: **150+ tests**, up from 49. Anything requiring a canvas is verified by
 driving the real game and capturing screenshots, boss by boss.
+
+---
+
+# ADDENDUM — VOID ASCENSION II (2026-08-08, second pass)
+
+A second request arrived after the first shipped. Where it contradicts anything
+above, **this addendum wins** and the section above is history.
+
+## 0. The two numbers that changed everything
+
+> *"make warr have 1B, and the first boss have 1k."*
+
+Boss health is now `hp = 1000 × (level/10)^2.5`, fitted to exactly those two
+fixed points. It lands on 1,000 at level 10 and 988,211,769 at level 2,500,
+rounded to 1,000,000,000.
+
+Those two numbers cannot both be true under the old economy — a bare shot did a
+flat 10 damage forever, so a billion-HP boss is a five-hour fight. So the floor
+of the player's damage now rides the **same exponent as enemy health**:
+
+```
+RLCore.baseDamageAt(level) = 10 × level^0.95
+RLCore.enemyHp(kind, level) = base × level^0.95
+```
+
+Your build is a **multiple of the baseline**, not a footrace against it. Two bare
+shots kill a grunt at level 1 and at level 2,500 — a test asserts it at both
+ends. The Mothership bench is 1,891 frames, which is what it was at 10,000,000
+HP, so the fight is the same length and a hundred times the number.
+
+**Nothing is deleted in one frame.** `capDamage` caps a boss hit at 1/14th of its
+max HP and an ordinary enemy hit at half. Anything at or under 16 HP — the really
+weak early ones — can still pop in one shot.
+
+## 1. The roster: ninety-five ships in ten bands
+
+Ten bands of ten levels. Each band is a **wholly new set**, and each has one more
+member than the band below it: 5, 6, 7 … 14. Past level 100 the bands cycle
+through the top six; the ships repeat, their health does not.
+
+One renderer, eight independent shape axes — nose, body, wing, gun pods, engines,
+fins, cockpit, armament. `tools/genenemies.mjs` **refuses to emit two identical
+hulls** and a test asserts all 95 silhouettes are distinct, because a roster of
+95 "different" enemies that is really 68 shapes plus recolours is the exact thing
+this expansion exists to prevent.
+
+Six new behaviours join the nine that existed: `orbiter` (circles you),
+`sniper` (paints a line, then fires down it), `splitter` (dies into two),
+`shielder` (plates everything nearby), `bomber` (timed area denial), `blinker`
+(teleports).
+
+## 2. What a hit costs now
+
+It used to strip an upgrade. That punished the thing you spent the run building,
+and silently. **A hit now takes half your scrap.** GREED ENGINE deepens it to
+three-quarters; ABSOLUTION zeroes it. `stripCheapest`/`stripN` were deleted —
+what depended on them: `hitPlayer`, `stats.strips`, `stats.noStrip`, two card
+texts, and one test section. All updated.
+
+**Anything that gets past you costs a life.** Its partner rule is that most
+enemies no longer leave: orbiters, snipers, shielders, bombers, turrets and
+harbingers hold station, and drifters and weavers brake in the lower third and
+turn to fight. What crosses the line has genuinely run the gauntlet.
+
+## 3. Ascension, rewritten
+
+Not five fixed levels any more. The first one lands the **frame the level-50
+boss dies**, and after that **every boss is an ascension point**. You keep **5%**
+of your scrap and **return to level 1** — the same ladder, climbed with better
+cards.
+
+## 4. SECRET
+
+A twelfth tier that is deliberately **not on the ladder**. One in a million,
+rolled before and independent of depth, never drifted into, never promoted into,
+never climbing with voidbirth. Every card costs **one scrap** and does something
+to the whole screen — WRONG WAY UP flips the galaxy (and the controls, or the
+joke is just a broken game). LOTTERY's hull multiplies the odds sixty times and
+nothing else.
+
+## 5. Everything else
+
+- **320 upgrades** (the brief asked for 250), all eleven tiers plus SECRET.
+- **19 ships** on a linear ladder: free, then +1,500 a rung. BULWARK buffed off
+  "worse at everything but dying". ASCENDANT now genuinely requires a run that
+  reached Voidbirth V — it was purchasable the moment you could afford it, which
+  made its own blurb a lie.
+- **Ten skies and ten soundtrack themes**, one per band, so crossing level 11,
+  21, 31 changes where you are, what you fight, and what it sounds like. Two new
+  music voices: a sixteenth-note arp and a clap layer. OUTER DRIFT and THE
+  SILENCE stay sparse on purpose.
+- **Three volume buses** — music, ambience, attacks — plus rebindable keys and
+  auto-skip, on a settings panel bound to ESC.
+- **A bestiary**: 95 ships, 17 bosses, 320 cards. Unmet entries show their real
+  silhouette but not their name. OVERCLOCKED and above stay hidden until found.
+- **Meteors drop things**: eight classes, five payloads (scrap, shield, life,
+  overdrive, cold snap), with a magnet stat to pull them in.
+- **Boss order changed** so both damage-blocking fights — HALO WARDEN's ring and
+  SCRAPJAW's plates — sit past level 100. No boss name says "void". THE CHOIR is
+  now TRIAD: three hulls flying as one, because they are spaceships.
+
+## 6. Still open
+
+- Nullpoint's jam uptime and Hive Empress's brood clearability still need real
+  human play. Benches prove they are killable, not that they are fun.
+- The band-4/5 hit counts are fitted, not played. The brief said "like 50 hits
+  or so" at level 50; the heaviest band-5 hull is ~65 bare shots, and a real
+  build brings that to 15–20. That is a number to check with a controller in
+  hand, not a spreadsheet.

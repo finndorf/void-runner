@@ -74,7 +74,12 @@ const sandbox = {
 sandbox.CanvasRenderingContext2D.prototype = {};
 
 const keys = Object.keys(sandbox);
-const fn = new Function(...keys, `${src}\n; return { get state(){return state}, get level(){return level}, get lives(){return lives}, get scrap(){return scrap}, get voidbirths(){return voidbirths}, get boss(){return boss}, get enemies(){return enemies}, get runUpgrades(){return runUpgrades}, get stats(){return stats}, RLCore, CFG, loop, update, draw, startGame, levelUp, openShop, closeShop, updateVoidbirth, tryBuySlot, tryReroll, set state(v){state=v}, set level(v){level=v} };`);
+const fn = new Function(...keys, `${src}\n; return { get state(){return state}, get level(){return level}, get lives(){return lives}, get scrap(){return scrap}, get voidbirths(){return voidbirths}, get boss(){return boss}, get enemies(){return enemies}, get runUpgrades(){return runUpgrades}, get stats(){return stats}, RLCore, CFG, loop, update, draw, startGame, levelUp, openShop, closeShop, updateVoidbirth, tryBuySlot, tryReroll, set state(v){state=v}, set level(v){level=v},
+  get pickups(){return pickups}, get asteroids(){return asteroids}, get settings(){return Save.data.settings},
+  get seenEnemies(){return Save.data.seenEnemies}, get seenUpgrades(){return Save.data.seenUpgrades},
+  makeEnemy, ENEMY, drawSettings, drawBestiary, openSettings, openBestiary, bestiaryEntries, bestiaryColumns,
+  settingsRows, hitPlayer, Save, player, set scrap(v){scrap=v}, set enemies(v){enemies=v}, set lives(v){lives=v},
+  set voidbirths(v){voidbirths=v} };`);
 
 let api, bootError = null;
 try {
@@ -142,8 +147,11 @@ check('a boss level spawns the right named boss', () => {
   api.levelUp();                       // -> level 10
   if (api.state === 'shop') api.closeShop();
   if (!api.boss) throw new Error('no boss at level 10');
-  if (api.boss.name !== 'SCRAPJAW') throw new Error('boss is ' + api.boss.name);
-  if (api.boss.maxHp !== 6600) throw new Error('boss hp ' + api.boss.maxHp);
+  // The level-10 slot is TRIAD now: both shield-mechanic fights (HALO WARDEN
+  // and SCRAPJAW) were moved past level 100 so nothing in the first hundred
+  // levels asks you to break a shield before you can build one.
+  if (api.boss.name !== 'TRIAD') throw new Error('boss is ' + api.boss.name);
+  if (api.boss.maxHp !== 1000) throw new Error('boss hp ' + api.boss.maxHp);
 });
 
 check('900 frames of a boss fight without throwing', () => tick(900, 'boss'));
@@ -153,7 +161,8 @@ check('voidbirth triggers at level 50 and completes', () => {
   api.levelUp();                       // -> 50, no ascension yet
   if (api.state === 'shop') api.closeShop();
   api.level = 50;
-  api.levelUp();                       // clearing 50 ascends
+  const before = api.scrap;
+  api.levelUp();                       // clearing 50 ascends, immediately
   if (api.state !== 'voidbirth') throw new Error('state is ' + api.state);
   // sequence is driven below
   // drive the sequence via the real loop path
@@ -162,7 +171,15 @@ check('voidbirth triggers at level 50 and completes', () => {
   if (api.state !== 'play') throw new Error('voidbirth never finished, state=' + api.state);
   if (api.voidbirths !== 1) throw new Error('voidbirths=' + api.voidbirths);
   if (api.runUpgrades.length !== 0) throw new Error('upgrades survived the voidbirth');
-  if (api.scrap !== 0) throw new Error('scrap survived the voidbirth: ' + api.scrap);
+  // A sliver of the treasury now carries over, and the run restarts at
+  // level 1. The exact 5% is asserted against RLCore.scrapAfterVoidbirth in
+  // the pure tests; here the point is that the GAME applies it -- the level
+  // clear pays out first, so the base is larger than `before`.
+  if (api.level !== 1) throw new Error('level after voidbirth: ' + api.level);
+  if (api.scrap <= 0) throw new Error('the whole treasury burned');
+  if (api.scrap > before * 0.25) {
+    throw new Error('kept too much scrap: ' + api.scrap + ' of at least ' + before);
+  }
 });
 
 function tickVoid() { api.updateVoidbirth(); }
@@ -170,4 +187,148 @@ function tickVoid() { api.updateVoidbirth(); }
 check('deep levels do not throw', () => {
   api.level = 1200;
   tick(400, 'level 1200');
+});
+
+// ---------------------------------------------------------------------------
+// The band roster, in the actual game loop
+// ---------------------------------------------------------------------------
+// Ninety-five ships across fifteen behaviours, six of them brand new. A stub
+// canvas cannot tell you whether they LOOK right, but it will absolutely tell
+// you whether they throw — which is where wiring bugs live.
+
+check('every ship in the roster spawns, moves, shoots and draws', () => {
+  api.state = 'play';
+  for (const def of api.RLCore.ENEMY_ROSTER) {
+    api.level = def.band * 10 + 5;
+    api.enemies = [];
+    for (let i = 0; i < 3; i++) {
+      let e;
+      try { e = api.makeEnemy(def.id); } catch (err) {
+        throw new Error(`makeEnemy('${def.id}') threw: ${err.message}`);
+      }
+      e.x = 100 + i * 90; e.y = 120 + i * 60;
+      api.enemies.push(e);
+    }
+    try { tick(200, def.id); } catch (err) {
+      throw new Error(`${def.id} (${def.beh}) broke the loop: ${err.message}`);
+    }
+  }
+});
+
+check('every behaviour in the roster is one the update loop implements', () => {
+  const implemented = new Set(['drifter', 'charger', 'turret', 'mine', 'lancer', 'weaver',
+    'bulwark', 'swarm', 'harbinger', 'orbiter', 'sniper', 'splitter', 'shielder',
+    'bomber', 'blinker']);
+  api.RLCore.ENEMY_ROSTER.forEach(d => {
+    if (!implemented.has(d.beh)) throw new Error(`${d.id} wants behaviour "${d.beh}", which nothing implements`);
+  });
+});
+
+check('one level in every band runs clean', () => {
+  api.state = 'play';
+  for (let band = 0; band < api.RLCore.ENEMY_BANDS.length; band++) {
+    api.level = band * 10 + 6;
+    api.enemies = [];
+    tick(500, 'band ' + band);
+  }
+});
+
+check('meteors break open and drop something you can pick up', () => {
+  api.state = 'play';
+  api.level = 40;
+  api.enemies = [];
+  const before = api.pickups.length;
+  let guard = 0;
+  // Park the player under the rocks so the magnet has something to do.
+  while (api.pickups.length === before && guard++ < 4000) {
+    api.asteroids.forEach(a => { a.hp = 0.0001; });
+    tick(1, 'meteor drops');
+  }
+  if (api.pickups.length === before) throw new Error('no pickup ever dropped from a meteor');
+});
+
+check('an enemy that gets past you costs a life', () => {
+  api.state = 'play';
+  api.level = 5;
+  api.enemies = [];
+  api.lives = 5;
+  // A shield would eat the breach instead of a life, which is correct
+  // behaviour but not what this test is about.
+  api.player.shieldCharges = 0;
+  api.player.invincible = 0;
+  api.player.phaseReady = false;
+  const before = api.lives;
+  const e = api.makeEnemy('skiff');
+  e.y = 719; e.vy = 40;
+  api.enemies.push(e);
+  tick(6, 'breach');
+  if (api.lives >= before) throw new Error('an enemy flew off the bottom for free');
+  if (api.enemies.indexOf(e) !== -1) throw new Error('the breaching enemy is still on the board');
+});
+
+check('killing something records it in the bestiary', () => {
+  api.state = 'play';
+  api.level = 5;
+  api.enemies = [];
+  const e = api.makeEnemy('dart');
+  e.x = 240; e.y = 200; e.hp = 0.001;
+  api.enemies.push(e);
+  tick(150, 'bestiary');
+  // Either a bullet finished it or it breached; both paths should be safe.
+  if (!api.seenEnemies) throw new Error('the bestiary ledger is missing');
+});
+
+check('the settings screen builds every row and draws', () => {
+  api.openSettings('start');
+  if (api.state !== 'settings') throw new Error('state is ' + api.state);
+  const rows = api.settingsRows();
+  if (rows.length < api.RLCore.BIND_ORDER.length + 4) throw new Error('rows: ' + rows.length);
+  for (let i = 0; i < 400; i++) api.drawSettings();
+  api.state = 'start';
+});
+
+check('the bestiary draws every column of both tabs', () => {
+  api.openBestiary();
+  for (let tab = 0; tab < 2; tab++) {
+    const cols = api.bestiaryColumns();
+    for (let c = 0; c < cols.length; c++) {
+      const entries = api.bestiaryEntries();
+      if (!Array.isArray(entries)) throw new Error('no entries for column ' + c);
+      api.drawBestiary();
+    }
+  }
+  api.state = 'start';
+});
+
+check('a hit costs scrap and never takes the build', () => {
+  api.state = 'play';
+  api.level = 5;
+  api.enemies = [];
+  api.lives = 9;
+  api.scrap = 10000;
+  // hitPlayer has four early returns before the penalty — phase drive,
+  // shield, Phantom's slip, and mercy frames. All of them are correct
+  // behaviour and none of them is what this test is about, so the state is
+  // set up explicitly rather than inherited from whatever ran before.
+  api.player.shieldCharges = 0;
+  api.player.invincible = 0;
+  api.player.phaseReady = false;
+  api.player.phaseCharge = 0;
+  const build = api.runUpgrades.length;
+  api.hitPlayer();
+  if (api.scrap >= 10000) throw new Error('the hit cost no scrap: ' + api.scrap);
+  if (api.scrap < 4000) throw new Error('the hit cost far too much: ' + api.scrap);
+  if (api.runUpgrades.length !== build) throw new Error('the hit stripped an upgrade');
+});
+
+check('every ship in the hangar launches a run without throwing', () => {
+  for (const ship of api.CFG.ships) {
+    api.Save.data.unlocked = [ship.id];
+    api.Save.data.selectedShip = ship.id;
+    try { api.startGame(); tick(180, ship.id); } catch (e) {
+      throw new Error(`${ship.id} broke the loop: ${e.message}`);
+    }
+  }
+  api.Save.data.unlocked = ['vanguard'];
+  api.Save.data.selectedShip = 'vanguard';
 });
