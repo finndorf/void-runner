@@ -539,8 +539,21 @@ Six phases. Each one ends with the game playable and pushed.
 | **B** | Voidbirth: prestige at 50/100/200/350/500, lineages, odds shift, shop frequency decay, the three locked tiers — **DONE** | The tier ladder must exist before content can be spread across it. |
 | **C** | Enemies: ten kinds with real hulls, size/HP scaling, firing arcs — **DONE** (meteorite classes still to wire) | Bosses reuse enemy rendering and the arc system. |
 | **D** | Bosses: seventeen hand-built fights plus the ARMADA compositor — **DONE** | The largest phase by far. Built as a registry so each fight owns its state, attacks, hull and damage rules, with only the chrome shared. `tools/bosscheck.mjs` benches each one headlessly and fails it if it throws, skips a phase, or turns out to be unkillable. |
-| **E** | Ships: seven new hulls with individual draw functions and hooks | Independent of everything else; safe to do late. |
-| **F** | Audio: five-voice engine, six themes, per-boss motifs, SFX rebuild | Needs the bosses to exist so their motifs can be written against real fights. |
+| **E** | Ships: seven new hulls with individual draw functions and hooks — **DONE** | Eleven ships. `SHIP_ART` registry; `tools/shipcheck.mjs` draws each hull through a colour-blind recording canvas and fails any two whose geometry matches, so a recolour cannot pass. | Independent of everything else; safe to do late. |
+| **F** | Audio: five-voice engine, six themes, per-boss motifs, SFX rebuild | In progress. |
+
+### The dead-capability audit
+
+`tools/hookaudit.mjs` is the standing answer to this project's recurring bug —
+content that takes the player's scrap or credits and does nothing. It proves,
+mechanically, that every upgrade effect key is read by `resolveStats`, every
+stat `resolveStats` produces is consumed by the game, every ship hook is read,
+every boss in the table has a bespoke registry entry, and every ship has hull
+art. Run it after adding anything.
+
+It exists because a grep came back clean twice while dead content shipped: a
+2,100-scrap PHASE DRIVE that could never fire, and later 22 upgrade effect keys
+that nothing consumed.
 
 ### The rule carried forward from last time
 
