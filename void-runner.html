@@ -1081,6 +1081,12 @@ const Sound = {
         Sound.tone(420, 0.16, 'sawtooth', 0.13, 120);
         Sound.noise(0.09, 1800, 0.10, 400);
         break;
+      // A boss changing gear. Two hard stabs and a rising tail.
+      case 'bossPhase':
+        Sound.tone(220, 0.30, 'sawtooth', 0.20, 880);
+        Sound.tone(330, 0.34, 'square',   0.14, 1320, 0.07);
+        Sound.noise(0.24, 2400, 0.16, 300);
+        break;
       // The ascension. A rising stack of fifths under a long swell.
       case 'voidbirth':
         [110, 165, 220, 330, 440].forEach((f, i) =>
@@ -2160,77 +2166,23 @@ function drawEnemyHealth(e) {
 }
 
 function drawBoss(b) {
+  const def = bossDef(b);
   const dying = b.dying > 0;
   ctx.save();
   ctx.translate(b.x, b.y);
+  // The death flicker is applied here rather than per-boss so every hull
+  // dies the same readable way.
   if (dying && Math.floor(b.deathTick/3) % 2 === 0) ctx.globalAlpha = 0.55;
-
-  // Charging beam telegraph — a thin targeting line before the real thing.
-  if (b.laser && b.laser.charge > 0) {
-    ctx.save();
-    ctx.globalAlpha = 0.35 + 0.4*Math.sin(b.laser.charge*0.5);
-    ctx.strokeStyle = '#ff3355'; ctx.lineWidth = 2;
-    ctx.beginPath(); ctx.moveTo(0, BOSS_H/2); ctx.lineTo(0, H); ctx.stroke();
-    ctx.restore();
-  }
-
-  // Hull
-  ctx.beginPath();
-  ctx.moveTo(-BOSS_W/2, -6);
-  ctx.lineTo(-BOSS_W/2 + 18, -BOSS_H/2);
-  ctx.lineTo(BOSS_W/2 - 18, -BOSS_H/2);
-  ctx.lineTo(BOSS_W/2, -6);
-  ctx.lineTo(BOSS_W/2 - 26, BOSS_H/2);
-  ctx.lineTo(BOSS_W/2 - 40, BOSS_H/2 - 8);
-  ctx.lineTo(0, BOSS_H/2 + 10);
-  ctx.lineTo(-BOSS_W/2 + 40, BOSS_H/2 - 8);
-  ctx.lineTo(-BOSS_W/2 + 26, BOSS_H/2);
-  ctx.closePath();
-  const hg = ctx.createLinearGradient(0, -BOSS_H/2, 0, BOSS_H/2);
-  hg.addColorStop(0, '#4a5a72'); hg.addColorStop(0.5, '#22293a'); hg.addColorStop(1, '#0d1119');
-  ctx.fillStyle = hg; ctx.fill();
-  ctx.strokeStyle = b.phase === 3 ? '#ff4433' : b.phase === 2 ? '#ffaa33' : '#66aaff';
-  ctx.lineWidth = 2.5; ctx.stroke();
-  if (b.flash > 0) { ctx.fillStyle = `rgba(255,255,255,${Math.min(0.7, 0.10*b.flash)})`; ctx.fill(); }
-
-  // Armour ribs
-  ctx.strokeStyle = 'rgba(140,170,210,0.30)'; ctx.lineWidth = 1;
-  for (let i = -2; i <= 2; i++) {
-    ctx.beginPath(); ctx.moveTo(i*20, -BOSS_H/2 + 6); ctx.lineTo(i*20, BOSS_H/2 - 6); ctx.stroke();
-  }
-
-  // Three glowing cores, brighter as the fight escalates.
-  const coreCol = b.phase === 3 ? '#ff3311' : b.phase === 2 ? '#ffaa00' : '#33ccff';
-  [-32, 0, 32].forEach((cx, i) => {
-    const pulse = 0.6 + 0.4*Math.sin(frame*0.09 + i);
-    ctx.save();
-    ctx.globalCompositeOperation = 'lighter';
-    const cg = ctx.createRadialGradient(cx, 4, 0, cx, 4, 16);
-    cg.addColorStop(0, coreCol); cg.addColorStop(1, 'rgba(0,0,0,0)');
-    ctx.globalAlpha = pulse;
-    ctx.fillStyle = cg;
-    ctx.beginPath(); ctx.arc(cx, 4, 16, 0, Math.PI*2); ctx.fill();
-    ctx.restore();
-    ctx.beginPath(); ctx.arc(cx, 4, i === 1 ? 8 : 6, 0, Math.PI*2);
-    ctx.fillStyle = coreCol; ctx.fill();
-    ctx.strokeStyle = '#000'; ctx.lineWidth = 1; ctx.stroke();
-  });
-
+  ctx.save();
+  def.paint(b);
   ctx.restore();
-
-  // Firing beam, drawn in world space so it spans the screen.
-  if (b.laser && b.laser.fire > 0) {
-    const w = 13 + 4*Math.sin(frame*0.7);
+  ctx.restore();
+  // A second pass in world space, for anything that has to escape the hull:
+  // beams, tethers, arena grids, the pull of a devouring mothership.
+  if (def.paintWorld) {
     ctx.save();
-    ctx.globalCompositeOperation = 'lighter';
-    const lg = ctx.createLinearGradient(b.laser.x - w, 0, b.laser.x + w, 0);
-    lg.addColorStop(0, 'rgba(255,40,80,0)');
-    lg.addColorStop(0.5, 'rgba(255,220,240,0.95)');
-    lg.addColorStop(1, 'rgba(255,40,80,0)');
-    ctx.fillStyle = lg;
-    ctx.fillRect(b.laser.x - w, b.y, w*2, H - b.y);
-    ctx.fillStyle = 'rgba(255,255,255,0.85)';
-    ctx.fillRect(b.laser.x - 2, b.y, 4, H - b.y);
+    if (dying && Math.floor(b.deathTick/3) % 2 === 0) ctx.globalAlpha = 0.55;
+    def.paintWorld(b);
     ctx.restore();
   }
 }
@@ -2241,26 +2193,45 @@ function drawBossBar(b) {
   ctx.fillStyle = 'rgba(0,0,20,0.65)';
   ctx.fillRect(pad, y, barW, 10);
   const frac = Math.max(0, b.hp / b.maxHp);
-  const col = b.phase === 3 ? '#ff3322' : b.phase === 2 ? '#ffaa22' : '#33ccff';
+  const col = bossTint(b, '#33ccff', '#ffaa22', '#ff3322');
   ctx.fillStyle = col;
   ctx.fillRect(pad, y, barW*frac, 10);
-  // Phase boundaries at 66% and 33%.
+  // A tick per phase boundary, however many phases this boss has — the
+  // seven-phase Mothership and the two-phase Scrapjaw both read honestly.
   ctx.strokeStyle = 'rgba(0,0,0,0.6)'; ctx.lineWidth = 2;
-  [0.33, 0.66].forEach(f => {
+  const n = Math.max(1, b.maxPhases || 3);
+  for (let i = 1; i < n; i++) {
+    const f = i / n;
     ctx.beginPath(); ctx.moveTo(pad + barW*f, y); ctx.lineTo(pad + barW*f, y+10); ctx.stroke();
-  });
+  }
   ctx.strokeStyle = 'rgba(255,255,255,0.35)'; ctx.lineWidth = 1;
   ctx.strokeRect(pad, y, barW, 10);
+
+  // The boss's own name, and under it whatever it wants you to know right now
+  // (plates remaining, heads alive, bays open). Long names shrink to fit
+  // rather than running off the canvas.
   ctx.fillStyle = col;
-  ctx.font = 'bold 10px monospace'; ctx.textAlign = 'left';
-  ctx.fillText('DREADNOUGHT MK.' + b.tier, pad, y - 4);
+  ctx.textAlign = 'left';
+  ctx.font = 'bold 10px monospace';
+  const name = b.name || 'UNKNOWN CONTACT';
+  if (name.length > 34) ctx.font = 'bold 8px monospace';
+  ctx.fillText(name, pad, y - 4);
   ctx.textAlign = 'right';
-  ctx.fillText('PHASE ' + b.phase, W - pad, y - 4);
+  ctx.font = 'bold 10px monospace';
+  ctx.fillText('PHASE ' + b.phase + '/' + n, W - pad, y - 4);
+
+  const def = bossDef(b);
+  if (def.title) {
+    ctx.textAlign = 'center';
+    ctx.font = 'bold 9px monospace';
+    ctx.fillStyle = 'rgba(255,255,255,0.55)';
+    ctx.fillText(def.title(b), W/2, y + 22);
+  }
   ctx.restore();
 }
 
 function drawBossWarning() {
-  const t = bossWarning / 90;
+  const t = bossWarning / 110;
   ctx.save();
   // Red pulse around the screen edge.
   ctx.globalAlpha = 0.35 + 0.35*Math.sin(frame*0.35);
@@ -2281,10 +2252,14 @@ function drawBossWarning() {
   ctx.fillStyle = Math.floor(frame/6) % 2 ? '#ff5544' : '#ffdd88';
   ctx.font = 'bold 38px monospace'; ctx.textAlign = 'center';
   ctx.shadowColor = '#ff2200'; ctx.shadowBlur = 24;
-  ctx.fillText('WARNING', W/2, H/2 + 2);
-  ctx.font = 'bold 14px monospace';
+  ctx.fillText('WARNING', W/2, H/2 - 4);
+  // Name the thing. A boss you can name is a boss you can talk about
+  // afterwards, which is most of why the roster is hand-built at all.
+  const info = RLCore.bossFor(level);
+  const nm = info ? info.name : 'CAPITAL SHIP INBOUND';
   ctx.fillStyle = '#ffaa88'; ctx.shadowBlur = 0;
-  ctx.fillText('CAPITAL SHIP INBOUND', W/2, H/2 + 28);
+  ctx.font = 'bold ' + (nm.length > 30 ? 11 : nm.length > 18 ? 14 : 17) + 'px monospace';
+  ctx.fillText(nm, W/2, H/2 + 24);
   ctx.restore();
 }
 
@@ -2425,6 +2400,399 @@ function makeEnemy(kind) {
 
 // ---- BOSS ----
 
+// ===== BOSSES =====
+// One entry in BOSS per `key` in RLCore.BOSS_TABLE. Each is a self-contained
+// fight: its own state, its own attacks, its own hull, and one mechanic that
+// appears nowhere else. They deliberately share no attack code — only the
+// chrome (entrance, health bar, phase flash, death cascade) is common, and
+// that lives in updateBoss/drawBoss rather than in any boss.
+//
+// Contract. Every field is optional except think and paint:
+//   w, h            hitbox half-extents source (defaults BOSS_W x BOSS_H)
+//   init(b)         once at spawn; set up bespoke state on b
+//   onPhase(b, ph)  once whenever the phase changes
+//   think(b, ph)    every frame once in position; ph is 1..b.maxPhases
+//   damage(b, bl, dmg) -> number   how much of a hit actually lands.
+//                   Return 0 to block it. Default: all of it.
+//   move(b)         every frame; default drifts toward the player
+//   paint(b)        draw the hull. Already translated to the boss; +y is down.
+//   paintWorld(b)   optional second pass in world space (beams, tethers)
+//   title(b)        the label above the health bar
+//
+// Everything in the game is in scope: player, enemies, enemyBullets, W, H,
+// frame, level, stats, FX, Sound, hitPlayer(), spawnParticles(), makeEnemy().
+
+const BOSS = {};
+
+// ---- shared firing helpers -------------------------------------------------
+// These exist so a boss can say what it wants rather than restating the
+// velocity maths. TIME DILATION applies through every one of them.
+
+function bossSpeed(mul) { return difficulty().bulletSpeed * (mul === undefined ? 1 : mul) * stats.enemyBulletMul; }
+
+function bossShot(x, y, angle, speedMul, r, elite) {
+  if (enemyBullets.length >= CFG.caps.enemyBullets) return;
+  const s = bossSpeed(speedMul);
+  enemyBullets.push({
+    x, y, vx: Math.cos(angle) * s, vy: Math.sin(angle) * s,
+    r: r || 5, elite: elite !== false, dead: false
+  });
+}
+
+function bossRing(x, y, n, speedMul, offset, r) {
+  for (let i = 0; i < n; i++) bossShot(x, y, (offset || 0) + (i / n) * Math.PI * 2, speedMul, r);
+}
+
+function bossAimed(x, y, spreads, speedMul, r) {
+  const a = Math.atan2(player.y - y, player.x - x);
+  (spreads || [0]).forEach(o => bossShot(x, y, a + o, speedMul, r));
+}
+
+function bossMinion(kind, x, y) {
+  if (enemies.length >= CFG.caps.enemies) return null;
+  const m = makeEnemy(kind);
+  m.x = x; m.y = y;
+  enemies.push(m);
+  return m;
+}
+
+// Hull whiteout on a hit. Called by a boss's paint() right after it fills its
+// silhouette, so the flash follows the shape rather than a bounding box.
+function bossFlash(b) {
+  if (b.flash > 0) { ctx.fillStyle = `rgba(255,255,255,${Math.min(0.7, 0.10 * b.flash)})`; ctx.fill(); }
+}
+
+// A phase-tinted colour ramp, so every boss escalates visually without all of
+// them escalating the same way.
+function bossTint(b, cool, warm, hot) {
+  const t = (b.phase - 1) / Math.max(1, b.maxPhases - 1);
+  return t < 0.34 ? cool : t < 0.7 ? warm : hot;
+}
+
+function bossHalfW(b) { const d = BOSS[b.key]; return (d && d.w) ? d.w / 2 : BOSS_W / 2; }
+function bossHalfH(b) { const d = BOSS[b.key]; return (d && d.h) ? d.h / 2 : BOSS_H / 2; }
+
+// ---------------------------------------------------------------------------
+// The fallback. Used only if a boss key has no entry yet, so a partially
+// populated registry still produces a playable, honest fight rather than a
+// crash or an inert sitting duck.
+// ---------------------------------------------------------------------------
+BOSS.generic = {
+  think(b, ph) {
+    if (b.attackTimer >= 120 - ph * 8) {
+      b.attackTimer = 0;
+      if (ph % 2 === 1) bossRing(b.x, b.y, 10 + ph * 2, 0.85, frame * 0.01);
+      else bossAimed(b.x, b.y + 20, [-0.22, 0, 0.22], 1);
+      Sound.play('hit');
+    }
+  },
+  paint(b) {
+    ctx.beginPath();
+    ctx.moveTo(-BOSS_W/2, -6); ctx.lineTo(-BOSS_W/2 + 18, -BOSS_H/2);
+    ctx.lineTo(BOSS_W/2 - 18, -BOSS_H/2); ctx.lineTo(BOSS_W/2, -6);
+    ctx.lineTo(BOSS_W/2 - 26, BOSS_H/2); ctx.lineTo(0, BOSS_H/2 + 10);
+    ctx.lineTo(-BOSS_W/2 + 26, BOSS_H/2);
+    ctx.closePath();
+    const g = ctx.createLinearGradient(0, -BOSS_H/2, 0, BOSS_H/2);
+    g.addColorStop(0, '#4a5a72'); g.addColorStop(1, '#0d1119');
+    ctx.fillStyle = g; ctx.fill();
+    ctx.strokeStyle = bossTint(b, '#66aaff', '#ffaa33', '#ff4433');
+    ctx.lineWidth = 2.5; ctx.stroke();
+    bossFlash(b);
+    [-32, 0, 32].forEach((cx, i) => {
+      ctx.beginPath(); ctx.arc(cx, 4, i === 1 ? 8 : 6, 0, Math.PI*2);
+      ctx.fillStyle = bossTint(b, '#33ccff', '#ffaa00', '#ff3311'); ctx.fill();
+    });
+  }
+};
+
+// ---------------------------------------------------------------------------
+// L10 — SCRAPJAW
+// Mechanic: four bolt-on armour plates absorb ALL damage. Break them off to
+// expose the core. This is the game's first lesson in "find the weak point",
+// so it is deliberately unmissable: the plates are huge, they crack visibly,
+// and nothing you do to the hull registers until they are gone.
+// ---------------------------------------------------------------------------
+BOSS.scrapjaw = {
+  w: 130, h: 62,
+  init(b) {
+    b.plates = [-48, -16, 16, 48].map(x => ({ x, hp: b.maxHp * 0.11, max: b.maxHp * 0.11, gone: false }));
+    b.chomp = 0;
+  },
+  damage(b, bl, dmg) {
+    // A plate covers roughly a quarter of the hull. Whichever one the shot
+    // lands over eats it; only a gap lets damage through to the core.
+    const local = bl.x - b.x;
+    const plate = b.plates.find(p => !p.gone && Math.abs(local - p.x) < 17);
+    if (!plate) return dmg;
+    plate.hp -= dmg;
+    if (plate.hp <= 0) {
+      plate.gone = true;
+      spawnParticles(b.x + plate.x, b.y + 10, '#cc9955', 20);
+      FX.addShake(12);
+      Sound.play('shieldBreak');
+      addFlashText('PLATE OFF', b.x + plate.x, b.y, '#ffcc66');
+    }
+    return 0;
+  },
+  onPhase(b) { b.chomp = 26; },
+  think(b, ph) {
+    const open = b.plates.filter(p => p.gone).length;
+    // It gets angrier as it is stripped, which rewards breaking plates fast.
+    if (b.attackTimer >= 96 - open * 12) {
+      b.attackTimer = 0;
+      b.chomp = 18;
+      if (ph === 1) bossAimed(b.x, b.y + 24, [-0.28, -0.09, 0.09, 0.28], 0.95, 5);
+      else { bossRing(b.x, b.y, 9, 0.8, frame * 0.02, 5); bossAimed(b.x, b.y + 24, [0], 1.25, 6); }
+      Sound.play('hit');
+    }
+    // Spits scrap-hulks it has chewed up.
+    if (ph === 2 && b.attackTimer === 40 && frame % 3 === 0) bossMinion('swarmling', b.x, b.y + 30);
+    if (b.chomp > 0) b.chomp--;
+  },
+  paint(b) {
+    const bite = b.chomp > 0 ? Math.sin(b.chomp * 0.35) * 7 : 0;
+    // lower jaw
+    ctx.beginPath();
+    ctx.moveTo(-58, 6); ctx.lineTo(58, 6);
+    ctx.lineTo(46, 26 + bite); ctx.lineTo(-46, 26 + bite);
+    ctx.closePath();
+    ctx.fillStyle = '#3a2c1c'; ctx.fill();
+    ctx.strokeStyle = '#8a6a3a'; ctx.lineWidth = 2; ctx.stroke();
+    // teeth
+    ctx.fillStyle = '#d8cbb0';
+    for (let i = -4; i <= 4; i++) {
+      ctx.beginPath();
+      ctx.moveTo(i * 11 - 4, 8 + bite); ctx.lineTo(i * 11, 20 + bite); ctx.lineTo(i * 11 + 4, 8 + bite);
+      ctx.closePath(); ctx.fill();
+    }
+    // hull
+    ctx.beginPath();
+    ctx.moveTo(-65, 6); ctx.lineTo(-52, -28); ctx.lineTo(52, -28); ctx.lineTo(65, 6);
+    ctx.closePath();
+    const g = ctx.createLinearGradient(0, -28, 0, 6);
+    g.addColorStop(0, '#7b6a4e'); g.addColorStop(1, '#2a2118');
+    ctx.fillStyle = g; ctx.fill();
+    ctx.strokeStyle = '#a98c55'; ctx.lineWidth = 2.5; ctx.stroke();
+    bossFlash(b);
+    // eye — only lights once the plates are off, so "now it is vulnerable"
+    // is something you see rather than something you infer.
+    const exposed = b.plates.every(p => p.gone);
+    ctx.beginPath(); ctx.arc(0, -12, exposed ? 9 : 6, 0, Math.PI*2);
+    ctx.fillStyle = exposed ? '#ff3322' : '#553322'; ctx.fill();
+    if (exposed) {
+      ctx.strokeStyle = 'rgba(255,80,50,' + (0.4 + 0.4*Math.sin(frame*0.15)) + ')';
+      ctx.lineWidth = 2; ctx.beginPath(); ctx.arc(0, -12, 14, 0, Math.PI*2); ctx.stroke();
+    }
+    // the plates themselves
+    b.plates.forEach(p => {
+      if (p.gone) return;
+      const frac = p.hp / p.max;
+      ctx.fillStyle = '#5d5347';
+      ctx.fillRect(p.x - 16, -26, 32, 30);
+      ctx.strokeStyle = '#cbb27e'; ctx.lineWidth = 2;
+      ctx.strokeRect(p.x - 16, -26, 32, 30);
+      ctx.fillStyle = 'rgba(255,220,150,0.16)';
+      ctx.fillRect(p.x - 16, -26, 32, 30 * (1 - frac));
+      ctx.fillStyle = '#8a7a55';
+      [-9, 9].forEach(o => { ctx.beginPath(); ctx.arc(p.x + o, -21, 2.5, 0, Math.PI*2); ctx.fill(); });
+      if (frac < 0.6) {
+        ctx.strokeStyle = 'rgba(20,14,8,0.9)'; ctx.lineWidth = 1.6;
+        ctx.beginPath(); ctx.moveTo(p.x - 10, -22); ctx.lineTo(p.x + 2, -8); ctx.stroke();
+      }
+      if (frac < 0.3) {
+        ctx.beginPath(); ctx.moveTo(p.x + 11, -24); ctx.lineTo(p.x - 1, -4); ctx.stroke();
+      }
+    });
+  },
+  title(b) {
+    const left = b.plates.filter(p => !p.gone).length;
+    return left ? 'ARMOUR PLATES ' + left : 'CORE EXPOSED';
+  }
+};
+
+// ---------------------------------------------------------------------------
+// L20 — HALO WARDEN
+// Mechanic: a rotating shield ring with a single gap. Damage only lands when
+// the gap is between you and the hull, so the fight is about reading rotation
+// and moving to where the opening will be, not where it is.
+// ---------------------------------------------------------------------------
+BOSS.halowarden = {
+  w: 96, h: 96,
+  // The ring is a damage GATE, not a wall. A hard block was tried first and
+  // made the fight nine times too long: with a narrow gap only ~9% of shots
+  // ever landed, turning a 28-second boss into a three-minute one. The ring
+  // now soaks most of a blocked shot instead, so timing your burst into the
+  // gap is a large reward rather than the only way to make any progress.
+  RING_SOAK: 0.72,
+  init(b) { b.ringAngle = 0; b.ringSpeed = 0.028; b.gapWidth = 2.0; b.spin = 0; },
+  onPhase(b, ph) {
+    b.ringSpeed = (0.028 + ph * 0.007) * (ph % 2 === 0 ? -1 : 1);   // reverses
+    b.gapWidth = Math.max(1.25, 2.0 - ph * 0.25);                    // narrows
+  },
+  damage(b, bl, dmg) {
+    // Angle from the boss to the shot, measured against the gap's centre.
+    const a = Math.atan2(bl.y - b.y, bl.x - b.x);
+    let d = a - b.ringAngle;
+    while (d > Math.PI) d -= Math.PI * 2;
+    while (d < -Math.PI) d += Math.PI * 2;
+    if (Math.abs(d) < b.gapWidth / 2) return dmg;
+    // Through the ring: mostly absorbed, and visibly so.
+    spawnParticles(bl.x, bl.y, '#66ccff', 3);
+    b.spin = 6;
+    return dmg * (1 - BOSS.halowarden.RING_SOAK);
+  },
+  think(b, ph) {
+    b.ringAngle += b.ringSpeed;
+    if (b.spin > 0) b.spin--;
+    if (b.attackTimer >= 108 - ph * 14) {
+      b.attackTimer = 0;
+      // Fires OUT OF THE GAP, so the opening is both the way in and the
+      // direction the danger comes from.
+      bossShot(b.x + Math.cos(b.ringAngle) * 44, b.y + Math.sin(b.ringAngle) * 44, b.ringAngle, 1.35, 6);
+      bossRing(b.x, b.y, 4 + ph * 2, 0.7, b.ringAngle, 4);
+      Sound.play('hit');
+    }
+  },
+  paint(b) {
+    // core
+    ctx.beginPath(); ctx.arc(0, 0, 26, 0, Math.PI*2);
+    const g = ctx.createRadialGradient(-6, -8, 3, 0, 0, 28);
+    g.addColorStop(0, '#e6f4ff'); g.addColorStop(1, '#123a5c');
+    ctx.fillStyle = g; ctx.fill();
+    ctx.strokeStyle = '#66ccff'; ctx.lineWidth = 2.5; ctx.stroke();
+    bossFlash(b);
+    ctx.beginPath(); ctx.arc(0, 0, 10, 0, Math.PI*2);
+    ctx.fillStyle = bossTint(b, '#aef0ff', '#ffdd88', '#ff8866'); ctx.fill();
+
+    // the ring, drawn as an arc that stops at the gap
+    ctx.save();
+    ctx.rotate(b.ringAngle);
+    ctx.lineCap = 'round';
+    ctx.strokeStyle = b.spin > 0 ? '#ffffff' : 'rgba(110,200,255,0.9)';
+    ctx.lineWidth = 9;
+    ctx.beginPath();
+    ctx.arc(0, 0, 44, b.gapWidth / 2, Math.PI * 2 - b.gapWidth / 2);
+    ctx.stroke();
+    ctx.lineWidth = 3;
+    ctx.strokeStyle = 'rgba(200,240,255,0.55)';
+    ctx.beginPath();
+    ctx.arc(0, 0, 44, b.gapWidth / 2, Math.PI * 2 - b.gapWidth / 2);
+    ctx.stroke();
+    // gap mouth markers, so the opening reads at a glance
+    ctx.lineCap = 'butt';
+    ctx.strokeStyle = '#ffee66'; ctx.lineWidth = 3;
+    [b.gapWidth / 2, -b.gapWidth / 2].forEach(a => {
+      ctx.beginPath();
+      ctx.moveTo(Math.cos(a) * 36, Math.sin(a) * 36);
+      ctx.lineTo(Math.cos(a) * 52, Math.sin(a) * 52);
+      ctx.stroke();
+    });
+    ctx.restore();
+  },
+  title() { return 'SHIELD RING — FIRE THROUGH THE GAP'; }
+};
+
+// ---------------------------------------------------------------------------
+// L30 — THE CHOIR
+// Mechanic: three linked heads sharing one health pool. Damage to any head
+// drains the shared pool, but each head you silence makes the survivors
+// faster and angrier — so the order and timing are the puzzle, and burning
+// one down early is a real (punishable) choice.
+// ---------------------------------------------------------------------------
+BOSS.choir = {
+  w: 150, h: 70,
+  init(b) {
+    b.heads = [-52, 0, 52].map((x, i) => ({ ox: x, x: b.x + x, y: b.y, dead: false, t: i * 2.1, sing: 0 }));
+    b.silenced = 0;
+  },
+  damage(b, bl, dmg) {
+    const h = b.heads.find(h => !h.dead && Math.abs(bl.x - h.x) < 26 && Math.abs(bl.y - h.y) < 26);
+    if (!h) return 0;                       // the gaps between heads are empty air
+    h.sing = 6;
+    // Silence a head once the shared pool passes its share of the total.
+    const alive = b.heads.filter(x => !x.dead).length;
+    const threshold = b.maxHp * (alive - 1) / 3;
+    if (b.hp - dmg <= threshold && alive > 1) {
+      h.dead = true;
+      b.silenced++;
+      spawnParticles(h.x, h.y, '#aa88ff', 26);
+      FX.addShake(16);
+      Sound.play('explode');
+      addFlashText('SILENCED', h.x, h.y, '#cc99ff');
+    }
+    return dmg;
+  },
+  move(b) {
+    b.x += Math.sign(player.x - b.x) * Math.min(0.9 + b.silenced * 0.5, Math.abs(player.x - b.x));
+    b.x = Math.max(80, Math.min(W - 80, b.x));
+  },
+  think(b, ph) {
+    const rate = 1 + b.silenced * 0.9;      // survivors take up the slack
+    b.heads.forEach((h, i) => {
+      if (h.dead) return;
+      h.t += 0.03 * rate;
+      h.x = b.x + h.ox + Math.sin(h.t) * 16;
+      h.y = b.y + Math.cos(h.t * 0.7) * 12;
+      if (h.sing > 0) h.sing--;
+      h.timer = (h.timer || i * 30) + rate;
+      if (h.timer >= 110) {
+        h.timer = 0;
+        h.sing = 10;
+        if (ph >= 2) bossAimed(h.x, h.y + 16, [-0.2, 0.2], 0.95, 5);
+        else bossAimed(h.x, h.y + 16, [0], 0.9, 5);
+        Sound.play('hit');
+      }
+    });
+    // In the last phase the survivors sing together — a wall you must gap.
+    if (ph >= 3 && b.attackTimer >= 150) {
+      b.attackTimer = 0;
+      const live = b.heads.filter(h => !h.dead);
+      live.forEach(h => bossRing(h.x, h.y, 7, 0.65, frame * 0.02));
+      Sound.play('warning');
+    }
+  },
+  paint(b) {
+    // Painted in world space via the translate already applied: heads are
+    // stored in world coords, so undo the translate for them.
+    ctx.save();
+    ctx.translate(-b.x, -b.y);
+    // linking filaments
+    const live = b.heads.filter(h => !h.dead);
+    ctx.strokeStyle = 'rgba(170,120,255,0.35)'; ctx.lineWidth = 2;
+    for (let i = 0; i < live.length - 1; i++) {
+      ctx.beginPath(); ctx.moveTo(live[i].x, live[i].y); ctx.lineTo(live[i+1].x, live[i+1].y); ctx.stroke();
+    }
+    b.heads.forEach(h => {
+      if (h.dead) {
+        ctx.strokeStyle = 'rgba(90,70,120,0.5)'; ctx.lineWidth = 2;
+        ctx.beginPath(); ctx.arc(h.x, h.y, 14, 0, Math.PI*2); ctx.stroke();
+        return;
+      }
+      ctx.beginPath(); ctx.arc(h.x, h.y, 24, 0, Math.PI*2);
+      const g = ctx.createRadialGradient(h.x - 6, h.y - 8, 2, h.x, h.y, 26);
+      g.addColorStop(0, '#e9d8ff'); g.addColorStop(1, '#3a1170');
+      ctx.fillStyle = g; ctx.fill();
+      ctx.strokeStyle = h.sing > 0 ? '#ffffff' : '#aa77ff';
+      ctx.lineWidth = 2.5; ctx.stroke();
+      // an open mouth when it sings
+      ctx.beginPath();
+      ctx.ellipse(h.x, h.y + 8, 7, h.sing > 0 ? 9 : 3, 0, 0, Math.PI*2);
+      ctx.fillStyle = '#180030'; ctx.fill();
+      ctx.beginPath(); ctx.arc(h.x - 8, h.y - 5, 3, 0, Math.PI*2);
+      ctx.arc(h.x + 8, h.y - 5, 3, 0, Math.PI*2);
+      ctx.fillStyle = bossTint(b, '#88ddff', '#ffcc66', '#ff6655'); ctx.fill();
+      if (h.sing > 0) {
+        ctx.strokeStyle = 'rgba(255,255,255,0.35)'; ctx.lineWidth = 1.5;
+        ctx.beginPath(); ctx.arc(h.x, h.y, 30 + (10 - h.sing) * 2, 0, Math.PI*2); ctx.stroke();
+      }
+    });
+    ctx.restore();
+    if (b.flash > 0) { /* per-head flash is drawn above */ }
+  },
+  title(b) { return 'HEADS ' + b.heads.filter(h => !h.dead).length + ' / 3'; }
+};
+
 const BOSS_W = 112, BOSS_H = 54;
 
 function bossMaxHp(lv) {
@@ -2433,23 +2801,29 @@ function bossMaxHp(lv) {
   return RLCore.bossHp(lv);
 }
 
+function bossDef(b) { return (b && BOSS[b.key]) || BOSS.generic; }
+
 function spawnBoss(lv) {
-  const def = RLCore.bossFor(lv);
-  const hp = def ? def.hp : RLCore.fittedBossHp(lv);
+  const info = RLCore.bossFor(lv);
+  const hp = info ? info.hp : RLCore.fittedBossHp(lv);
   boss = {
     x: W/2, y: -70, targetY: 150,
     hp, maxHp: hp,
-    key: def ? def.key : 'scrapjaw',
-    name: def ? def.name : 'UNKNOWN CONTACT',
-    maxPhases: def ? def.phases : 3,
+    key: info ? info.key : 'generic',
+    name: info ? info.name : 'UNKNOWN CONTACT',
+    maxPhases: info ? info.phases : 3,
+    composite: info ? info.composite : null,
+    ascendant: info ? info.ascendant : 0,
     tier: Math.max(1, Math.round(lv / 10)),
     phase: 1, entering: true, flash: 0,
     attackTimer: 0, minionTimer: 0,
     laser: null, beamCooldown: 0,
     dying: 0, deathTick: 0
   };
+  const def = bossDef(boss);
+  if (def.init) def.init(boss);
   bossActive = true;
-  bossWarning = 90;
+  bossWarning = 110;
   levelBanner = null;          // the warning owns the screen
   Sound.play('warning');
   Music.setBoss(true);
@@ -2465,14 +2839,14 @@ function bossPhaseFor(b) {
 
 function updateBoss() {
   const b = boss;
-  const diff = difficulty();
+  const def = bossDef(b);
 
   // ---- death cascade ----
   if (b.dying > 0) {
     b.dying--;
     b.deathTick++;
     if (b.deathTick % 5 === 0) {
-      FX.explode(b.x + (Math.random()-0.5)*BOSS_W, b.y + (Math.random()-0.5)*BOSS_H, 26 + Math.random()*18, '#ffbb33');
+      FX.explode(b.x + (Math.random()-0.5)*bossHalfW(b)*2, b.y + (Math.random()-0.5)*bossHalfH(b)*2, 26 + Math.random()*18, '#ffbb33');
       FX.addShake(10);
       Sound.play('explode');
     }
@@ -2491,7 +2865,9 @@ function updateBoss() {
       scrap += bossScrap;
       addFlashText('+' + pts.toLocaleString(), b.x, b.y, '#ffdd44');
       addFlashText('+' + bossScrap.toLocaleString() + ' SCRAP', b.x, b.y + 24, '#ffdd44');
-      levelBanner = { text: 'BOSS DOWN', life: 120 };
+      levelBanner = { text: b.name.length > 22 ? 'BOSS DOWN' : b.name + ' DOWN', life: 140 };
+      Save.data.bossesKilled[b.key] = (Save.data.bossesKilled[b.key] || 0) + 1;
+      Save.write();
       boss = null; bossActive = false;
       Music.setBoss(false);
     }
@@ -2500,21 +2876,21 @@ function updateBoss() {
 
   if (b.flash > 0) b.flash--;
 
-  // ---- movement ----
+  // ---- entrance ----
   if (b.entering) {
     b.y += 1.6;
     if (b.y >= b.targetY) { b.y = b.targetY; b.entering = false; }
     return;                              // no attacks until it's in position
   }
-  if (b.laser && b.laser.fire > 0) {
-    // While the beam is up the ship itself sweeps, so the beam always
-    // emanates from the hull instead of drifting free of it.
-    b.x += b.laser.dir * 2.6;
-    if (b.x < BOSS_W/2 + 8 || b.x > W - BOSS_W/2 - 8) b.laser.dir *= -1;
-  } else {
+
+  // ---- movement ----
+  // A boss may override this entirely; the default is a lazy drift toward the
+  // player so it stays a presence rather than a stationary target.
+  if (def.move) def.move(b);
+  else {
     b.x += Math.sign(player.x - b.x) * Math.min(1.2, Math.abs(player.x - b.x));
+    b.x = Math.max(bossHalfW(b), Math.min(W - bossHalfW(b), b.x));
   }
-  b.x = Math.max(BOSS_W/2, Math.min(W - BOSS_W/2, b.x));
 
   // ---- phase transitions ----
   const p = bossPhaseFor(b);
@@ -2524,76 +2900,31 @@ function updateBoss() {
     b.attackTimer = 0;
     b.laser = null;
     FX.addShake(14);
-    Sound.play('levelUp');
+    Sound.play('bossPhase');
+    addFlashText('PHASE ' + p, b.x, b.y - 40, '#ffffff');
+    if (def.onPhase) def.onPhase(b, p);
   }
 
   b.attackTimer++;
-
-  if (b.phase === 1) {
-    // Radial bullet ring.
-    if (b.attackTimer >= 120) {
-      b.attackTimer = 0;
-      const spd = diff.bulletSpeed * 0.85 * stats.enemyBulletMul;
-      for (let i = 0; i < 12; i++) {
-        const a = (i/12)*Math.PI*2;
-        enemyBullets.push({x: b.x, y: b.y, vx: Math.cos(a)*spd, vy: Math.sin(a)*spd, r: 5, elite: true, dead: false});
-      }
-      Sound.play('hit');
-    }
-
-  } else if (b.phase === 2) {
-    // Telegraphed charge, then a sweeping vertical beam.
-    if (!b.laser && b.attackTimer >= 90) {
-      b.attackTimer = 0;
-      b.laser = { charge: 45, fire: 0, x: b.x, dir: player.x < b.x ? 1 : -1 };
-      Sound.play('warning');
-    }
-    if (b.laser) {
-      if (b.laser.charge > 0) {
-        b.laser.charge--;
-        b.laser.x = b.x;
-        if (b.laser.charge === 0) b.laser.fire = 90;
-      } else if (b.laser.fire > 0) {
-        b.laser.fire--;
-        b.laser.x = b.x;                 // locked to the hull
-        if (b.beamCooldown > 0) b.beamCooldown--;
-        if (Math.abs(player.x - b.laser.x) < 16 && player.y > b.y && b.beamCooldown === 0) {
-          b.beamCooldown = 30;   // at most one hit per half second
-          hitPlayer();
-        }
-        if (b.laser.fire === 0) b.laser = null;
-      }
-    }
-
-  } else {
-    // Minion swarm plus aimed spreads.
-    b.minionTimer++;
-    if (b.minionTimer >= 90) {
-      b.minionTimer = 0;
-      const m = makeEnemy('grunt');
-      m.x = b.x + (Math.random()-0.5)*BOSS_W; m.y = b.y + 20;
-      enemies.push(m);
-    }
-    if (b.attackTimer >= 70) {
-      b.attackTimer = 0;
-      const a = Math.atan2(player.y - b.y, player.x - b.x);
-      const spd = diff.bulletSpeed * stats.enemyBulletMul;
-      [-0.22, 0, 0.22].forEach(o => {
-        enemyBullets.push({x: b.x, y: b.y + 20, vx: Math.cos(a+o)*spd, vy: Math.sin(a+o)*spd, r: 5, elite: true, dead: false});
-      });
-    }
-  }
+  def.think(b, b.phase);
 
   // ---- taking fire ----
+  const hw = bossHalfW(b), hh = bossHalfH(b);
   bullets.forEach(bl => {
     if (bl.dead) return;
-    if (Math.abs(bl.x - b.x) < BOSS_W/2 && Math.abs(bl.y - b.y) < BOSS_H/2) {
+    if (Math.abs(bl.x - b.x) < hw && Math.abs(bl.y - b.y) < hh) {
       if (bl.pierce > 0) bl.pierce--; else bl.dead = true;
       // SIEGE OPTICS / SIEGE ENGINE only ever apply here, which is the whole
       // point of them: they are a boss-fight investment, not a general one.
-      b.hp -= bl.damage * stats.bossDamageMul;
-      b.flash = Math.max(b.flash, 2);
-      spawnParticles(bl.x, bl.y, '#ffaa44', 3);
+      let dmg = bl.damage * stats.bossDamageMul;
+      // A boss may absorb, deflect, or ignore a hit entirely — plates, shield
+      // gaps, hangar bays. Returning 0 means "nothing landed".
+      if (def.damage) dmg = def.damage(b, bl, dmg);
+      if (dmg > 0) {
+        b.hp -= dmg;
+        b.flash = Math.max(b.flash, 2);
+        spawnParticles(bl.x, bl.y, '#ffaa44', 3);
+      }
 
       // FLAK BURST / CHAIN LIGHTNING / SPLIT SHOT during a boss fight.
       // applySplash/applyChain only ever touch the `enemies` array, so this
@@ -2607,6 +2938,7 @@ function updateBoss() {
           x: bl.x, y: bl.y,
           vx: Math.sin(a) * BULLET_SPEED, vy: -Math.cos(a) * BULLET_SPEED,
           w: 3, h: 10, pierce: 0, damage: bl.damage * 0.5, homing: 0, splash: 0,
+          burn: 0, chill: 0, bounces: 0,
           split: false, isSplit: true, crit: false, dead: false
         }));
       }
