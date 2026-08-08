@@ -2461,3 +2461,31 @@ test('spawn and asteroid rates stay clamped at their floors', () => {
     assert.ok(d.spawnRate >= 35 && d.asteroidRate >= 50, `level ${lv}`);
   }
 });
+
+// ---------------------------------------------------------------------------
+// BOSS ROSTER COMPLETENESS
+// ---------------------------------------------------------------------------
+// The whole point of the roster is that every named boss is hand-built. A
+// table entry silently falling through to BOSS.generic would be a recolour
+// wearing a name, which is exactly what this expansion exists to avoid.
+
+test('every boss in the table has its own registry entry, not the fallback', () => {
+  const html = readFileSync(HTML, 'utf8');
+  const keys = new Set([...html.matchAll(/BOSS\.([a-zA-Z0-9_]+)\s*=\s*\{/g)].map(m => m[1]));
+  assert.ok(keys.has('generic'), 'the fallback should still exist');
+  for (const b of core.BOSS_TABLE) {
+    assert.ok(keys.has(b.key), `${b.name} (${b.key}) has no bespoke BOSS entry`);
+  }
+  assert.ok(keys.has('armada'), 'the ARMADA composite needs its own entry too');
+});
+
+test('every registry entry supplies the two required hooks', () => {
+  const html = readFileSync(HTML, 'utf8');
+  // Each block runs from `BOSS.key = {` to the start of the next definition.
+  const marks = [...html.matchAll(/BOSS\.([a-zA-Z0-9_]+)\s*=\s*\{/g)];
+  marks.forEach((m, i) => {
+    const body = html.slice(m.index, i + 1 < marks.length ? marks[i + 1].index : m.index + 20000);
+    assert.match(body, /\bthink\s*[:(]/, `BOSS.${m[1]} has no think()`);
+    assert.match(body, /\bpaint\s*[:(]/, `BOSS.${m[1]} has no paint()`);
+  });
+});

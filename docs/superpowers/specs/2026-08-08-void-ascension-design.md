@@ -123,6 +123,20 @@ bosses above are fully hand-built and share no code paths.
 After 2500 the Mothership returns every 100 levels as **SCOURGE ASCENDANT ×N**,
 HP × 1.6ⁿ, gaining one additional phase each return.
 
+### The speed curves saturate
+
+Found while building the bosses, and the single most consequential bug in the
+project. `difficulty()` was linear and unbounded — `enemySpeed = 1.2 + 0.2·lv`,
+`bulletSpeed = 2.5 + 0.15·lv`. Fine for eight levels. At level 2500 that is an
+enemy bullet crossing the entire 720px screen in **1.9 frames**, and enemies
+moving at 501 px/frame. Everything past roughly level 150 was not hard, it was
+mathematically undodgeable.
+
+Both curves are now unchanged up to a knee (level 24 and level 50 respectively)
+so the opening game plays exactly as tuned, then creep gently and saturate.
+Enemy bullets stay slower than the player's own 11 px/frame at every depth, and
+nothing ever crosses the screen in under a second. Asserted by test.
+
 ### The old `bossHpMultiplier` is deleted
 
 Scaling boss HP by scrap *spent* was the single worst number in the previous
@@ -521,10 +535,10 @@ Six phases. Each one ends with the game playable and pushed.
 
 | # | phase | why this order |
 | --- | --- | --- |
-| **A** | HP system, 11 tiers, nerf pass, shop rework (no timer, SKIP, docking art), upgrade catalog to 114 | Everything else is denominated in these numbers. Building bosses first would mean rebuilding them. |
-| **B** | Voidbirth: prestige at 50/100/200/350/500, lineages, odds shift, shop frequency decay, the three locked tiers | The tier ladder must exist before content can be spread across it. |
-| **C** | Enemies: ten kinds with real hulls, size/HP scaling, firing arcs, five meteorite classes | Bosses reuse enemy rendering and the arc system. |
-| **D** | Bosses: seventeen hand-built fights plus the ARMADA compositor | The largest phase by far. Split into four sub-waves of 4–5 bosses. |
+| **A** | HP system, 11 tiers, nerf pass, shop rework (no timer, SKIP, docking art), upgrade catalog to 114 — **DONE** | Everything else is denominated in these numbers. Building bosses first would mean rebuilding them. |
+| **B** | Voidbirth: prestige at 50/100/200/350/500, lineages, odds shift, shop frequency decay, the three locked tiers — **DONE** | The tier ladder must exist before content can be spread across it. |
+| **C** | Enemies: ten kinds with real hulls, size/HP scaling, firing arcs — **DONE** (meteorite classes still to wire) | Bosses reuse enemy rendering and the arc system. |
+| **D** | Bosses: seventeen hand-built fights plus the ARMADA compositor — **DONE** | The largest phase by far. Built as a registry so each fight owns its state, attacks, hull and damage rules, with only the chrome shared. `tools/bosscheck.mjs` benches each one headlessly and fails it if it throws, skips a phase, or turns out to be unkillable. |
 | **E** | Ships: seven new hulls with individual draw functions and hooks | Independent of everything else; safe to do late. |
 | **F** | Audio: five-voice engine, six themes, per-boss motifs, SFX rebuild | Needs the bosses to exist so their motifs can be written against real fights. |
 
