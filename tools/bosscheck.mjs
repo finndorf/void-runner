@@ -25,7 +25,14 @@ const bossSrc = readFileSync(resolve(bossFile), 'utf8');
 // Keys the file defines, e.g. `BOSS.widow = {`
 const defined = [...bossSrc.matchAll(/BOSS\.([a-zA-Z0-9_]+)\s*=/g)].map(m => m[1]);
 const keys = process.argv.slice(3).length ? process.argv.slice(3) : defined;
-if (!keys.length) { console.error('no BOSS.<key> definitions found in ' + bossFile); process.exit(2); }
+// An empty splice file with explicit keys is the "bench what is already in the
+// game" mode — used to re-verify the whole roster after integration, where
+// re-splicing a pack would redeclare its helpers and fail to parse.
+if (!keys.length) {
+  console.error('no BOSS.<key> definitions in ' + bossFile + ', and no keys given.\n' +
+    'Pass keys explicitly to bench bosses already present in the game.');
+  process.exit(2);
+}
 
 // ---- splice: the new definitions go in right before the plumbing ----
 const html = readFileSync(GAME, 'utf8');
