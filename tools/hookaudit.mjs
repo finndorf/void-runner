@@ -72,6 +72,25 @@ report('ships -> hull art',
   shipIds.filter(id => !artKeys.has(id)),
   shipIds.length);
 
+// --- 6. every sound the game plays must actually be defined ---------------
+// Sound.play falls through silently on an unknown name, so a typo is a sound
+// that never plays and never complains.
+const played = [...new Set([...html.matchAll(/Sound\.play\('([a-zA-Z_]+)'\)/g)].map(m => m[1]))];
+// Any indent: the SFX table lives inside an IIFE, so its keys are nested
+// deeper than a top-level object literal's would be.
+const sfxKeys = new Set([...html.matchAll(/^\s+([a-zA-Z_][a-zA-Z0-9_]*)\s*:\s*function/gm)].map(m => m[1]));
+const switchCases = new Set([...html.matchAll(/case '([a-zA-Z_]+)':/g)].map(m => m[1]));
+report('played sound names -> defined',
+  played.filter(n => !sfxKeys.has(n) && !switchCases.has(n)),
+  played.length);
+
+// The tier-reveal ladder is built by string concatenation, so it cannot be
+// caught by the scan above — check it explicitly against the tier list.
+const LOUD = ['APEX', 'OVERCLOCKED', 'HYPERCLOCKED', 'UBERCLOCKED', 'DYNACLOCKED', 'MYTHIC'];
+report('tier reveal ladder -> defined',
+  LOUD.filter(t => !html.includes('tierReveal_' + t)),
+  LOUD.length);
+
 console.log(problems
   ? `\n${problems} dead capabilities — something takes the player's scrap or credits and does nothing`
   : '\nno dead capabilities');

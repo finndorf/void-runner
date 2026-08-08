@@ -1007,11 +1007,9 @@ Save.load();
 // a single portable document. If the AudioContext can't be created the module
 // goes inert and the game runs silent rather than failing.
 
-// Rebuilt sound effects. Populated below; consulted by Sound.play before its
-// own switch, so a name present here replaces the built-in version of it.
-// Declared up here (rather than beside its contents) because Sound.play holds
-// a reference to it and const declarations do not hoist their initialiser.
-const SFX = {};
+// SFX is declared further down, alongside the music engine. Sound.play reads
+// it by reference at call time — long after the whole script has evaluated —
+// so the forward reference is safe.
 
 const Sound = {
   ctx: null, master: null, sfxBus: null,
@@ -1062,7 +1060,15 @@ const Sound = {
 
   setMuted(m) {
     Sound.muted = m;
-    if (Sound.master) Sound.master.gain.value = m ? 0 : 1;
+    if (!Sound.master) return;
+    // Ramped rather than set outright: writing gain.value directly is a step
+    // discontinuity in the waveform, which is an audible click on every mute
+    // and unmute. 15ms is short enough to feel instant and long enough not
+    // to pop.
+    const g = Sound.master.gain, now = Sound.ctx.currentTime;
+    g.cancelScheduledValues(now);
+    g.setValueAtTime(g.value, now);
+    g.linearRampToValueAtTime(m ? 0 : 1, now + 0.015);
   },
 
   ready() { return !!Sound.ctx && !Sound.dead; },
@@ -1087,8 +1093,13 @@ const Sound = {
     o.type = type || 'square';
     o.frequency.setValueAtTime(freq, t);
     if (freqEnd) o.frequency.exponentialRampToValueAtTime(Math.max(1, freqEnd), t + dur);
+    // The attack must fit inside the sound. For a very short `dur` the two
+    // ramps would otherwise be scheduled out of order and the envelope is
+    // undefined — no current call site is that short, but uiMove at 0.05s is
+    // only eight times the attack, so the guard is cheap insurance.
+    const attack = Math.min(0.006, dur * 0.4);
     g.gain.setValueAtTime(0.0001, t);
-    g.gain.linearRampToValueAtTime(gain, t + 0.006);
+    g.gain.linearRampToValueAtTime(gain, t + attack);
     g.gain.exponentialRampToValueAtTime(0.0001, t + dur);
     o.connect(g); g.connect(Sound.sfxBus);
     o.start(t); o.stop(t + dur + 0.02);
@@ -1100,6 +1111,12 @@ const Sound = {
     if (!Sound.claimVoice(t + dur)) return;
     const s = Sound.ctx.createBufferSource();
     s.buffer = Sound.noiseBuf;
+    // The buffer is exactly one second long. Without looping, any request
+    // longer than that ended silently at 1.0s while claimVoice still held a
+    // slot for the full duration — so the sound was truncated AND it blocked
+    // one of only twelve voices for the rest of its nominal life. The
+    // voidbirth riser asks for 1.9s and was getting 1.0.
+    s.loop = true;
     const f = Sound.ctx.createBiquadFilter();
     f.type = 'lowpass';
     f.frequency.setValueAtTime(filtFreq, t);
@@ -1193,124 +1210,1350 @@ const Sound = {
 
 // Procedural soundtrack: a 16-step sequencer scheduled ahead of the audio clock,
 // so it never depends on the render loop's timing.
+// ---- audio pack ----
+// ===== VOID RUNNER — SOUNDTRACK + SFX ======================================
+// Everything below is synthesised at runtime with the Web Audio API. No assets,
+// no dependencies, no network. Two top-level bindings only: `Music` and `SFX`.
+//
+// `Music` is a five-voice lookahead sequencer (sub / bass / pad / lead / drums)
+// with six themes selected by depth, plus a per-boss motif bank.
+// `SFX` is a table of one-shot builders; `Sound.play(name)` consults it first,
+// so any name here overrides the built-in switch.
+//
+// Two invariants matter more than anything else in this file:
+//   1. Every node that is start()ed is also stop()ped, on the same call, with
+//      an absolute time. Nothing is ever left running.
+//   2. Nothing throws when Sound.ready() is false — the game boots with audio
+//      locked until the first user gesture.
+
+// ---------------------------------------------------------------------------
+// MUSIC
+// ---------------------------------------------------------------------------
+// Scheduling model: a 25ms setInterval walks a 16-step bar and schedules any
+// step whose time falls inside a 150ms lookahead window. Timing therefore lives
+// on the audio clock, not the render loop, and survives a stalled main thread.
+//
+// `wanted` = a run wants music. `playing` = it is actually being scheduled.
+// Mute separates the two: muting stops scheduling outright (and kills the
+// interval, so a muted game does literally no audio work), and unmuting rebases
+// nextTime onto the audio clock so the silent gap is never replayed as a
+// backlog of notes all landing in the same millisecond.
+
 const Music = {
+  // ---- public state (the game reads/writes none of this directly, but the
+  // wanted/playing distinction is part of the contract) ----
   bus: null, playing: false, timer: null,
-  // `wanted` is whether a run wants music at all; `playing` is whether it is
-  // actually being scheduled. Mute separates the two so unmuting mid-run can
-  // resume without a run having to restart the track.
   wanted: false,
   step: 0, bar: 0, nextTime: 0,
   level: 1, boss: false,
 
-  ROOTS:      [55.00, 43.65, 65.41, 48.99], // A1  F1  C2  G1
-  BOSS_ROOTS: [55.00, 58.27, 55.00, 51.91], // A1  Bb1 A1  Ab1
+  // ---- internals ----
+  _v: null,             // per-voice gain nodes
+  _themeKey: '',        // last theme scheduled, for change detection
+  _bossKey: '',         // last boss key seen on the live `boss` global
+  _bossPhase: 0,        // last phase seen; a change is a transition, not a restart
+  _fill: false,         // "play a crash + tom fill at the top of the next bar"
+  _stab: false,         // "play a phase-change stab at the very next step"
+  _errors: 0,           // scheduling exceptions swallowed (harness asserts 0)
+  _base: 0.13,          // resting bus gain; voidbirth ducks and restores this
 
-  init() {
-    if (!Sound.ready()) return;
-    // Deliberately well under the SFX bus — the track is a bed, not the focus.
-    Music.bus = Sound.ctx.createGain();
-    Music.bus.gain.value = 0.14;
-    Music.bus.connect(Sound.master);
+  TICK_MS: 25,
+  LOOKAHEAD: 0.15,
+  MAX_STEPS: 8,         // hard cap on steps scheduled per tick
+
+  // Kept for compatibility with anything that poked at the old object.
+  ROOTS:      [55.00, 43.65, 65.41, 48.99],
+  BOSS_ROOTS: [55.00, 58.27, 55.00, 51.91],
+
+  // ------------------------------------------------------------------ themes
+  // Drum patterns are 16-character strings: 'x' loud, 'o' soft, '.' rest.
+  // bass/lead are scale-DEGREE indices (not semitones) so a phrase transposes
+  // correctly when the bar's chord moves. null = rest. `prog` is the semitone
+  // offset of each bar's root, so the melody follows the harmony for free.
+  THEMES: {
+
+    // 1–49. Wide, empty, lonely. Two notes a bar and a lot of air.
+    drift: {
+      key: 'drift', name: 'OUTER DRIFT', bpm: 108, root: 55,
+      scale: [0, 3, 5, 7, 10],                       // A minor pentatonic
+      prog:  [0, 0, 5, 3],                           // Am  Am  Dm  Cmaj-ish
+      kick:  'x.......x.......',
+      snare: '............x...',
+      hat:   '..o...o...o...o.',
+      open:  '..............x.',
+      crashBars: 8,
+      bass:  [0, null, null, null,  null, null, 4, null,  null, null, null, null,  2, null, null, null],
+      lead:  [null, null, null, null,  7, null, null, null,  6, null, null, null,  null, null, 5, null],
+      leadB: [null, null, 9, null,  null, null, 8, null,  null, null, null, null,  7, null, null, null],
+      leadWave: 'triangle', bassWave: 'square',
+      padChord: [0, 2, 4], padEveryBars: 2, padBars: 2, padWave: 'sawtooth', padDetune: 9,
+      mix: { sub: 0.55, bass: 0.30, pad: 0.34, lead: 0.26, drum: 0.34 },
+      subLen: 3.0, leadLen: 3.5, swing: 0.0
+    },
+
+    // 50–199. Four-on-the-floor spine with the bass pushed off the beat.
+    belt: {
+      key: 'belt', name: 'THE BELT', bpm: 124, root: 55,
+      scale: [0, 2, 3, 5, 7, 8, 10],                 // A natural minor
+      prog:  [0, 0, -4, -2],                         // Am  Am  F  G
+      kick:  'x...x...x...x...',
+      snare: '....x.......x...',
+      hat:   'x.o.x.o.x.o.x.oo',
+      open:  '..........x.....',
+      crashBars: 4,
+      bass:  [0, null, 0, 0,  null, null, 4, null,  0, null, 0, 2,  null, null, 4, 3],
+      lead:  [null, null, null, null,  null, null, 7, null,  null, 8, null, null,  9, null, null, null],
+      leadB: [7, null, null, 9,  null, null, 10, null,  null, null, 9, null,  7, null, null, null],
+      leadWave: 'sawtooth', bassWave: 'sawtooth',
+      padChord: [0, 2, 4], padEveryBars: 2, padBars: 2, padWave: 'sawtooth', padDetune: 7,
+      mix: { sub: 0.50, bass: 0.44, pad: 0.22, lead: 0.24, drum: 0.46 },
+      subLen: 1.2, leadLen: 1.1, swing: 0.0
+    },
+
+    // 200–499. Dorian, so the 6th lifts it out of pure gloom. Pads dominate.
+    deep: {
+      key: 'deep', name: 'DEEP FIELD', bpm: 132, root: 55,
+      scale: [0, 2, 3, 5, 7, 9, 10],                 // A dorian
+      prog:  [0, 5, 3, -2],
+      kick:  'x.....x...x.....',
+      snare: '....x.......x...',
+      hat:   '..o.x...o.o.x...',
+      open:  '......o.......o.',
+      crashBars: 4,
+      bass:  [0, null, null, 4,  null, 2, null, null,  0, null, null, 4,  null, null, 5, null],
+      lead:  [null, null, 5, null,  null, 7, null, null,  9, null, null, null,  7, null, null, null],
+      leadB: [12, null, null, 11,  null, null, 9, null,  null, 7, null, null,  null, null, 5, null],
+      leadWave: 'sawtooth', bassWave: 'square',
+      padChord: [0, 2, 4, 6], padEveryBars: 1, padBars: 2, padWave: 'sawtooth', padDetune: 14,
+      mix: { sub: 0.52, bass: 0.36, pad: 0.40, lead: 0.28, drum: 0.40 },
+      subLen: 1.6, leadLen: 1.4, swing: 0.0
+    },
+
+    // 500–999. Phrygian dread. One kick a bar, no hats, enormous pads.
+    silence: {
+      key: 'silence', name: 'THE SILENCE', bpm: 96, root: 41.20,   // E1
+      scale: [0, 1, 3, 5, 7, 8, 10],                 // phrygian
+      prog:  [0, 0, 1, 0],                           // the flat-2 is the whole mood
+      kick:  'x...............',
+      snare: '................',
+      hat:   '................',
+      open:  '................',
+      crashBars: 16,
+      bass:  [0, null, null, null,  null, null, null, null,  1, null, null, null,  null, null, null, null],
+      lead:  [null, null, null, null,  null, null, null, null,  null, null, 8, null,  null, null, null, null],
+      leadB: [null, null, null, 7,  null, null, null, null,  null, null, null, null,  6, null, null, null],
+      leadWave: 'triangle', bassWave: 'triangle',
+      padChord: [0, 1, 4], padEveryBars: 1, padBars: 2, padWave: 'sawtooth', padDetune: 18,
+      mix: { sub: 0.62, bass: 0.26, pad: 0.46, lead: 0.22, drum: 0.30 },
+      subLen: 4.5, leadLen: 4.0, swing: 0.0
+    },
+
+    // 1000+. Phrygian dominant, fast, and every fourth bar-pair drops to
+    // half-time so the aggression has somewhere to land.
+    war: {
+      key: 'war', name: 'WARSPACE', bpm: 148, root: 55,
+      scale: [0, 1, 4, 5, 7, 8, 10],                 // phrygian dominant
+      prog:  [0, 0, 1, -2],
+      kick:  'x..x..x.x..x..x.',
+      snare: '....x.......x...',
+      hat:   'xoxoxoxoxoxoxoxo',
+      open:  '..............x.',
+      // half-time alternates: same tempo, half the density, twice the weight
+      kickB:  'x.......x.......',
+      snareB: '........x.......',
+      hatB:   '....o.......o...',
+      crashBars: 4,
+      bass:  [0, 0, null, 0,  2, null, 0, null,  1, null, 0, 0,  null, 4, null, 3],
+      lead:  [7, null, 8, null,  7, null, null, 4,  null, null, 7, null,  8, null, 9, null],
+      leadB: [11, null, null, 10,  null, 8, null, 7,  null, null, null, 4,  null, null, null, null],
+      leadWave: 'sawtooth', bassWave: 'sawtooth',
+      padChord: [0, 2, 4], padEveryBars: 2, padBars: 2, padWave: 'square', padDetune: 11,
+      mix: { sub: 0.55, bass: 0.48, pad: 0.20, lead: 0.30, drum: 0.52 },
+      subLen: 0.9, leadLen: 0.8, swing: 0.0, echo: false
+    },
+
+    // Boss. The bassline comes from BOSSES[key] rather than from `bass`, and
+    // the drum kit gets busier with the phase. Same scheduler, same bar count —
+    // a phase change is a gearshift, never a restart.
+    boss: {
+      key: 'boss', name: 'BOSS', bpm: 138, root: 55,
+      scale: [0, 2, 3, 5, 7, 8, 11],                 // harmonic minor
+      prog:  [0, 0, -4, -1],
+      kick:  'x...x.......x...',
+      snare: '....x.......x...',
+      hat:   '..o...o...o...o.',
+      open:  '..............x.',
+      crashBars: 4,
+      // phase kits, index = min(phase-1, 2)
+      kits: [
+        { kick: 'x...x.......x...', snare: '....x.......x...', hat: '..o...o...o...o.' },
+        { kick: 'x..x..x...x.x...', snare: '....x.......x..x', hat: 'x.o.x.o.x.o.x.o.' },
+        { kick: 'x.xx..x.x.xx..x.', snare: '....x..x....x..x', hat: 'xoxoxoxoxoxoxoxo' }
+      ],
+      bass:  [0, null, 0, null,  0, null, 0, null,  0, null, 0, null,  0, null, 0, null],
+      lead:  [null, null, null, null,  null, null, 7, null,  null, null, null, null,  9, null, null, null],
+      leadB: [null, null, 11, null,  null, null, 9, null,  null, null, 7, null,  null, null, null, null],
+      leadWave: 'sawtooth', bassWave: 'sawtooth',
+      padChord: [0, 2, 4], padEveryBars: 2, padBars: 2, padWave: 'sawtooth', padDetune: 16,
+      mix: { sub: 0.60, bass: 0.50, pad: 0.24, lead: 0.28, drum: 0.50 },
+      subLen: 1.0, leadLen: 1.0, swing: 0.0
+    }
   },
 
-  start() {
+  // ------------------------------------------------------------- boss motifs
+  // One eight-note bass motif per key in RLCore.BOSS_TABLE, played on the even
+  // steps of the bar. `r` shifts the root in semitones and `w` picks the bass
+  // waveform, so two bosses sharing a contour still do not sound alike.
+  // Degrees index the boss scale (harmonic minor); negatives drop an octave.
+  BOSSES: {
+    scrapjaw:     { m: [0, 0, null, 2, 0, null, 1, 0],        r: 0,  w: 'square',   bpm: 126 },
+    halowarden:   { m: [0, 4, 3, 4, 0, 4, 7, 4],              r: 0,  w: 'sawtooth', bpm: 132 },
+    choir:        { m: [0, 2, 4, 2, 0, 2, 4, 6],              r: 0,  w: 'triangle', bpm: 128 },
+    magnetar:     { m: [0, 7, 0, -1, 0, 7, 0, 1],             r: -2, w: 'sawtooth', bpm: 136 },
+    voidgate:     { m: [0, 3, 5, 3, 0, 3, 5, 7],              r: 0,  w: 'square',   bpm: 138 },
+    rustfall:     { m: [0, null, 0, -2, -3, null, 0, null],   r: -3, w: 'sawtooth', bpm: 122 },
+    longsilence:  { m: [0, null, null, 1, null, null, 0, null], r: -5, w: 'triangle', bpm: 104 },
+    hiveempress:  { m: [0, 1, 2, 1, 0, 1, 2, 3],              r: 2,  w: 'sawtooth', bpm: 144 },
+    cartographer: { m: [0, 2, 0, 4, 0, 2, 0, 5],              r: 0,  w: 'square',   bpm: 134 },
+    nullpoint:    { m: [0, 0, -1, 0, 0, 0, -2, 0],            r: -1, w: 'square',   bpm: 130 },
+    sevenangles:  { m: [0, 1, 2, 3, 4, 5, 6, 7],              r: 0,  w: 'sawtooth', bpm: 142 },
+    widow:        { m: [0, -1, 0, 4, 0, -1, 0, 3],            r: 1,  w: 'triangle', bpm: 128 },
+    choirmaster:  { m: [0, null, 0, null, 4, null, 4, null],  r: 0,  w: 'sawtooth', bpm: 120 },
+    threshold:    { m: [0, 5, 7, 5, 0, 5, 7, 9],              r: 0,  w: 'sawtooth', bpm: 140 },
+    paleherald:   { m: [0, 4, 7, 4, 3, 7, 3, 0],              r: -2, w: 'square',   bpm: 138 },
+    ironlitany:   { m: [0, 0, 0, 3, 0, 0, 0, 5],              r: -4, w: 'sawtooth', bpm: 146 },
+    mothership:   { m: [0, -2, -3, -2, 0, 2, 3, 5],           r: -5, w: 'sawtooth', bpm: 150 },
+    // fallbacks for composite / armada / unknown contacts
+    armada:       { m: [0, 2, 4, 5, 7, 5, 4, 2],              r: 0,  w: 'sawtooth', bpm: 144 },
+    generic:      { m: [0, 3, 0, 5, 0, 3, 7, 5],              r: 0,  w: 'sawtooth', bpm: 136 }
+  },
+
+  // ------------------------------------------------------------------ set-up
+  init: function () {
+    if (!Sound.ready() || Music.bus) return;
+    var c = Sound.ctx;
+    // Deliberately well under the SFX bus — the track is a bed, not the focus.
+    Music.bus = c.createGain();
+    Music.bus.gain.value = Music._base;
+    // A gentle lowpass sits the whole bed behind the gameplay sounds without
+    // having to turn it down until it disappears.
+    var lp = c.createBiquadFilter();
+    lp.type = 'lowpass';
+    lp.frequency.value = 9500;
+    Music.bus.connect(lp);
+    lp.connect(Sound.master);
+
+    function g(v) { var n = c.createGain(); n.gain.value = v; n.connect(Music.bus); return n; }
+    Music._v = { sub: g(1), bass: g(1), pad: g(1), lead: g(1), drum: g(1) };
+    Music._applyMix(Music._theme());
+  },
+
+  start: function () {
     Music.wanted = true;
     if (!Sound.ready() || !Music.bus) return;
     Music.playing = !Sound.muted;
     Music.step = 0; Music.bar = 0;
+    Music._themeKey = ''; Music._bossKey = ''; Music._bossPhase = 0;
+    Music._fill = false; Music._stab = false;
     Music.nextTime = Sound.ctx.currentTime + 0.08;
-    if (!Music.timer) Music.timer = setInterval(Music.tick, 25);
+    if (Music.playing) Music._arm();
   },
 
-  stop() { Music.wanted = false; Music.playing = false; },
+  stop: function () {
+    Music.wanted = false;
+    Music.playing = false;
+    Music._disarm();
+  },
 
   // Muting stops scheduling outright rather than only zeroing the output gain,
-  // so a muted game does no audio work at all. Unmuting picks the track up from
-  // where it was, and rebases nextTime so the silent gap is not scheduled as a
-  // backlog of notes all landing at once.
-  setMuted(m) {
-    if (m) { Music.playing = false; return; }
+  // so a muted game does no audio work at all — the interval is torn down too.
+  // Unmuting picks the track up where it was and rebases nextTime onto the
+  // audio clock, so the silent gap is not scheduled as a backlog of notes all
+  // landing at once.
+  setMuted: function (m) {
+    if (m) { Music.playing = false; Music._disarm(); return; }
     if (!Music.wanted || !Sound.ready() || !Music.bus) return;
     Music.playing = true;
     Music.nextTime = Sound.ctx.currentTime + 0.08;
-  },
-  setIntensity(lv) { Music.level = lv; },
-  setBoss(b) { Music.boss = b; },
-
-  stepDur() {
-    return Music.boss ? 0.112 : Math.max(0.105, 0.16 - Music.level*0.004);
+    Music._arm();
   },
 
-  tick() {
-    if (!Music.playing || !Sound.ready()) return;
-    const dur = Music.stepDur();
-    // Schedule a little ahead of the clock so timing survives a busy main thread.
-    while (Music.nextTime < Sound.ctx.currentTime + 0.15) {
-      Music.schedule(Music.step, Music.nextTime);
+  setIntensity: function (lv) {
+    Music.level = lv;
+  },
+
+  // A boss starting or ending is a transition: the bar count keeps running and
+  // the next downbeat gets a crash fill. Nothing restarts.
+  setBoss: function (b) {
+    b = !!b;
+    if (b !== Music.boss) Music._fill = true;
+    Music.boss = b;
+    if (!b) { Music._bossKey = ''; Music._bossPhase = 0; }
+  },
+
+  _arm: function () {
+    if (!Music.timer) Music.timer = setInterval(Music.tick, Music.TICK_MS);
+  },
+  _disarm: function () {
+    if (Music.timer) { clearInterval(Music.timer); Music.timer = null; }
+  },
+
+  // ------------------------------------------------------------- theme + time
+  _theme: function () {
+    if (Music.boss) return Music.THEMES.boss;
+    var lv = Music.level | 0;
+    if (lv >= 1000) return Music.THEMES.war;
+    if (lv >= 500)  return Music.THEMES.silence;
+    if (lv >= 200)  return Music.THEMES.deep;
+    if (lv >= 50)   return Music.THEMES.belt;
+    return Music.THEMES.drift;
+  },
+
+  _bossDef: function () {
+    return Music.BOSSES[Music._bossKey] || Music.BOSSES.generic;
+  },
+
+  stepDur: function () {
+    var th = Music._theme();
+    var bpm = th.bpm;
+    if (Music.boss) {
+      bpm = Music._bossDef().bpm;
+      // Each phase leans on the accelerator a little.
+      bpm += Math.min(4, Math.max(0, Music._bossPhase - 1)) * 3;
+    }
+    if (!(bpm > 20)) bpm = 120;
+    return 15 / bpm;   // 60 / bpm / 4 — one sixteenth
+  },
+
+  // The live `boss` global may be in its temporal dead zone at definition time
+  // and is null outside a fight, so both are handled.
+  _liveBoss: function () {
+    try { return (typeof boss !== 'undefined' && boss) ? boss : null; }
+    catch (e) { return null; }
+  },
+
+  // Deterministic per-bar hash. Used only for accents and ornaments, so the
+  // same bar number always sounds identical — variation that reads as
+  // composition rather than as noise.
+  _h: function (a, b) {
+    var x = ((a | 0) * 1103515245 + (b | 0) * 12345 + 1013904223) >>> 0;
+    x ^= x >>> 15; x = (x * 2246822519) >>> 0; x ^= x >>> 13;
+    return (x >>> 8) / 16777216;
+  },
+
+  // Scale degree -> Hz, wrapping cleanly through octaves in both directions.
+  _deg: function (scale, root, d) {
+    var n = scale.length;
+    var oct = Math.floor(d / n);
+    var i = d - oct * n;
+    var f = root * Math.pow(2, (scale[i] + 12 * oct) / 12);
+    return (f > 8 && f < 20000) ? f : 55;
+  },
+
+  _applyMix: function (th) {
+    if (!Music._v || !th || !th.mix) return;
+    var m = th.mix, v = Music._v;
+    v.sub.gain.value  = m.sub;
+    v.bass.gain.value = m.bass;
+    v.pad.gain.value  = m.pad;
+    v.lead.gain.value = m.lead;
+    v.drum.gain.value = m.drum;
+  },
+
+  // ---------------------------------------------------------------- scheduler
+  tick: function () {
+    if (!Music.playing || !Sound.ready() || !Music.bus) return;
+    var now = Sound.ctx.currentTime;
+
+    Music._poll();
+    var dur = Music.stepDur();
+
+    // If the clock ran away from us (throttled tab, long GC, an unmute that
+    // slipped through) we rebase rather than catch up. Replaying a backlog is
+    // worse than dropping it: it lands as one loud cluster.
+    if (Music.nextTime < now - 0.25 || Music.nextTime > now + 2) {
+      Music.nextTime = now + 0.02;
+    }
+
+    var guard = 0;
+    while (Music.nextTime < now + Music.LOOKAHEAD && guard < Music.MAX_STEPS) {
+      guard++;
+      try { Music.schedule(Music.step, Music.nextTime, dur); }
+      catch (e) { Music._errors++; }
       Music.nextTime += dur;
       Music.step++;
       if (Music.step >= 16) { Music.step = 0; Music.bar++; }
     }
   },
 
-  note(freq, dur, type, gain, t, freqEnd) {
-    if (!Sound.ready() || !Music.bus) return;
-    const o = Sound.ctx.createOscillator();
-    const g = Sound.ctx.createGain();
-    o.type = type;
-    o.frequency.setValueAtTime(freq, t);
-    if (freqEnd) o.frequency.exponentialRampToValueAtTime(Math.max(20, freqEnd), t + dur);
+  // Watches for the things that should cause a musical transition rather than
+  // a restart: the depth theme changing, and the live boss changing key/phase.
+  _poll: function () {
+    var th = Music._theme();
+    if (th.key !== Music._themeKey) {
+      if (Music._themeKey) Music._fill = true;   // not on the very first bar
+      Music._themeKey = th.key;
+      Music._applyMix(th);
+    }
+    if (!Music.boss) return;
+    var b = Music._liveBoss();
+    var k = (b && b.key && Music.BOSSES[b.key]) ? b.key
+          : (b && b.composite ? 'armada' : 'generic');
+    if (k !== Music._bossKey) { Music._bossKey = k; Music._fill = true; }
+    var ph = (b && b.phase) ? (b.phase | 0) : 1;
+    if (ph !== Music._bossPhase) {
+      if (Music._bossPhase) { Music._fill = true; Music._stab = true; }
+      Music._bossPhase = ph;
+    }
+  },
+
+  schedule: function (step, t, dur) {
+    var th = Music._theme();
+    var bar = Music.bar;
+    var scale = th.scale;
+    var bd = Music.boss ? Music._bossDef() : null;
+    var shift = th.prog[bar % th.prog.length] + (bd ? bd.r : 0);
+    var root = th.root * Math.pow(2, shift / 12);
+    var lv = Music.level | 0;
+
+    // WARSPACE drops to half-time for the last two bars of every eight.
+    var half = (th.key === 'war') && ((bar % 8) >= 6);
+    var kickP = half ? th.kickB : th.kick;
+    var snareP = half ? th.snareB : th.snare;
+    var hatP = half ? th.hatB : th.hat;
+    if (Music.boss && th.kits) {
+      var kit = th.kits[Math.min(th.kits.length - 1, Math.max(0, Music._bossPhase - 1))];
+      kickP = kit.kick; snareP = kit.snare; hatP = kit.hat;
+    }
+
+    // ---- transitions -------------------------------------------------------
+    // A phase change stabs immediately; a theme/boss change waits for the
+    // downbeat and lands a crash + tom fill there.
+    if (Music._stab) {
+      Music._stab = false;
+      Music._stabHit(t, root);
+    }
+    if (step === 0 && Music._fill) {
+      Music._fill = false;
+      Music._crash(t, 1.5, 0.30);
+      Music._tom(t + dur * 2, root * 4, 0.22);
+      Music._tom(t + dur * 3, root * 3, 0.20);
+    } else if (step === 0 && th.crashBars && (bar % th.crashBars) === 0 && bar > 0) {
+      Music._crash(t, 1.2, 0.16);
+    }
+
+    // ---- drums -------------------------------------------------------------
+    var k = kickP.charAt(step);
+    if (k !== '.') Music._kick(t, k === 'x' ? 1 : 0.6, th.key === 'silence');
+    var s = snareP.charAt(step);
+    if (s !== '.') Music._snare(t, s === 'x' ? 1 : 0.55);
+    var h = hatP.charAt(step);
+    if (h !== '.') {
+      var acc = 0.55 + Music._h(bar, step) * 0.35;
+      Music._hat(t, h === 'x' ? acc : acc * 0.55, false);
+    }
+    if (th.open && th.open.charAt(step) !== '.') Music._hat(t, 0.30, true);
+
+    // ---- sub bass ----------------------------------------------------------
+    // One long fundamental per bar, an octave below the bass line. This is the
+    // voice you feel rather than hear.
+    if (step === 0) {
+      Music._sub(root * 0.5, t, Math.max(0.4, th.subLen * (dur / 0.12)), 0.60);
+    }
+
+    // ---- bass --------------------------------------------------------------
+    var bDeg = null;
+    if (Music.boss) {
+      if (step % 2 === 0) bDeg = bd.m[(step >> 1) % bd.m.length];
+    } else {
+      bDeg = th.bass[step];
+    }
+    if (bDeg !== null && bDeg !== undefined) {
+      var bLen = dur * (Music.boss ? 1.8 : 2.2);
+      Music._bass(Music._deg(scale, root, bDeg), t, bLen, 0.55,
+                  Music.boss ? bd.w : th.bassWave);
+    }
+
+    // ---- pad ---------------------------------------------------------------
+    // Long chord voicings on bar boundaries. Cheap (one event every 1–2 bars)
+    // but it is what gives each theme its space.
+    if (step === 0 && (bar % th.padEveryBars) === 0) {
+      var freqs = [];
+      for (var i = 0; i < th.padChord.length; i++) {
+        freqs.push(Music._deg(scale, root * 2, th.padChord[i]));
+      }
+      Music._pad(freqs, t, dur * 16 * th.padBars, 0.30, th.padWave, th.padDetune);
+    }
+
+    // ---- lead --------------------------------------------------------------
+    // Suppressed on the shallowest levels so OUTER DRIFT stays sparse, and the
+    // "answer" phrase replaces the "call" on every fourth bar.
+    var leadOn = Music.boss || lv >= 4;
+    if (leadOn) {
+      var seq = ((bar % 4) === 3) ? th.leadB : th.lead;
+      var lDeg = seq[step];
+      if (lDeg !== null && lDeg !== undefined) {
+        var lLen = Math.max(0.18, dur * 4 * (th.leadLen / 1.2));
+        Music._lead(Music._deg(scale, root * 2, lDeg), t, lLen, 0.34, th.leadWave);
+        // A single echo, a dotted eighth later, at a third of the level.
+        // Skipped in the busiest themes: it muddies them and it is the most
+        // expensive optional event in the bar.
+        if (th.echo !== false) {
+          Music._lead(Music._deg(scale, root * 2, lDeg), t + dur * 3, lLen * 0.6, 0.11, th.leadWave);
+        }
+      }
+      // Occasional deterministic ornament — a grace note a scale step above.
+      if (Music.boss && step === 14 && Music._h(bar, 7) > 0.7) {
+        Music._lead(Music._deg(scale, root * 2, 8), t, dur * 1.5, 0.16, th.leadWave);
+      }
+    }
+  },
+
+  // ------------------------------------------------------------------- voices
+  // Every builder below creates its nodes, schedules an envelope, starts and
+  // stops in the same call, and returns nothing. There is no persistent
+  // oscillator anywhere in this engine.
+
+  _dest: function (name) {
+    return (Music._v && Music._v[name]) ? Music._v[name] : Music.bus;
+  },
+
+  // Percussive/plucked gain envelope: silent -> peak -> silent, exponential
+  // tail. Never ramps to zero (exponentialRamp to 0 is a RangeError).
+  _env: function (t, dur, peak, atk, dest) {
+    var g = Sound.ctx.createGain();
+    var a = Math.min(atk, dur * 0.4);
     g.gain.setValueAtTime(0.0001, t);
-    g.gain.linearRampToValueAtTime(gain, t + 0.01);
+    g.gain.linearRampToValueAtTime(Math.max(0.0002, peak), t + a);
     g.gain.exponentialRampToValueAtTime(0.0001, t + dur);
-    o.connect(g); g.connect(Music.bus);
-    o.start(t); o.stop(t + dur + 0.02);
+    g.connect(dest);
+    return g;
   },
 
-  perc(dur, filt, gain, t, filtEnd) {
-    if (!Sound.ready() || !Music.bus || !Sound.noiseBuf) return;
-    const s = Sound.ctx.createBufferSource();
+  _osc: function (type, f, t, stopAt, cents) {
+    var o = Sound.ctx.createOscillator();
+    o.type = type;
+    o.frequency.setValueAtTime(Math.max(8, f), t);
+    if (cents) o.detune.setValueAtTime(cents, t);
+    o.start(t);
+    o.stop(stopAt);
+    return o;
+  },
+
+  _noise: function (t, stopAt) {
+    if (!Sound.noiseBuf) return null;
+    var s = Sound.ctx.createBufferSource();
     s.buffer = Sound.noiseBuf;
-    const f = Sound.ctx.createBiquadFilter();
-    f.type = 'highpass';
-    f.frequency.setValueAtTime(filt, t);
-    if (filtEnd) f.frequency.exponentialRampToValueAtTime(Math.max(30, filtEnd), t + dur);
-    const g = Sound.ctx.createGain();
-    g.gain.setValueAtTime(gain, t);
-    g.gain.exponentialRampToValueAtTime(0.0001, t + dur);
-    s.connect(f); f.connect(g); g.connect(Music.bus);
-    s.start(t); s.stop(t + dur);
+    s.loop = true;              // the shared buffer is only 1s long
+    s.start(t);
+    s.stop(stopAt);
+    return s;
   },
 
-  schedule(step, t) {
-    const roots = Music.boss ? Music.BOSS_ROOTS : Music.ROOTS;
-    const root = roots[Music.bar % roots.length];
-    const lv = Music.level;
+  // Sine fundamental plus a quiet octave so it reads on small speakers that
+  // cannot reproduce the fundamental at all.
+  _sub: function (f, t, dur, peak) {
+    if (!Sound.ready() || !Music.bus) return;
+    var end = t + dur;
+    var g = Music._env(t, dur, peak, 0.04, Music._dest('sub'));
+    var o1 = Music._osc('sine', f, t, end + 0.03);
+    o1.connect(g);
+    var o2 = Music._osc('triangle', f * 2, t, end + 0.03);
+    var g2 = Sound.ctx.createGain(); g2.gain.value = 0.22;
+    o2.connect(g2); g2.connect(g);
+  },
 
-    // Kick — always present, the spine of the track.
-    if (step === 0 || step === 8 || (Music.boss && step === 11)) {
-      Music.note(130, 0.16, 'sine', 0.5, t, 40);
+  // Two detuned oscillators through a resonant lowpass that closes over the
+  // note — the classic synth-bass pluck.
+  _bass: function (f, t, dur, peak, wave) {
+    if (!Sound.ready() || !Music.bus) return;
+    var end = t + dur;
+    var c = Sound.ctx;
+    var filt = c.createBiquadFilter();
+    filt.type = 'lowpass';
+    filt.Q.value = 6;
+    filt.frequency.setValueAtTime(Math.min(7000, Math.max(200, f * 12)), t);
+    filt.frequency.exponentialRampToValueAtTime(Math.max(90, f * 2.2), end);
+    var g = Music._env(t, dur, peak, 0.008, Music._dest('bass'));
+    filt.connect(g);
+    var o1 = Music._osc(wave || 'sawtooth', f, t, end + 0.03);
+    o1.connect(filt);
+    var o2 = Music._osc('square', f, t, end + 0.03, -11);
+    var g2 = c.createGain(); g2.gain.value = 0.45;
+    o2.connect(g2); g2.connect(filt);
+  },
+
+  // Slow-attack chord. Each note gets a pair of oscillators a few cents apart
+  // so the chord beats against itself and sounds wide without a reverb.
+  _pad: function (freqs, t, dur, peak, wave, cents) {
+    if (!Sound.ready() || !Music.bus) return;
+    var c = Sound.ctx;
+    var end = t + dur;
+    var g = c.createGain();
+    g.gain.setValueAtTime(0.0001, t);
+    g.gain.linearRampToValueAtTime(Math.max(0.0002, peak), t + dur * 0.35);
+    g.gain.linearRampToValueAtTime(Math.max(0.0002, peak * 0.7), t + dur * 0.7);
+    g.gain.exponentialRampToValueAtTime(0.0001, end);
+    var filt = c.createBiquadFilter();
+    filt.type = 'lowpass';
+    filt.Q.value = 1;
+    filt.frequency.setValueAtTime(400, t);
+    filt.frequency.linearRampToValueAtTime(2600, t + dur * 0.45);
+    filt.frequency.linearRampToValueAtTime(700, end);
+    filt.connect(g);
+    g.connect(Music._dest('pad'));
+    var n = Math.min(4, freqs.length);
+    for (var i = 0; i < n; i++) {
+      var a = Music._osc(wave, freqs[i], t, end + 0.05, -cents);
+      var b = Music._osc(wave, freqs[i], t, end + 0.05, cents);
+      var vg = c.createGain(); vg.gain.value = 1 / n;
+      a.connect(vg); b.connect(vg); vg.connect(filt);
     }
-    // Bass
-    if ([0, 3, 6, 8, 11, 14].includes(step)) {
-      Music.note(root, 0.16, 'square', 0.16, t);
+  },
+
+  // Melody voice: the note plus a quiet octave, through a bandpass that gives
+  // it a formant-ish edge so it cuts through the pad without being loud.
+  _lead: function (f, t, dur, peak, wave) {
+    if (!Sound.ready() || !Music.bus) return;
+    var c = Sound.ctx;
+    var end = t + dur;
+    var bp = c.createBiquadFilter();
+    bp.type = 'bandpass';
+    bp.Q.value = 1.4;
+    bp.frequency.setValueAtTime(Math.min(9000, f * 2.2), t);
+    bp.frequency.exponentialRampToValueAtTime(Math.max(120, f * 1.1), end);
+    var g = Music._env(t, dur, peak, 0.03, Music._dest('lead'));
+    bp.connect(g);
+    var o1 = Music._osc(wave || 'sawtooth', f, t, end + 0.03, 5);
+    o1.connect(bp);
+    var o2 = Music._osc('triangle', f * 2, t, end + 0.03, -6);
+    var g2 = c.createGain(); g2.gain.value = 0.30;
+    o2.connect(g2); g2.connect(bp);
+  },
+
+  // ---- drum kit ----
+  _kick: function (t, vel, soft) {
+    if (!Sound.ready() || !Music.bus) return;
+    var c = Sound.ctx;
+    var dur = soft ? 0.34 : 0.18;
+    var end = t + dur;
+    var g = Music._env(t, dur, 0.85 * vel, 0.004, Music._dest('drum'));
+    var o = Music._osc('sine', soft ? 110 : 150, t, end + 0.02);
+    o.frequency.exponentialRampToValueAtTime(soft ? 32 : 44, end);
+    o.connect(g);
+    var o2 = Music._osc('triangle', soft ? 70 : 92, t, end + 0.02);
+    o2.frequency.exponentialRampToValueAtTime(30, end);
+    var g2 = c.createGain(); g2.gain.value = 0.4;
+    o2.connect(g2); g2.connect(g);
+    // beater click
+    var s = Music._noise(t, t + 0.022);
+    if (s) {
+      var hp = c.createBiquadFilter(); hp.type = 'highpass'; hp.frequency.value = 2200;
+      var cg = Music._env(t, 0.02, 0.22 * vel, 0.001, Music._dest('drum'));
+      s.connect(hp); hp.connect(cg);
     }
-    // Arpeggio from level 3 — minor triad above the root.
-    if (lv >= 3 && step % 2 === 1) {
-      const ratios = [2, 2.378, 3, 4]; // octave, minor 3rd, 5th, two octaves
-      const f = root * ratios[(step >> 1) % ratios.length];
-      Music.note(f, 0.10, 'triangle', 0.075, t);
+  },
+
+  _snare: function (t, vel) {
+    if (!Sound.ready() || !Music.bus) return;
+    var c = Sound.ctx;
+    var dur = 0.15;
+    var s = Music._noise(t, t + dur + 0.02);
+    if (s) {
+      var hp = c.createBiquadFilter();
+      hp.type = 'highpass';
+      hp.frequency.setValueAtTime(1400, t);
+      hp.frequency.exponentialRampToValueAtTime(700, t + dur);
+      var g = Music._env(t, dur, 0.5 * vel, 0.002, Music._dest('drum'));
+      s.connect(hp); hp.connect(g);
     }
-    // Hi-hat from level 6.
-    if (lv >= 6 && step % 2 === 0) {
-      Music.perc(0.035, 7000, 0.10, t);
+    // the shell: two detuned triangles under the noise
+    var tg = Music._env(t, 0.09, 0.30 * vel, 0.002, Music._dest('drum'));
+    var o1 = Music._osc('triangle', 190, t, t + 0.11);
+    o1.frequency.exponentialRampToValueAtTime(120, t + 0.09);
+    o1.connect(tg);
+    var o2 = Music._osc('triangle', 258, t, t + 0.11);
+    o2.frequency.exponentialRampToValueAtTime(160, t + 0.09);
+    var g2 = c.createGain(); g2.gain.value = 0.6;
+    o2.connect(g2); g2.connect(tg);
+  },
+
+  _hat: function (t, vel, open) {
+    if (!Sound.ready() || !Music.bus) return;
+    var c = Sound.ctx;
+    var dur = open ? 0.18 : 0.038;
+    var s = Music._noise(t, t + dur + 0.01);
+    if (!s) return;
+    // One filter, not two: hats are the most frequent event in the whole
+    // engine, so this is the cheapest place to save allocations.
+    var hp = c.createBiquadFilter();
+    hp.type = 'highpass';
+    hp.Q.value = 0.9;
+    hp.frequency.value = open ? 6400 : 8200;
+    var g = Music._env(t, dur, 0.22 * vel, 0.001, Music._dest('drum'));
+    s.connect(hp); hp.connect(g);
+  },
+
+  _crash: function (t, dur, peak) {
+    if (!Sound.ready() || !Music.bus) return;
+    var c = Sound.ctx;
+    var s = Music._noise(t, t + dur + 0.02);
+    if (s) {
+      var hp = c.createBiquadFilter();
+      hp.type = 'highpass';
+      hp.frequency.setValueAtTime(3200, t);
+      hp.frequency.exponentialRampToValueAtTime(1100, t + dur);
+      var g = Music._env(t, dur, peak, 0.004, Music._dest('drum'));
+      s.connect(hp); hp.connect(g);
     }
-    // Snare backbeat from level 4.
-    if (lv >= 4 && (step === 4 || step === 12)) {
-      Music.perc(0.09, 1600, 0.16, t, 600);
+    // a little metal, so it is a cymbal and not just a noise swell
+    var mg = Music._env(t, dur * 0.55, peak * 0.28, 0.003, Music._dest('drum'));
+    var r = [1, 1.51, 2.37];
+    for (var i = 0; i < r.length; i++) {
+      var o = Music._osc('square', 620 * r[i], t, t + dur * 0.55 + 0.02);
+      var og = c.createGain(); og.gain.value = 0.33;
+      o.connect(og); og.connect(mg);
     }
+  },
+
+  _tom: function (t, f, peak) {
+    if (!Sound.ready() || !Music.bus) return;
+    var dur = 0.22;
+    var g = Music._env(t, dur, peak, 0.004, Music._dest('drum'));
+    var o = Music._osc('sine', f, t, t + dur + 0.02);
+    o.frequency.exponentialRampToValueAtTime(Math.max(40, f * 0.45), t + dur);
+    o.connect(g);
+    var o2 = Music._osc('triangle', f * 1.5, t, t + dur * 0.6 + 0.02);
+    o2.frequency.exponentialRampToValueAtTime(Math.max(40, f * 0.6), t + dur * 0.6);
+    var g2 = Sound.ctx.createGain(); g2.gain.value = 0.35;
+    o2.connect(g2); g2.connect(g);
+  },
+
+  // Boss phase change: a short rising stab dropped in wherever we are in the
+  // bar. Deliberately not a bar-aligned event — it should feel like the fight
+  // interrupting the music.
+  _stabHit: function (t, root) {
+    if (!Sound.ready() || !Music.bus) return;
+    var c = Sound.ctx;
+    var dur = 0.42;
+    var g = Music._env(t, dur, 0.5, 0.006, Music._dest('lead'));
+    var o1 = Music._osc('sawtooth', root * 2, t, t + dur + 0.03);
+    o1.frequency.exponentialRampToValueAtTime(root * 6, t + dur);
+    o1.connect(g);
+    var o2 = Music._osc('square', root * 3, t, t + dur + 0.03, 12);
+    o2.frequency.exponentialRampToValueAtTime(root * 9, t + dur);
+    var g2 = c.createGain(); g2.gain.value = 0.4;
+    o2.connect(g2); g2.connect(g);
+    var s = Music._noise(t, t + dur + 0.02);
+    if (s) {
+      var bp = c.createBiquadFilter();
+      bp.type = 'bandpass'; bp.Q.value = 2;
+      bp.frequency.setValueAtTime(400, t);
+      bp.frequency.exponentialRampToValueAtTime(6000, t + dur);
+      var ng = Music._env(t, dur, 0.24, 0.05, Music._dest('drum'));
+      s.connect(bp); bp.connect(ng);
+    }
+  },
+
+  // ---------------------------------------------------------------- voidbirth
+  // The ascension. A one-off swell that is NOT part of the sequencer: it is
+  // scheduled straight onto the audio clock, ducks the bed underneath itself,
+  // and restores the bus gain when it is done. Safe to call at any time,
+  // including with music stopped.
+  voidbirth: function () {
+    if (!Sound.ready() || Sound.muted) return;
+    var c = Sound.ctx;
+    var t = c.currentTime + 0.02;
+    var LEN = 3.4;
+
+    // Duck the bed so the swell owns the moment, then bring it back.
+    if (Music.bus) {
+      var bg = Music.bus.gain;
+      bg.cancelScheduledValues(t);
+      // Anchor on the CURRENT value, not the resting one — two overlapping
+      // cues would otherwise step the gain and click.
+      bg.setValueAtTime(Math.max(0.0001, bg.value), t);
+      bg.linearRampToValueAtTime(Music._base * 0.25, t + 0.25);
+      bg.linearRampToValueAtTime(Music._base * 0.25, t + LEN * 0.6);
+      bg.linearRampToValueAtTime(Music._base, t + LEN);
+    }
+
+    var out = c.createGain();
+    out.gain.value = 0.5;
+    out.connect(Sound.master);
+
+    // 1. A rising stack of fifths, entering one at a time and gliding up.
+    var stack = [55, 82.41, 110, 164.81, 220, 329.63, 440];
+    for (var i = 0; i < stack.length; i++) {
+      var st = t + i * 0.16;
+      var d = LEN - i * 0.22;
+      if (d < 0.4) d = 0.4;
+      var g = c.createGain();
+      g.gain.setValueAtTime(0.0001, st);
+      g.gain.linearRampToValueAtTime(0.09 - i * 0.008, st + d * 0.5);
+      g.gain.exponentialRampToValueAtTime(0.0001, st + d);
+      g.connect(out);
+      var o = c.createOscillator();
+      o.type = i < 3 ? 'sawtooth' : 'triangle';
+      o.frequency.setValueAtTime(stack[i], st);
+      o.frequency.exponentialRampToValueAtTime(stack[i] * 2, st + d);
+      o.connect(g);
+      o.start(st); o.stop(st + d + 0.05);
+    }
+
+    // 2. A noise riser sweeping up into the peak.
+    if (Sound.noiseBuf) {
+      var s = c.createBufferSource();
+      s.buffer = Sound.noiseBuf; s.loop = true;
+      var bp = c.createBiquadFilter();
+      bp.type = 'bandpass'; bp.Q.value = 3;
+      bp.frequency.setValueAtTime(220, t);
+      bp.frequency.exponentialRampToValueAtTime(9000, t + LEN * 0.62);
+      var ng = c.createGain();
+      ng.gain.setValueAtTime(0.0001, t);
+      ng.gain.linearRampToValueAtTime(0.22, t + LEN * 0.6);
+      ng.gain.exponentialRampToValueAtTime(0.0001, t + LEN * 0.95);
+      s.connect(bp); bp.connect(ng); ng.connect(out);
+      s.start(t); s.stop(t + LEN);
+    }
+
+    // 3. The bell at the top of the swell — inharmonic partials, long tail.
+    var peak = t + LEN * 0.62;
+    var bell = [1, 2.01, 2.99, 4.21, 5.43];
+    for (var j = 0; j < bell.length; j++) {
+      var bd = 1.6 - j * 0.22;
+      var bgn = c.createGain();
+      bgn.gain.setValueAtTime(0.0001, peak);
+      bgn.gain.linearRampToValueAtTime(0.07 / (j + 1), peak + 0.01);
+      bgn.gain.exponentialRampToValueAtTime(0.0001, peak + bd);
+      bgn.connect(out);
+      var bo = c.createOscillator();
+      bo.type = 'sine';
+      bo.frequency.setValueAtTime(440 * bell[j], peak);
+      bo.connect(bgn);
+      bo.start(peak); bo.stop(peak + bd + 0.05);
+    }
+
+    // 4. Sub drop under the bell, so the swell has a floor.
+    var sg = c.createGain();
+    sg.gain.setValueAtTime(0.0001, peak);
+    sg.gain.linearRampToValueAtTime(0.30, peak + 0.02);
+    sg.gain.exponentialRampToValueAtTime(0.0001, peak + 1.4);
+    sg.connect(out);
+    var so = c.createOscillator();
+    so.type = 'sine';
+    so.frequency.setValueAtTime(110, peak);
+    so.frequency.exponentialRampToValueAtTime(27.5, peak + 1.2);
+    so.connect(sg);
+    so.start(peak); so.stop(peak + 1.45);
   }
 };
+
+// ---------------------------------------------------------------------------
+// SFX
+// ---------------------------------------------------------------------------
+// One builder per sound name. `Sound.play(name)` consults this table before its
+// own switch, so a name here overrides the built-in.
+//
+// Two pools:
+//   slot(dur)  — for sounds the game fires constantly (laser, hit, ...). Takes
+//                ONE voice from Sound.claimVoice per SOUND, so a thick sound no
+//                longer eats several slots the way per-oscillator claiming did.
+//   free()     — for rare, important sounds (tier reveals, boss phase, death).
+//                Not voice-limited, because being cut off is worse than being
+//                loud, and they cannot stack by their nature.
+// Everything is wrapped in an IIFE so the helpers do not become globals and
+// every key of SFX really is a sound name.
+
+const SFX = (function () {
+
+  function live() {
+    return Sound.ready() && !Sound.muted && !!Sound.sfxBus;
+  }
+  // Rate-limited entry: returns the start time, or null if the voice pool is
+  // full or audio is not available.
+  function slot(dur) {
+    if (!live()) return null;
+    var t = Sound.ctx.currentTime;
+    if (!Sound.claimVoice(t + dur)) return null;
+    return t;
+  }
+  // Unlimited entry, for rare sounds.
+  function free() {
+    if (!live()) return null;
+    return Sound.ctx.currentTime;
+  }
+
+  function env(t, dur, peak, atk, dest) {
+    var g = Sound.ctx.createGain();
+    var a = Math.min(atk, dur * 0.4);
+    g.gain.setValueAtTime(0.0001, t);
+    g.gain.linearRampToValueAtTime(Math.max(0.0002, peak), t + a);
+    g.gain.exponentialRampToValueAtTime(0.0001, t + dur);
+    g.connect(dest || Sound.sfxBus);
+    return g;
+  }
+
+  // A single oscillator with an optional pitch sweep, wired into `dest`.
+  function osc(type, f0, f1, t, dur, peak, dest, atk, cents) {
+    var o = Sound.ctx.createOscillator();
+    o.type = type;
+    o.frequency.setValueAtTime(Math.max(8, f0), t);
+    if (f1) o.frequency.exponentialRampToValueAtTime(Math.max(8, f1), t + dur);
+    if (cents) o.detune.setValueAtTime(cents, t);
+    var g = (peak === null) ? dest : env(t, dur, peak, atk === undefined ? 0.005 : atk, dest);
+    o.connect(g);
+    o.start(t);
+    o.stop(t + dur + 0.03);
+    return o;
+  }
+
+  // Filtered noise. `loop` is set so durations longer than the shared 1s
+  // buffer are not silently truncated.
+  function hiss(t, dur, peak, ftype, f0, f1, q, dest, atk) {
+    if (!Sound.noiseBuf) return;
+    var c = Sound.ctx;
+    var s = c.createBufferSource();
+    s.buffer = Sound.noiseBuf;
+    s.loop = true;
+    var f = c.createBiquadFilter();
+    f.type = ftype || 'lowpass';
+    f.Q.value = q || 1;
+    f.frequency.setValueAtTime(Math.max(20, f0), t);
+    if (f1) f.frequency.exponentialRampToValueAtTime(Math.max(20, f1), t + dur);
+    var g = env(t, dur, peak, atk === undefined ? 0.003 : atk, dest);
+    s.connect(f); f.connect(g);
+    s.start(t);
+    s.stop(t + dur + 0.02);
+  }
+
+  // Inharmonic metal — the basis of every "something broke" sound here.
+  function metal(t, dur, peak, base, ratios, dest, type) {
+    var c = Sound.ctx;
+    var g = env(t, dur, peak, 0.002, dest);
+    for (var i = 0; i < ratios.length; i++) {
+      var o = c.createOscillator();
+      o.type = type || 'square';
+      o.frequency.setValueAtTime(Math.max(8, base * ratios[i]), t);
+      o.frequency.exponentialRampToValueAtTime(Math.max(8, base * ratios[i] * 0.72), t + dur);
+      var vg = c.createGain();
+      vg.gain.value = 1 / (i + 1.4);
+      o.connect(vg); vg.connect(g);
+      o.start(t); o.stop(t + dur + 0.03);
+    }
+  }
+
+  // A private bus for the big one-shots, so a tier reveal can be genuinely
+  // loud without fighting the SFX bus compressor for headroom.
+  function bigBus(gain) {
+    var g = Sound.ctx.createGain();
+    g.gain.value = gain;
+    g.connect(Sound.master);
+    return g;
+  }
+
+  // Duck the music bed under a big cue and restore it.
+  function duck(t, depth, len) {
+    if (!Music || !Music.bus) return;
+    var g = Music.bus.gain;
+    var base = Music._base;
+    g.cancelScheduledValues(t);
+    // Anchor on the current value so overlapping ducks do not step the gain.
+    g.setValueAtTime(Math.max(0.0001, g.value), t);
+    g.linearRampToValueAtTime(base * depth, t + 0.05);
+    g.linearRampToValueAtTime(base * depth, t + len * 0.6);
+    g.linearRampToValueAtTime(base, t + len);
+  }
+
+  // ----- the escalating tier ladder ---------------------------------------
+  // Eleven steps. Every tier is the previous one plus one more idea, so the
+  // ladder is audible rather than just louder: more chord tones, more octaves,
+  // then a riser, then a bell, then a sub drop, then echoes, and finally
+  // DYNACLOCKED which fires all of it plus a pre-roll and a tail.
+  var TIERS = [
+    // chord (semitones), octaves, note gap, dur, peak, wave, riser, bell, sub, echoes, bus
+    { ch: [0, 7],              oct: 1, gap: 0.06, dur: 0.30, pk: 0.16, w: 'triangle', riser: 0,   bell: 0, sub: 0,    ech: 0, bus: 0.5 },
+    { ch: [0, 4, 7],           oct: 1, gap: 0.06, dur: 0.36, pk: 0.17, w: 'triangle', riser: 0,   bell: 0, sub: 0,    ech: 0, bus: 0.55 },
+    { ch: [0, 4, 7, 12],       oct: 1, gap: 0.06, dur: 0.46, pk: 0.17, w: 'sawtooth', riser: 0,   bell: 0, sub: 0,    ech: 0, bus: 0.6 },
+    { ch: [0, 4, 7, 11, 14],   oct: 2, gap: 0.06, dur: 0.60, pk: 0.16, w: 'sawtooth', riser: 0.3, bell: 0, sub: 0,    ech: 0, bus: 0.65 },
+    { ch: [0, 4, 7, 11, 14],   oct: 2, gap: 0.07, dur: 0.80, pk: 0.16, w: 'sawtooth', riser: 0.5, bell: 1, sub: 0,    ech: 0, bus: 0.7 },
+    { ch: [0, 4, 7, 11, 14, 18], oct: 2, gap: 0.07, dur: 1.00, pk: 0.15, w: 'sawtooth', riser: 0.7, bell: 1, sub: 0.9, ech: 0, bus: 0.75 },
+    { ch: [0, 4, 7, 11, 14, 18], oct: 2, gap: 0.07, dur: 1.25, pk: 0.15, w: 'sawtooth', riser: 0.9, bell: 1, sub: 1.1, ech: 1, bus: 0.8 },
+    { ch: [0, 4, 7, 11, 14, 18, 21], oct: 3, gap: 0.06, dur: 1.50, pk: 0.14, w: 'sawtooth', riser: 1.1, bell: 1, sub: 1.3, ech: 1, bus: 0.85 },
+    { ch: [0, 4, 7, 11, 14, 18, 21], oct: 3, gap: 0.06, dur: 1.80, pk: 0.14, w: 'sawtooth', riser: 1.3, bell: 2, sub: 1.5, ech: 2, bus: 0.9 },
+    { ch: [0, 4, 7, 11, 14, 18, 21, 24], oct: 3, gap: 0.055, dur: 2.20, pk: 0.13, w: 'sawtooth', riser: 1.5, bell: 2, sub: 1.8, ech: 2, bus: 0.95 }
+  ];
+
+  function reveal(i) {
+    var t = free();
+    if (t === null) return;
+    var cfg = TIERS[i];
+    var c = Sound.ctx;
+    var bus = bigBus(cfg.bus);
+    var ROOT = 261.63;                     // C4
+    duck(t, 0.45, cfg.dur + 0.6);
+
+    // Riser into the hit.
+    if (cfg.riser) {
+      var rt = t;
+      t = t + cfg.riser;                   // the chord lands after the riser
+      hiss(rt, cfg.riser + 0.05, 0.20, 'bandpass', 300, 7000, 3, bus, cfg.riser * 0.8);
+    }
+
+    // The chord, arpeggiated upward across `oct` octaves.
+    var n = 0;
+    for (var o = 0; o < cfg.oct; o++) {
+      for (var k = 0; k < cfg.ch.length; k++) {
+        var f = ROOT * Math.pow(2, (cfg.ch[k] + 12 * o) / 12);
+        if (f > 9000) continue;
+        var st = t + n * cfg.gap;
+        var d = cfg.dur - n * cfg.gap * 0.35;
+        if (d < 0.2) d = 0.2;
+        var g = env(st, d, cfg.pk, 0.006, bus);
+        osc(cfg.w, f, null, st, d, null, g, 0, -6);
+        osc('triangle', f * 2, null, st, d * 0.7, null, g, 0, 7);
+        n++;
+      }
+    }
+
+    // Bell on top.
+    if (cfg.bell) {
+      var bt = t + 0.02;
+      var rat = [1, 2.01, 2.99, 4.19, 5.41];
+      var bg = env(bt, 1.2 + cfg.bell * 0.6, 0.16, 0.004, bus);
+      for (var b = 0; b < rat.length; b++) {
+        var bo = c.createOscillator();
+        bo.type = 'sine';
+        bo.frequency.setValueAtTime(ROOT * 4 * rat[b], bt);
+        var vg = c.createGain(); vg.gain.value = 1 / (b + 1.5);
+        bo.connect(vg); vg.connect(bg);
+        bo.start(bt); bo.stop(bt + 1.2 + cfg.bell * 0.6 + 0.05);
+      }
+    }
+
+    // Sub drop.
+    if (cfg.sub) {
+      osc('sine', 130, 30, t, cfg.sub, 0.42, bus, 0.01);
+      osc('triangle', 65, 24, t, cfg.sub * 0.8, 0.14, bus, 0.01);
+    }
+
+    // Echo stabs, an eighth apart, decaying.
+    for (var e = 1; e <= cfg.ech; e++) {
+      var et = t + 0.28 * e;
+      var eg = env(et, 0.35, 0.10 / e, 0.004, bus);
+      osc(cfg.w, ROOT * 2, null, et, 0.35, null, eg, 0, -5);
+      osc(cfg.w, ROOT * 3, null, et, 0.35, null, eg, 0, 5);
+    }
+  }
+
+  // The top of the ladder. Deliberately structured as an event rather than a
+  // sound: pre-roll, gap, impact, chord, bell, sub drop, tail.
+  function dyna() {
+    var t0 = free();
+    if (t0 === null) return;
+    var c = Sound.ctx;
+    var bus = bigBus(1.0);
+    var ROOT = 261.63;
+    duck(t0, 0.15, 5.2);
+
+    // 1. Pre-roll: a reverse-swell riser plus a rising, detuning drone.
+    hiss(t0, 1.30, 0.30, 'bandpass', 200, 9000, 3.5, bus, 1.15);
+    osc('sawtooth', 55, 220, t0, 1.30, 0.16, bus, 1.1, -14);
+    osc('sawtooth', 55, 220, t0, 1.30, 0.16, bus, 1.1, 14);
+
+    // 2. A beat of near-silence, then the impact.
+    var t = t0 + 1.42;
+
+    // 3. Impact: sub drop, gong, and a body of noise.
+    osc('sine', 160, 18, t, 2.6, 0.55, bus, 0.006);
+    osc('triangle', 80, 20, t, 2.0, 0.22, bus, 0.006);
+    hiss(t, 2.4, 0.34, 'lowpass', 6000, 90, 1, bus, 0.004);
+    hiss(t, 2.8, 0.22, 'highpass', 2600, 900, 1, bus, 0.004);
+    metal(t, 2.6, 0.26, 180, [1, 1.73, 2.41, 3.62, 5.11, 7.03], bus, 'square');
+
+    // 4. The chord: four octaves of a lydian stack, twelve voices.
+    var ch = [0, 4, 7, 11, 14, 18, 21, 24];
+    var g = env(t, 3.0, 0.10, 0.012, bus);
+    var placed = 0;
+    for (var o = 0; o < 4 && placed < 16; o++) {
+      for (var k = 0; k < ch.length && placed < 16; k++) {
+        var f = ROOT * Math.pow(2, (ch[k] + 12 * (o - 1)) / 12);
+        if (f < 60 || f > 9000) continue;
+        if ((o + k) % 2 === 1) continue;              // thin it out, keep it wide
+        osc('sawtooth', f, null, t + placed * 0.012, 3.0, null, g, 0, (placed % 2 ? 8 : -8));
+        placed++;
+      }
+    }
+
+    // 5. Bell tower on top — five inharmonic partials, very long.
+    var rat = [1, 2.01, 2.99, 4.19, 5.41, 7.02];
+    var bg = env(t + 0.03, 3.4, 0.20, 0.004, bus);
+    for (var b = 0; b < rat.length; b++) {
+      var bo = c.createOscillator();
+      bo.type = 'sine';
+      bo.frequency.setValueAtTime(ROOT * 4 * rat[b], t + 0.03);
+      var vg = c.createGain(); vg.gain.value = 1 / (b + 1.4);
+      bo.connect(vg); vg.connect(bg);
+      bo.start(t + 0.03); bo.stop(t + 3.5);
+    }
+
+    // 5b. A second bell an octave down, and a second sub layer — this is the
+    // one sound in the game that is allowed to be too much.
+    var lg = env(t + 0.05, 4.0, 0.16, 0.006, bus);
+    for (var b2 = 0; b2 < 4; b2++) {
+      var lo = c.createOscillator();
+      lo.type = 'sine';
+      lo.frequency.setValueAtTime(ROOT * 2 * rat[b2], t + 0.05);
+      var lvg = c.createGain(); lvg.gain.value = 1 / (b2 + 1.2);
+      lo.connect(lvg); lvg.connect(lg);
+      lo.start(t + 0.05); lo.stop(t + 4.1);
+    }
+    osc('sine', 55, 16.5, t + 0.02, 3.6, 0.34, bus, 0.02);
+    hiss(t + 0.5, 3.0, 0.10, 'bandpass', 9000, 400, 2, bus, 0.4);
+
+    // 6. Three decaying echo stabs, then a final low toll.
+    for (var e = 1; e <= 3; e++) {
+      var et = t + 0.34 * e;
+      var eg = env(et, 0.5, 0.14 / e, 0.004, bus);
+      osc('sawtooth', ROOT * 2, null, et, 0.5, null, eg, 0, -6);
+      osc('sawtooth', ROOT * 3, null, et, 0.5, null, eg, 0, 6);
+    }
+    metal(t + 1.6, 1.8, 0.14, 90, [1, 2.03, 3.11, 4.4], bus, 'sine');
+
+    // 7. Aftershock. Nothing else in the game gets a second impact.
+    var at = t + 3.05;
+    osc('sine', 120, 17, at, 2.0, 0.40, bus, 0.006);
+    hiss(at, 1.8, 0.22, 'lowpass', 3800, 60, 1, bus, 0.004);
+    metal(at, 1.6, 0.16, 130, [1, 1.73, 2.41, 3.62], bus, 'square');
+    osc('sawtooth', ROOT, null, at, 2.2, 0.09, bus, 0.02, -10);
+    osc('sawtooth', ROOT * 1.5, null, at, 2.2, 0.09, bus, 0.02, 10);
+  }
+
+  // ------------------------------------------------------------------ table
+  return {
+
+    // ---- gameplay ----
+    // Two-layer pew: a saw body sweeping down, a bright square an octave up,
+    // and a transient tick so it has an attack instead of just a pitch.
+    laser: function () {
+      var t = slot(0.16);
+      if (t === null) return;
+      osc('sawtooth', 980, 250, t, 0.10, 0.11, null, 0.002);
+      osc('square', 1960, 620, t, 0.07, 0.045, null, 0.002, 8);
+      hiss(t, 0.03, 0.07, 'highpass', 3800, 1600, 1, null, 0.001);
+    },
+
+    // The quiet tick. Noise for the impact, a short pitched thud for the mass.
+    hit: function () {
+      var t = slot(0.09);
+      if (t === null) return;
+      hiss(t, 0.055, 0.22, 'lowpass', 3400, 700, 1, null, 0.001);
+      osc('triangle', 430, 170, t, 0.06, 0.10, null, 0.002);
+    },
+
+    explode: function () {
+      var t = slot(0.4);
+      if (t === null) return;
+      hiss(t, 0.34, 0.40, 'lowpass', 1500, 70, 1, null, 0.003);
+      osc('sawtooth', 135, 42, t, 0.28, 0.15, null, 0.004);
+      osc('sine', 72, 28, t, 0.36, 0.20, null, 0.004);
+      hiss(t + 0.02, 0.09, 0.14, 'highpass', 3000, 900, 1, null, 0.001);
+    },
+
+    // Rare enough to skip the voice pool — being cut off would be worse than
+    // the extra nodes.
+    bigExplode: function () {
+      var t = free();
+      if (t === null) return;
+      duck(t, 0.5, 1.4);
+      hiss(t, 0.95, 0.44, 'lowpass', 1100, 40, 1, null, 0.004);
+      osc('sawtooth', 88, 26, t, 0.75, 0.18, null, 0.005);
+      osc('sine', 60, 19, t, 1.10, 0.34, null, 0.006);
+      hiss(t, 0.07, 0.26, 'highpass', 4200, 1200, 1, null, 0.001);   // the crack
+      hiss(t + 0.12, 0.62, 0.20, 'lowpass', 420, 30, 1, null, 0.05); // the roll
+      metal(t, 0.5, 0.10, 210, [1, 1.61, 2.83], null, 'square');     // hull debris
+    },
+
+    shieldBreak: function () {
+      var t = slot(0.36);
+      if (t === null) return;
+      osc('triangle', 1560, 330, t, 0.28, 0.18, null, 0.002);
+      osc('square', 2340, 700, t, 0.20, 0.07, null, 0.002, -10);
+      hiss(t, 0.18, 0.15, 'highpass', 5400, 1200, 1, null, 0.001);
+      // three glassy shards falling away
+      osc('sine', 2400, 1200, t + 0.05, 0.16, 0.05, null, 0.002);
+      osc('sine', 1900, 950, t + 0.10, 0.16, 0.04, null, 0.002);
+    },
+
+    // Not in the brief's list, but the game calls it on death, and the
+    // built-in was a bare single saw.
+    death: function () {
+      var t = free();
+      if (t === null) return;
+      duck(t, 0.25, 2.0);
+      osc('sawtooth', 440, 55, t, 1.10, 0.20, null, 0.01);
+      osc('square', 220, 27, t, 1.30, 0.11, null, 0.01, -12);
+      osc('sine', 110, 20, t, 1.60, 0.26, null, 0.02);
+      hiss(t, 1.40, 0.16, 'lowpass', 1400, 60, 1, null, 0.03);
+    },
+
+    // Klaxon. Two beating squares per blast so it wavers instead of sitting
+    // still, three blasts, with an air-horn tail under the first.
+    warning: function () {
+      var t = slot(0.3);
+      if (t === null) return;
+      for (var i = 0; i < 3; i++) {
+        var a = t + i * 0.6;
+        osc('square', 330, null, a, 0.26, 0.10, null, 0.006);
+        osc('sawtooth', 330, null, a, 0.26, 0.05, null, 0.006, 9);
+        var b = a + 0.30;
+        osc('square', 247, null, b, 0.26, 0.10, null, 0.006);
+        osc('sawtooth', 247, null, b, 0.26, 0.05, null, 0.006, -9);
+      }
+      hiss(t, 0.30, 0.08, 'bandpass', 900, 400, 4, null, 0.02);
+    },
+
+    levelUp: function () {
+      var t = free();
+      if (t === null) return;
+      var n = [523.25, 659.25, 783.99, 1046.5];
+      for (var i = 0; i < n.length; i++) {
+        var st = t + i * 0.055;
+        osc('triangle', n[i], null, st, 0.45, 0.12, null, 0.006);
+        osc('sawtooth', n[i] * 2, null, st, 0.22, 0.035, null, 0.006, 6);
+      }
+      hiss(t, 0.45, 0.07, 'highpass', 4000, 9000, 1, null, 0.2);
+      osc('sine', 130.8, null, t, 0.5, 0.16, null, 0.01);
+    },
+
+    apex: function () {
+      var t = free();
+      if (t === null) return;
+      osc('sawtooth', 880, 1760, t, 0.55, 0.16, null, 0.006);
+      osc('triangle', 1320, 2640, t, 0.72, 0.11, null, 0.006);
+      osc('square', 440, 880, t, 0.60, 0.05, null, 0.006, -8);
+      osc('sine', 110, 220, t, 0.8, 0.22, null, 0.01);
+      hiss(t, 0.7, 0.14, 'bandpass', 700, 8000, 3, null, 0.35);
+    },
+
+    // ---- UI ----
+    uiMove: function () {
+      var t = slot(0.07);
+      if (t === null) return;
+      osc('square', 700, null, t, 0.05, 0.075, null, 0.001);
+      osc('triangle', 1400, null, t, 0.035, 0.03, null, 0.001, 6);
+    },
+
+    uiBuy: function () {
+      var t = slot(0.28);
+      if (t === null) return;
+      var n = [523.25, 783.99];
+      for (var i = 0; i < n.length; i++) {
+        var st = t + i * 0.09;
+        osc('triangle', n[i], null, st, 0.16, 0.16, null, 0.003);
+        osc('sine', n[i] * 2, null, st, 0.10, 0.06, null, 0.003);
+      }
+      hiss(t, 0.04, 0.06, 'highpass', 5000, 2000, 1, null, 0.001);
+    },
+
+    uiDeny: function () {
+      var t = slot(0.18);
+      if (t === null) return;
+      osc('square', 185, 118, t, 0.13, 0.11, null, 0.002);
+      osc('sawtooth', 92, 60, t, 0.16, 0.07, null, 0.002, 11);
+      hiss(t, 0.06, 0.09, 'lowpass', 900, 200, 1, null, 0.001);
+    },
+
+    // ---- the hangar ----
+    // Heavy, mechanical, low. Clamps landing should feel like tonnage.
+    dock: function () {
+      var t = free();
+      if (t === null) return;
+      hiss(t, 0.20, 0.28, 'lowpass', 950, 120, 1, null, 0.002);
+      osc('square', 96, 60, t, 0.34, 0.20, null, 0.004);
+      osc('sine', 64, 40, t + 0.06, 0.52, 0.18, null, 0.006);
+      metal(t + 0.01, 0.30, 0.09, 300, [1, 2.41, 3.77], null, 'square');
+      osc('sine', 44, 22, t + 0.05, 0.7, 0.16, null, 0.01);
+    },
+
+    // One card coming off the build. Short, downward, slightly sour.
+    strip: function () {
+      var t = slot(0.26);
+      if (t === null) return;
+      osc('sawtooth', 430, 120, t, 0.18, 0.13, null, 0.003);
+      osc('square', 215, 68, t, 0.22, 0.07, null, 0.003, -14);
+      hiss(t, 0.10, 0.11, 'lowpass', 1900, 400, 1, null, 0.001);
+    },
+
+    // ---- events ----
+    // The ascension hit. Music.voidbirth() plays the long bed swell; this is
+    // the transient that sells the moment.
+    voidbirth: function () {
+      var t = free();
+      if (t === null) return;
+      var bus = bigBus(0.8);
+      var st = [110, 165, 220, 330, 440];
+      for (var i = 0; i < st.length; i++) {
+        var a = t + i * 0.12;
+        osc(i < 2 ? 'sawtooth' : 'triangle', st[i], st[i] * 4, a, 1.6 - i * 0.14, 0.13, bus, 0.02);
+        osc('sine', st[i] * 2, st[i] * 8, a, 0.9 - i * 0.1, 0.05, bus, 0.02);
+      }
+      hiss(t + 0.2, 1.9, 0.17, 'bandpass', 300, 8500, 2.5, bus, 1.2);
+      osc('sine', 55, 27.5, t + 1.0, 1.4, 0.30, bus, 0.02);
+    },
+
+    // A boss changing gear. Two hard stabs and a rising tail.
+    bossPhase: function () {
+      var t = free();
+      if (t === null) return;
+      duck(t, 0.4, 1.0);
+      osc('sawtooth', 220, 880, t, 0.32, 0.20, null, 0.004);
+      osc('square', 330, 1320, t + 0.07, 0.34, 0.14, null, 0.004);
+      osc('sine', 110, 55, t, 0.5, 0.24, null, 0.006);
+      hiss(t, 0.26, 0.17, 'lowpass', 2600, 300, 1, null, 0.002);
+      hiss(t + 0.06, 0.5, 0.12, 'bandpass', 500, 6000, 3, null, 0.3);
+    },
+
+    // An armour plate shearing off. Metal, not an explosion: inharmonic
+    // partials over a rip of filtered noise, with a dead-weight thud under it.
+    plateBreak: function () {
+      var t = free();
+      if (t === null) return;
+      metal(t, 0.55, 0.24, 260, [1, 2.76, 4.11, 5.42, 7.31], null, 'square');
+      hiss(t, 0.28, 0.26, 'highpass', 3600, 700, 1.4, null, 0.002);
+      osc('triangle', 190, 62, t, 0.24, 0.16, null, 0.003);
+      osc('sine', 95, 38, t + 0.05, 0.45, 0.22, null, 0.006);   // the thud
+      hiss(t + 0.16, 0.3, 0.10, 'bandpass', 2200, 800, 3, null, 0.02);
+    },
+
+    // A rock arriving. Sub drop, a wide body of noise, and a debris tail.
+    meteorImpact: function () {
+      var t = free();
+      if (t === null) return;
+      duck(t, 0.5, 1.2);
+      osc('sine', 74, 21, t, 0.95, 0.46, null, 0.004);
+      osc('triangle', 148, 34, t, 0.55, 0.16, null, 0.004);
+      osc('sawtooth', 110, 30, t, 0.40, 0.10, null, 0.004, -18);
+      hiss(t, 0.75, 0.34, 'lowpass', 2200, 45, 1, null, 0.003);
+      hiss(t + 0.10, 0.60, 0.14, 'highpass', 1800, 400, 1, null, 0.04);
+      metal(t + 0.03, 0.35, 0.08, 140, [1, 1.94, 3.31], null, 'triangle');
+    },
+
+    // ---- tier reveals: the ladder ----
+    tierReveal_COMMON:       function () { reveal(0); },
+    tierReveal_UNCOMMON:     function () { reveal(1); },
+    tierReveal_RARE:         function () { reveal(2); },
+    tierReveal_EPIC:         function () { reveal(3); },
+    tierReveal_LEGENDARY:    function () { reveal(4); },
+    tierReveal_MYTHIC:       function () { reveal(5); },
+    tierReveal_APEX:         function () { reveal(6); },
+    tierReveal_OVERCLOCKED:  function () { reveal(7); },
+    tierReveal_HYPERCLOCKED: function () { reveal(8); },
+    tierReveal_UBERCLOCKED:  function () { reveal(9); },
+    tierReveal_DYNACLOCKED:  function () { dyna(); }
+  };
+})();
+// ---- end audio pack ----
 
 // ===== STATE =====
 
@@ -1767,6 +3010,9 @@ function beginVoidbirth(info) {
   levelBanner = null;
   state = 'voidbirth';
   Music.setBoss(false);
+  // The track gets its own ascension cue on top of the sound effect — the
+  // sequence runs for about six seconds and silence under it would be flat.
+  if (Music.voidbirth) Music.voidbirth();
   Sound.play('voidbirth');
 }
 
@@ -3192,7 +4438,7 @@ BOSS.scrapjaw = {
       plate.gone = true;
       spawnParticles(b.x + plate.x, b.y + 10, '#cc9955', 20);
       FX.addShake(12);
-      Sound.play('shieldBreak');
+      Sound.play('plateBreak');
       addFlashText('PLATE OFF', b.x + plate.x, b.y, '#ffcc66');
     }
     return 0;
@@ -9825,7 +11071,8 @@ function update() {
         a.hp -= b.damage;
         a.flash = 3;
         spawnParticles(b.x, b.y, '#aaaaaa', 4);
-        Sound.play('hit');
+        // Rock sounds like rock, not like hitting a ship.
+        Sound.play('meteorImpact');
         if (a.hp <= 0) {
           if (a.big) {
             for (let i = 0; i < 2; i++) asteroids.push({...makeAsteroid(false), x: a.x + (i?15:-15), y: a.y, vy: a.vy*1.2});
@@ -10712,7 +11959,13 @@ function noteApex() {
   // paints this counter itself.
   shopApexFlash = 34;
   FX.addShake(10);
-  Sound.play('apex');
+  // Each loud tier has its own reveal, escalating all the way to DYNACLOCKED —
+  // the rarest roll in the game should not sound like the seventh-rarest. The
+  // deepest tier on offer wins, so a shop showing two loud cards announces the
+  // better one.
+  const deepest = loud.reduce((a, s) =>
+    RLCore.tierIndexOf(s.tier) > RLCore.tierIndexOf(a.tier) ? s : a, loud[0]);
+  Sound.play('tierReveal_' + deepest.tier);
 }
 
 function updateShop() {
