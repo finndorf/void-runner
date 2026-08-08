@@ -60,192 +60,569 @@ const CFG = {
 
 const RLCore = {};
 
-RLCore.SAVE_VERSION = 2;
+RLCore.SAVE_VERSION = 3;
 
-// Upgrading rather than resetting is the whole point: the old loader threw away
-// any save whose version did not match, which would wipe every player's credits
-// and ships the moment the format changed.
+// Upgrading rather than resetting is the whole point: a loader that throws away
+// any save whose version does not match would wipe every player's credits and
+// ships the moment the format changed. v1 and v2 both upgrade in place.
 RLCore.migrateSave = function (parsed, defaults) {
   if (!parsed || typeof parsed !== 'object') return { data: defaults, ok: false };
   const v = parsed.version;
-  if (v !== 1 && v !== RLCore.SAVE_VERSION) return { data: defaults, ok: false };
+  if (v !== 1 && v !== 2 && v !== RLCore.SAVE_VERSION) return { data: defaults, ok: false };
 
   const data = Object.assign({}, defaults, parsed);
   data.version = RLCore.SAVE_VERSION;
-  if (v === 1) {
-    data.bestScrapSpent = 0;
-    data.apexFound = 0;
+  if (v === 1) { data.bestScrapSpent = 0; data.apexFound = 0; }
+  if (v === 1 || v === 2) {
+    data.voidbirths = 0;
+    data.bestLevel = Math.max(1, data.bestLevel || 1);
+    data.bestVoidbirth = 0;
+    data.tiersFound = {};
+    data.bossesKilled = {};
   }
+  if (!data.tiersFound || typeof data.tiersFound !== 'object') data.tiersFound = {};
+  if (!data.bossesKilled || typeof data.bossesKilled !== 'object') data.bossesKilled = {};
   if (!Array.isArray(data.unlocked) || !data.unlocked.length) data.unlocked = ['vanguard'];
   if (typeof data.selectedShip !== 'string' || !data.unlocked.includes(data.selectedShip)) data.selectedShip = 'vanguard';
   return { data, ok: true };
 };
 
+// ---------------------------------------------------------------------------
+// RARITY
+// ---------------------------------------------------------------------------
+
 RLCore.TIERS = [
-  { id: 'COMMON',    name: 'COMMON',    price:  240, color: '#b8c4d0', stackLimit: 5 },
-  { id: 'UNCOMMON',  name: 'UNCOMMON',  price:  500, color: '#44dd77', stackLimit: 5 },
-  { id: 'RARE',      name: 'RARE',      price:  900, color: '#3399ff', stackLimit: 1 },
-  { id: 'EPIC',      name: 'EPIC',      price: 2100, color: '#aa66ff', stackLimit: 1 },
-  { id: 'LEGENDARY', name: 'LEGENDARY', price: 4500, color: '#ffaa22', stackLimit: 1 },
-  { id: 'APEX',      name: 'APEX',      price: 9000, color: '#00ffee', stackLimit: 1 }
+  { id: 'COMMON',       name: 'COMMON',       price:   240, color: '#b8c4d0', color2: '#8c98a4', stackLimit: 5 },
+  { id: 'UNCOMMON',     name: 'UNCOMMON',     price:   500, color: '#44dd77', color2: '#22aa55', stackLimit: 5 },
+  { id: 'RARE',         name: 'RARE',         price:   900, color: '#3399ff', color2: '#1166cc', stackLimit: 3 },
+  { id: 'EPIC',         name: 'EPIC',         price:  2100, color: '#aa66ff', color2: '#7733cc', stackLimit: 2 },
+  { id: 'LEGENDARY',    name: 'LEGENDARY',    price:  4500, color: '#ffaa22', color2: '#cc7700', stackLimit: 1 },
+  { id: 'MYTHIC',       name: 'MYTHIC',       price:  7000, color: '#ff3388', color2: '#aa0055', stackLimit: 1 },
+  { id: 'APEX',         name: 'APEX',         price: 11000, color: '#00ffee', color2: '#ffdd33', stackLimit: 1 },
+  { id: 'OVERCLOCKED',  name: 'OVERCLOCKED',  price: 20000, color: '#ffffff', color2: '#ff66ff', stackLimit: 1 },
+  { id: 'HYPERCLOCKED', name: 'HYPERCLOCKED', price: 34000, color: '#ff00cc', color2: '#00ffcc', stackLimit: 1 },
+  { id: 'UBERCLOCKED',  name: 'UBERCLOCKED',  price: 55000, color: '#ffcc00', color2: '#ff3300', stackLimit: 1 },
+  { id: 'DYNACLOCKED',  name: 'DYNACLOCKED',  price: 90000, color: '#ffffff', color2: '#000000', stackLimit: 1 }
 ];
 
-RLCore.BASE_WEIGHTS = { COMMON: 52, UNCOMMON: 27, RARE: 13, EPIC: 6, LEGENDARY: 1.7, APEX: 0.3 };
+RLCore.MAX_TIER_INDEX = RLCore.TIERS.length - 1;
 
-// Depth drift takes weight off COMMON and spreads it across UNCOMMON..LEGENDARY
-// in proportion to their base weights. APEX is deliberately excluded: it is the
-// one probability the player can rely on never changing.
-RLCore.rarityWeights = function (level) {
-  const w = Object.assign({}, RLCore.BASE_WEIGHTS);
-  const steps = Math.max(0, Math.min(level, 12) - 2);
-  const drift = 1.5 * steps;
+// The odds, expressed once. Position i of this vector is the weight of the
+// tier `i` rungs above the current floor -- so a voidbirth shifts the whole
+// vector one rung up the ladder and every tier inherits the odds of the tier
+// below it, which is exactly the rule the design asks for.
+RLCore.WEIGHT_VECTOR = [51.5, 27, 13, 6, 1.7, 0.49, 0.30, 0.01];
+
+RLCore.VOIDBIRTH_LEVELS = [50, 100, 200, 350, 500];
+RLCore.MAX_VOIDBIRTH = RLCore.VOIDBIRTH_LEVELS.length;
+
+// The three deepest positions of the vector never drift with depth. They are
+// the one set of odds a player can rely on never moving, which is what makes
+// an APEX feel earned rather than inevitable.
+RLCore.UNDRIFTABLE_POSITIONS = 3;
+RLCore.DRIFT_PER_LEVEL = 0.5;
+RLCore.DRIFT_MAX = 20;
+
+RLCore.clampVoidbirth = function (vb) {
+  return Math.max(0, Math.min(RLCore.MAX_VOIDBIRTH, Math.floor(vb || 0)));
+};
+
+// Index of the lowest tier still offered at this voidbirth depth.
+RLCore.floorTierIndex = function (vb) {
+  return Math.min(RLCore.MAX_TIER_INDEX, RLCore.clampVoidbirth(vb));
+};
+
+// How many levels into the current voidbirth segment `level` sits. Drift
+// resets at each voidbirth so every ascension starts the odds fresh.
+RLCore.levelsIntoSegment = function (level, vb) {
+  const v = RLCore.clampVoidbirth(vb);
+  const start = v === 0 ? 0 : RLCore.VOIDBIRTH_LEVELS[v - 1];
+  return Math.max(0, (level || 1) - start - 1);
+};
+
+RLCore.rarityWeights = function (level, vb) {
+  const v = RLCore.clampVoidbirth(vb);
+  const w = {};
+  RLCore.TIERS.forEach(t => { w[t.id] = 0; });
+
+  // Shift the vector up by the voidbirth count. Anything that would fall off
+  // the top of the ladder piles onto the last tier, so the weights always sum
+  // to exactly 100 no matter how deep the player is.
+  const V = RLCore.WEIGHT_VECTOR;
+  for (let i = 0; i < V.length; i++) {
+    const idx = Math.min(RLCore.MAX_TIER_INDEX, i + v);
+    w[RLCore.TIERS[idx].id] += V[i];
+  }
+
+  // Depth drift: weight moves off the floor tier into the four rungs above it.
+  const drift = Math.min(RLCore.DRIFT_MAX, RLCore.DRIFT_PER_LEVEL * RLCore.levelsIntoSegment(level, v));
   if (drift <= 0) return w;
-  w.COMMON -= drift;
-  const mid = ['UNCOMMON', 'RARE', 'EPIC', 'LEGENDARY'];
-  const midTotal = mid.reduce((a, k) => a + RLCore.BASE_WEIGHTS[k], 0);
-  mid.forEach(k => { w[k] += drift * (RLCore.BASE_WEIGHTS[k] / midTotal); });
+
+  const floorIdx = RLCore.floorTierIndex(v);
+  const floorId = RLCore.TIERS[floorIdx].id;
+  const topDriftable = Math.min(RLCore.MAX_TIER_INDEX, v + V.length - 1 - RLCore.UNDRIFTABLE_POSITIONS);
+  const mid = [];
+  for (let idx = floorIdx + 1; idx <= topDriftable; idx++) mid.push(RLCore.TIERS[idx].id);
+  if (!mid.length) return w;
+
+  const midTotal = mid.reduce((a, id) => a + w[id], 0);
+  if (midTotal <= 0) return w;
+
+  const actual = Math.min(drift, w[floorId]);
+  w[floorId] -= actual;
+  mid.forEach(id => { w[id] += actual * (w[id] / midTotal); });
   return w;
 };
 
-RLCore.rollRarity = function (level, rnd) {
-  const w = RLCore.rarityWeights(level);
+RLCore.rollRarity = function (level, vb, rnd) {
+  const w = RLCore.rarityWeights(level, vb);
   let r = rnd() * 100;
   for (const t of RLCore.TIERS) {
     r -= w[t.id];
     if (r < 0) return t.id;
   }
-  return 'COMMON';
+  return RLCore.TIERS[RLCore.floorTierIndex(vb)].id;
 };
 
-// Effect keys are read by RLCore.resolveStats. Multiplicative keys end in Mul
-// and are summed then applied once; flags are booleans or counts.
+// ---------------------------------------------------------------------------
+// THE HP ECONOMY
+// ---------------------------------------------------------------------------
+// Anchored on three numbers: a base shot deals 10, a level-1 grunt has 20 HP,
+// and the level-2500 mothership has 10,000,000 and takes about four minutes.
+// Everything between those anchors is fitted, not guessed --
+// docs/superpowers/specs/2026-08-08-void-ascension-design.md shows the fit.
+
+RLCore.BASE_DAMAGE = 10;
+RLCore.BASE_FIRE_RATE = 10;   // frames between shots; lower is faster
+RLCore.MIN_FIRE_RATE = 6;     // 10 shots/sec, so aiming never stops mattering
+RLCore.HP_EXPONENT = 0.92;
+
+RLCore.ENEMY_HP = {
+  swarmling: 8, kamikaze: 14, grunt: 20, mine: 24, weaver: 35,
+  lancer: 45, elite: 60, turret: 90, bulwark: 160, harbinger: 400
+};
+
+RLCore.enemyHp = function (kind, level) {
+  const base = RLCore.ENEMY_HP[kind];
+  if (typeof base !== 'number') throw new Error('RLCore.enemyHp: unknown kind "' + kind + '"');
+  return Math.max(1, Math.round(base * Math.pow(Math.max(1, level), RLCore.HP_EXPONENT)));
+};
+
+// Enemies grow as well as toughen, so a deep-run grunt reads as a real ship
+// rather than the same sprite with a bigger number behind it.
+RLCore.ENEMY_SCALE_CAP = 2.4;
+RLCore.enemyScale = function (level) {
+  return Math.min(RLCore.ENEMY_SCALE_CAP, 1 + Math.pow(Math.max(1, level), 0.35) / 22);
+};
+
+RLCore.METEORS = [
+  { id: 'ice',        name: 'ICE',               from:    1, hp:   30, behaviour: 'shatter' },
+  { id: 'iron',       name: 'IRON',              from:   25, hp:  120, behaviour: 'solid' },
+  { id: 'obsidian',   name: 'OBSIDIAN',          from:  100, hp:  400, behaviour: 'split' },
+  { id: 'voidglass',  name: 'VOIDGLASS',         from:  400, hp: 1400, behaviour: 'refract' },
+  { id: 'shard',      name: 'SINGULARITY SHARD', from: 1000, hp: 5000, behaviour: 'pull' }
+];
+
+RLCore.meteorsFor = function (level) {
+  return RLCore.METEORS.filter(m => level >= m.from);
+};
+
+// ---------------------------------------------------------------------------
+// BOSSES
+// ---------------------------------------------------------------------------
+// Seventeen hand-built fights. Each `key` selects a distinct update and draw
+// path -- these deliberately share no attack code, which is the whole point.
+
+RLCore.BOSS_TABLE = [
+  { level:   10, key: 'scrapjaw',     name: 'SCRAPJAW',            hp:     6600, phases: 2, mechanic: 'armour plates absorb all damage until broken off' },
+  { level:   20, key: 'halowarden',   name: 'HALO WARDEN',         hp:    14000, phases: 3, mechanic: 'a rotating shield ring with a single gap' },
+  { level:   30, key: 'choir',        name: 'THE CHOIR',           hp:    21000, phases: 3, mechanic: 'three heads, one HP pool, kill order matters' },
+  { level:   40, key: 'magnetar',     name: 'MAGNETAR',            hp:    30000, phases: 3, mechanic: 'polarity flips between pulling you in and shoving you out' },
+  { level:   50, key: 'voidgate',     name: 'VOIDGATE PRIME',      hp:    38000, phases: 4, mechanic: 'spawns mirrors of your own ship running your build' },
+  { level:   75, key: 'rustfall',     name: 'RUSTFALL',            hp:    62000, phases: 3, mechanic: 'sheds permanent wreckage that fills the arena' },
+  { level:  100, key: 'longsilence',  name: 'THE LONG SILENCE',    hp:    88000, phases: 4, mechanic: 'kills the lights; you fight by muzzle flash' },
+  { level:  150, key: 'hiveempress',  name: 'HIVE EMPRESS',        hp:   148000, phases: 4, mechanic: 'regenerates unless her brood is cleared' },
+  { level:  200, key: 'cartographer', name: 'THE CARTOGRAPHER',    hp:   217000, phases: 4, mechanic: 'detonates telegraphed cells of a lit grid' },
+  { level:  250, key: 'nullpoint',    name: 'NULLPOINT',           hp:   295000, phases: 4, mechanic: 'jams one of your upgrades at a time' },
+  { level:  300, key: 'sevenangles',  name: 'SEVEN ANGLES',        hp:   381000, phases: 5, mechanic: 'a polygon that gains a side, and a gun, each phase' },
+  { level:  350, key: 'widow',        name: 'THE WIDOW',           hp:   474000, phases: 4, mechanic: 'a tether that hurts while taut, so you must close in' },
+  { level:  400, key: 'choirmaster',  name: 'ASHEN CHOIRMASTER',   hp:   576000, phases: 5, mechanic: 'every attack lands on an audible four-beat bar' },
+  { level:  500, key: 'threshold',    name: 'THE THRESHOLD',       hp:   800000, phases: 5, mechanic: 'copies your build and fights you with it' },
+  { level:  750, key: 'paleherald',   name: 'PALE HERALD',         hp:  1500000, phases: 5, mechanic: 'destructible hangar bays guard the core' },
+  { level: 1000, key: 'ironlitany',   name: 'IRON LITANY',         hp:  2300000, phases: 6, mechanic: 'so large the fight scrolls sideways along its flank' },
+  { level: 2500, key: 'mothership',   name: 'THE DREADED SCOURGE OF HUMANITY — WARR MOTHERSHIP',
+                                                                   hp: 10000000, phases: 7, mechanic: 'the Devouring: it eats the arena permanently, phase by phase' }
+];
+
+RLCore.ARMADA_INTERVAL = 100;
+
+RLCore.isBossLevel = function (level) {
+  if (!(level > 0)) return false;
+  if (RLCore.BOSS_TABLE.some(b => b.level === level)) return true;
+  return level > 1000 && level % RLCore.ARMADA_INTERVAL === 0;
+};
+
+// The curve the table was fitted from. Used for the ARMADA escorts that fill
+// the 1100-2400 stretch, so their health sits on the same line as the
+// hand-set bosses rather than on a second, disagreeing one.
+RLCore.fittedBossHp = function (level) {
+  const dps = 265 * Math.pow(level / 10, 0.917);
+  const dur = 25 + 215 * Math.pow(Math.max(0, level - 10) / 2490, 0.8);
+  const raw = dps * dur;
+  if (raw < 10000) return Math.round(raw / 100) * 100;
+  if (raw < 1000000) return Math.round(raw / 1000) * 1000;
+  return Math.round(raw / 100000) * 100000;
+};
+
+RLCore.bossFor = function (level) {
+  const exact = RLCore.BOSS_TABLE.find(b => b.level === level);
+  if (exact) return exact;
+  if (!RLCore.isBossLevel(level)) return null;
+
+  // Past the Mothership it returns, harder and with another phase, every
+  // hundred levels -- the run does not simply stop having a summit.
+  if (level > 2500) {
+    const n = Math.floor((level - 2500) / RLCore.ARMADA_INTERVAL);
+    const base = RLCore.BOSS_TABLE[RLCore.BOSS_TABLE.length - 1];
+    return {
+      level, key: 'mothership', name: 'SCOURGE ASCENDANT ×' + n,
+      hp: Math.round(base.hp * Math.pow(1.6, n)),
+      phases: Math.min(12, base.phases + n),
+      mechanic: base.mechanic, ascendant: n
+    };
+  }
+
+  // 1100-2400: a WARR ARMADA escort, compositing two earlier bosses into a
+  // fight neither of them was. Honestly combinatorial rather than bespoke,
+  // and labelled as such so it reads as a system, not a recolour.
+  const pool = RLCore.BOSS_TABLE.filter(b => b.level <= 1000);
+  const n = (level - 1100) / RLCore.ARMADA_INTERVAL;
+  const a = pool[n % pool.length];
+  const b = pool[(n * 7 + 3) % pool.length];
+  return {
+    level, key: 'armada', name: 'WARR ARMADA — ' + a.name + ' / ' + b.name,
+    hp: RLCore.fittedBossHp(level),
+    phases: 4, mechanic: a.mechanic + ', and ' + b.mechanic,
+    composite: [a.key, b.key]
+  };
+};
+
+RLCore.bossHp = function (level) {
+  const b = RLCore.bossFor(level);
+  return b ? b.hp : 0;
+};
+
+RLCore.nextBossLevel = function (level) {
+  for (const b of RLCore.BOSS_TABLE) if (b.level > level) return b.level;
+  return (Math.floor(level / RLCore.ARMADA_INTERVAL) + 1) * RLCore.ARMADA_INTERVAL;
+};
+
+// ---------------------------------------------------------------------------
+// SHOP CADENCE
+// ---------------------------------------------------------------------------
+// Shops thin out as you ascend, so each visit carries more weight. Scrap
+// income rises to match (see scrapForKill), keeping purchasing power per
+// level roughly flat rather than starving the deep game.
+
+RLCore.SHOP_EVERY = [1, 2, 4, 8, 8, 8];
+
+RLCore.shopEvery = function (vb) {
+  return RLCore.SHOP_EVERY[RLCore.clampVoidbirth(vb)];
+};
+
+// Called after clearing `level`. A shop always opens before a boss, whatever
+// the cadence says -- walking into SEVEN ANGLES with no chance to prepare
+// would be a difficulty spike made of bookkeeping rather than design.
+RLCore.shopOpensAfter = function (level, vb) {
+  if (RLCore.isBossLevel(level + 1)) return true;
+  return level % RLCore.shopEvery(vb) === 0;
+};
+
+// ---------------------------------------------------------------------------
+// VOIDBIRTH
+// ---------------------------------------------------------------------------
+
+RLCore.voidbirthIndexAt = function (level) {
+  return RLCore.VOIDBIRTH_LEVELS.indexOf(level);
+};
+
+RLCore.isVoidbirthLevel = function (level) {
+  return RLCore.voidbirthIndexAt(level) !== -1;
+};
+
+// A voidbirth is earned by clearing the boss ON the voidbirth level, so it
+// always lands immediately after a summit rather than in the middle of a wave.
+RLCore.voidbirthAfterClearing = function (level, vb) {
+  const idx = RLCore.voidbirthIndexAt(level);
+  if (idx === -1) return null;
+  if (RLCore.clampVoidbirth(vb) !== idx) return null;   // already taken
+  return { to: idx + 1, numeral: RLCore.ROMAN[idx], unlocks: RLCore.tierUnlockedAt(idx + 1) };
+};
+
+RLCore.ROMAN = ['I', 'II', 'III', 'IV', 'V'];
+
+// Which tier becomes reachable for the first time at this voidbirth depth.
+RLCore.tierUnlockedAt = function (vb) {
+  const v = RLCore.clampVoidbirth(vb);
+  const idx = v + RLCore.WEIGHT_VECTOR.length - 1;
+  return idx <= RLCore.MAX_TIER_INDEX ? RLCore.TIERS[idx].id : null;
+};
+
+RLCore.tierReachable = function (tierId, vb) {
+  return RLCore.rarityWeights(1, vb)[tierId] > 0;
+};
+
+// ---------------------------------------------------------------------------
+// UPGRADES
+// ---------------------------------------------------------------------------
+// `line` marks a lineage: at voidbirth depth N the upgrade sits N tiers higher,
+// carries the Nth name, and its numbers scale by LINEAGE_GROWTH^N. This is what
+// keeps RELOAD COIL in the game at level 2000 -- as RELOAD SINGULARITY, doing
+// twenty times as much. Upgrades without a `line` still climb and still scale;
+// they simply keep their name.
+
+RLCore.LINEAGE_GROWTH = 2.2;
+
 RLCore.UPGRADES = [
-  // --- COMMON ---
-  { id: 'reload_coil',  tier: 'COMMON', name: 'RELOAD COIL',  desc: '+8% fire rate',      effect: { fireRateMul: 0.08 } },
-  { id: 'heavy_rounds', tier: 'COMMON', name: 'HEAVY ROUNDS', desc: '+10% damage',        effect: { damageMul: 0.10 } },
-  { id: 'thrusters',    tier: 'COMMON', name: 'THRUSTERS',    desc: '+8% move speed',     effect: { speedMul: 0.08 } },
-  { id: 'plating',      tier: 'COMMON', name: 'PLATING',      desc: '+1 shield charge',   effect: { shieldCharges: 1 } },
-  { id: 'scrap_magnet', tier: 'COMMON', name: 'SCRAP MAGNET', desc: '+10% scrap',         effect: { scrapMul: 0.10 } },
-  { id: 'tight_barrel', tier: 'COMMON', name: 'TIGHT BARREL', desc: '-10% shot spread',   effect: { spreadMul: -0.10 } },
+  // --- COMMON -------------------------------------------------------------
+  { id: 'reload_coil',  tier: 'COMMON', name: 'RELOAD COIL',  desc: '+5% fire rate',    effect: { fireRateMul: 0.05 },
+    line: ['RELOAD COIL', 'RELOAD ARRAY', 'RELOAD LATTICE', 'RELOAD CASCADE', 'RELOAD SINGULARITY', 'CHRONOSTALL'] },
+  { id: 'heavy_rounds', tier: 'COMMON', name: 'HEAVY ROUNDS', desc: '+6% damage',       effect: { damageMul: 0.06 },
+    line: ['HEAVY ROUNDS', 'MASS DRIVER', 'SIEGE ROUNDS', 'BREACH ROUNDS', 'ANNIHILATOR', 'KINETIC VERDICT'] },
+  { id: 'thrusters',    tier: 'COMMON', name: 'THRUSTERS',    desc: '+5% move speed',   effect: { speedMul: 0.05 },
+    line: ['THRUSTERS', 'ION THRUSTERS', 'VECTOR DRIVE', 'SLIPSTREAM', 'WARP TRIM', 'QUICKSILVER'] },
+  { id: 'plating',      tier: 'COMMON', name: 'PLATING',      desc: '+1 shield charge', effect: { shieldCharges: 1 },
+    line: ['PLATING', 'ABLATIVE PLATE', 'AEGIS LATTICE', 'BULWARK FIELD', 'THE WALL', 'THE UNBROKEN'] },
+  { id: 'scrap_magnet', tier: 'COMMON', name: 'SCRAP MAGNET', desc: '+8% scrap from kills', effect: { scrapMul: 0.08 },
+    line: ['SCRAP MAGNET', 'SALVAGE RIG', 'SALVAGE ENGINE', 'REFINERY', 'ALCHEMICAL HOLD', 'MIDAS FIELD'] },
+  { id: 'tight_barrel', tier: 'COMMON', name: 'TIGHT BARREL', desc: '-8% shot spread',  effect: { spreadMul: -0.08 },
+    line: ['TIGHT BARREL', 'RIFLED BORE', 'RAIL ALIGNMENT', 'COHERENT BORE', 'THE PIN', 'THE NEEDLE'] },
+  { id: 'muzzle_brake', tier: 'COMMON', name: 'MUZZLE BRAKE', desc: '+10% bullet speed', effect: { bulletSpeedMul: 0.10 } },
+  { id: 'targeting_fin',tier: 'COMMON', name: 'TARGETING FIN',desc: '+3% crit chance',  effect: { critChance: 0.03 } },
+  { id: 'scrap_hopper', tier: 'COMMON', name: 'SCRAP HOPPER', desc: '+150 scrap each level', effect: { scrapPerLevel: 150 } },
+  { id: 'ablative_trim',tier: 'COMMON', name: 'ABLATIVE TRIM',desc: '-4% your hitbox',  effect: { hitScaleMul: -0.04 } },
 
-  // --- UNCOMMON ---
-  { id: 'twin_feed',    tier: 'UNCOMMON', name: 'TWIN FEED',    desc: '+15% fire rate',        effect: { fireRateMul: 0.15 } },
-  { id: 'ap_rounds',    tier: 'UNCOMMON', name: 'AP ROUNDS',    desc: '+18% damage',           effect: { damageMul: 0.18 } },
+  // --- UNCOMMON -----------------------------------------------------------
+  { id: 'twin_feed',    tier: 'UNCOMMON', name: 'TWIN FEED',    desc: '+10% fire rate',        effect: { fireRateMul: 0.10 } },
+  { id: 'ap_rounds',    tier: 'UNCOMMON', name: 'AP ROUNDS',    desc: '+12% damage',           effect: { damageMul: 0.12 } },
   { id: 'repair_kit',   tier: 'UNCOMMON', name: 'REPAIR KIT',   desc: '+1 life',               effect: { lives: 1 } },
-  { id: 'evasion',      tier: 'UNCOMMON', name: 'EVASION FIELD',desc: '+12% speed, -10% size', effect: { speedMul: 0.12, hitScaleMul: -0.10 } },
-  { id: 'salvage_rig',  tier: 'UNCOMMON', name: 'SALVAGE RIG',  desc: '+20% scrap',            effect: { scrapMul: 0.20 } },
+  { id: 'evasion',      tier: 'UNCOMMON', name: 'EVASION FIELD',desc: '+8% speed, -6% size',   effect: { speedMul: 0.08, hitScaleMul: -0.06 } },
   { id: 'wide_mount',   tier: 'UNCOMMON', name: 'WIDE MOUNT',   desc: '+1 shot',               effect: { extraShots: 1 } },
+  { id: 'gimbal_mount', tier: 'UNCOMMON', name: 'GIMBAL MOUNT', desc: 'shots aim up to 18 degrees', effect: { aimCone: 0.31 } },
+  { id: 'hardened_hull',tier: 'UNCOMMON', name: 'HARDENED HULL',desc: '+6% crit chance',       effect: { critChance: 0.06 } },
+  { id: 'salvage_rig',  tier: 'UNCOMMON', name: 'SALVAGE RIG',  desc: '+16% scrap from kills', effect: { scrapMul: 0.16 } },
+  { id: 'siege_optics', tier: 'UNCOMMON', name: 'SIEGE OPTICS', desc: '+12% damage to bosses', effect: { bossDamageMul: 0.12 } },
+  { id: 'kill_shield',  tier: 'UNCOMMON', name: 'KILL SHIELD',  desc: 'a shield every 40 kills', effect: { shieldPerKills: 40 } },
 
-  // --- RARE ---
+  // --- RARE ---------------------------------------------------------------
   { id: 'piercing',     tier: 'RARE', name: 'PIERCING ROUNDS', desc: 'shots pass through one enemy', effect: { pierce: 1 } },
   { id: 'split_shot',   tier: 'RARE', name: 'SPLIT SHOT',      desc: 'shots split in two on impact', effect: { split: true } },
   { id: 'overcharge',   tier: 'RARE', name: 'OVERCHARGE',      desc: 'every 5th shot triples',       effect: { overcharge: 5 } },
   { id: 'kinetic_barrier', tier: 'RARE', name: 'KINETIC BARRIER', desc: 'a shield regrows every 20s', effect: { shieldRegen: 1200 } },
-  { id: 'hunter_rounds',tier: 'RARE', name: 'HUNTER ROUNDS',   desc: 'shots steer toward enemies',   effect: { homing: 0.045 } },
+  { id: 'tracer_rounds',tier: 'RARE', name: 'TRACER ROUNDS',   desc: 'draws a lead line to the nearest enemy', effect: { tracer: true } },
+  { id: 'incendiary',   tier: 'RARE', name: 'INCENDIARY',      desc: 'hits burn for 40% more over 2s', effect: { burn: 0.40 } },
+  { id: 'cryo_rounds',  tier: 'RARE', name: 'CRYO ROUNDS',     desc: 'hits slow enemies by 35%',     effect: { chill: 0.35 } },
+  { id: 'ricochet',     tier: 'RARE', name: 'RICOCHET',        desc: 'shots bounce off the walls twice', effect: { ricochet: 2 } },
+  { id: 'thorns',       tier: 'RARE', name: 'REACTIVE ARMOUR', desc: 'blocked hits detonate around you', effect: { thorns: true } },
+  { id: 'war_chest',    tier: 'RARE', name: 'WAR CHEST',       desc: 'shop prices -12%',             effect: { priceDiscount: 0.12 } },
 
-  // --- EPIC ---
-  { id: 'rear_cannon',  tier: 'EPIC', name: 'REAR CANNON',  desc: 'you also fire backwards',    effect: { rear: true } },
-  { id: 'side_pods',    tier: 'EPIC', name: 'SIDE PODS',    desc: 'you also fire left and right',effect: { sides: true } },
-  { id: 'flak_burst',   tier: 'EPIC', name: 'FLAK BURST',   desc: 'shots explode on impact',    effect: { splash: 30 } },
-  { id: 'phase_drive',  tier: 'EPIC', name: 'PHASE DRIVE',  desc: 'phase through a hit every 12s',effect: { phaseDrive: true } },
-  { id: 'vampiric',     tier: 'EPIC', name: 'VAMPIRIC CORE',desc: 'a life back every 30 kills', effect: { lifePerKills: 30 } },
+  // --- EPIC ---------------------------------------------------------------
+  { id: 'rear_cannon',  tier: 'EPIC', name: 'REAR CANNON',   desc: 'you also fire backwards',      effect: { rear: true } },
+  { id: 'side_pods',    tier: 'EPIC', name: 'SIDE PODS',     desc: 'you also fire left and right',  effect: { sides: true } },
+  { id: 'flak_burst',   tier: 'EPIC', name: 'FLAK BURST',    desc: 'shots explode on impact',       effect: { splash: 30 } },
+  { id: 'phase_drive',  tier: 'EPIC', name: 'PHASE DRIVE',   desc: 'phase through a hit every 12s', effect: { phaseDrive: true } },
+  { id: 'vampiric',     tier: 'EPIC', name: 'VAMPIRIC CORE', desc: 'a life back every 60 kills',    effect: { lifePerKills: 60 } },
+  { id: 'executioner',  tier: 'EPIC', name: 'EXECUTIONER',   desc: 'finishes enemies under 12% HP', effect: { execute: 0.12 } },
+  { id: 'fourth_slot',  tier: 'EPIC', name: 'BROKER LICENCE',desc: 'the shop shows a fourth card',  effect: { shopSlots: 1 } },
+  { id: 'free_reroll',  tier: 'EPIC', name: 'DEALER FRIEND', desc: 'one free reroll every shop',    effect: { freeRerolls: 1 } },
 
-  // --- LEGENDARY ---
-  { id: 'orbital_drone',tier: 'LEGENDARY', name: 'ORBITAL DRONE', desc: 'a drone fights beside you',   effect: { drones: 1 } },
+  // --- LEGENDARY ----------------------------------------------------------
+  { id: 'orbital_drone',tier: 'LEGENDARY', name: 'ORBITAL DRONE',  desc: 'a drone fights beside you',  effect: { drones: 1 } },
   { id: 'chain',        tier: 'LEGENDARY', name: 'CHAIN LIGHTNING',desc: 'hits arc to two enemies',    effect: { chain: 2 } },
-  { id: 'time_dilation',tier: 'LEGENDARY', name: 'TIME DILATION', desc: 'enemy bullets 35% slower',    effect: { enemyBulletMul: -0.35 } },
-  { id: 'fortress',     tier: 'LEGENDARY', name: 'FORTRESS',      desc: 'start each level shielded',   effect: { fortress: 2 } },
+  { id: 'time_dilation',tier: 'LEGENDARY', name: 'TIME DILATION',  desc: 'enemy bullets 30% slower',   effect: { enemyBulletMul: -0.30 } },
+  { id: 'fortress',     tier: 'LEGENDARY', name: 'FORTRESS',       desc: 'start each level shielded',  effect: { fortress: 2 } },
+  { id: 'aegis_lattice',tier: 'LEGENDARY', name: 'AEGIS LATTICE',  desc: '+2 shield charges',          effect: { shieldCharges: 2 } },
+  { id: 'siege_engine', tier: 'LEGENDARY', name: 'SIEGE ENGINE',   desc: '+45% damage to bosses',      effect: { bossDamageMul: 0.45 } },
 
-  // --- APEX ---
-  { id: 'twin_core',    tier: 'APEX', name: 'TWIN CORE',       desc: 'every weapon effect fires twice', effect: { twinCore: true } },
-  { id: 'singularity',  tier: 'APEX', name: 'SINGULARITY',     desc: 'a black hole orbits you',         effect: { singularity: true } },
-  { id: 'immortal',     tier: 'APEX', name: 'IMMORTAL ENGINE', desc: 'your first death is survivable',  effect: { extraLife: 1 } }
+  // --- MYTHIC -------------------------------------------------------------
+  { id: 'mirror_drones',tier: 'MYTHIC', name: 'MIRROR WING',   desc: 'two drones, and they copy your gun', effect: { drones: 2, dronesCopyGun: true } },
+  { id: 'deadeye',      tier: 'MYTHIC', name: 'DEADEYE',       desc: '+25% crit chance, crits deal 4x',    effect: { critChance: 0.25, critMul: 1 } },
+  { id: 'bulwark_field',tier: 'MYTHIC', name: 'BULWARK FIELD', desc: 'blocked hits refund a shield 50% of the time', effect: { shieldRefund: 0.5 } },
+  { id: 'greed',        tier: 'MYTHIC', name: 'GREED ENGINE',  desc: 'double scrap, but hits cost two upgrades', effect: { scrapMul: 1.0, strips: 1 } },
+  { id: 'second_wind',  tier: 'MYTHIC', name: 'SECOND WIND',   desc: 'surviving a hit grants 3s of invulnerability', effect: { graceSeconds: 3 } },
+
+  // --- APEX ---------------------------------------------------------------
+  { id: 'twin_core',    tier: 'APEX', name: 'TWIN CORE',       desc: 'every weapon effect fires twice',    effect: { twinCore: true } },
+  { id: 'singularity',  tier: 'APEX', name: 'SINGULARITY',     desc: 'a black hole orbits you',            effect: { singularity: true } },
+  { id: 'immortal',     tier: 'APEX', name: 'IMMORTAL ENGINE', desc: 'your first death is survivable',     effect: { extraLife: 1 } },
+  { id: 'hunter_rounds',tier: 'APEX', name: 'HUNTER ROUNDS',   desc: 'shots steer toward enemies',         effect: { homing: 0.03 } },
+  { id: 'reload_sing',  tier: 'APEX', name: 'RELOAD SINGULARITY', desc: '+110% fire rate',                 effect: { fireRateMul: 1.10 } },
+  { id: 'annihilator',  tier: 'APEX', name: 'ANNIHILATOR',     desc: '+140% damage',                       effect: { damageMul: 1.40 } },
+
+  // --- OVERCLOCKED --------------------------------------------------------
+  { id: 'oc_needle',    tier: 'OVERCLOCKED', name: 'THE NEEDLE',    desc: 'one shot, infinite pierce, full screen', effect: { needle: true } },
+  { id: 'oc_midas',     tier: 'OVERCLOCKED', name: 'MIDAS FIELD',   desc: 'enemies bleed scrap while they live',    effect: { scrapPerSecond: 40 } },
+  { id: 'oc_unbroken',  tier: 'OVERCLOCKED', name: 'THE UNBROKEN',  desc: 'a shield charge regrows every 4s',       effect: { shieldRegen: 240, shieldCharges: 2 } },
+  { id: 'oc_verdict',   tier: 'OVERCLOCKED', name: 'KINETIC VERDICT',desc: 'first hit each level deals 5% of max HP', effect: { verdict: 0.05 } },
+
+  // --- HYPERCLOCKED -------------------------------------------------------
+  { id: 'hc_chronostall',tier: 'HYPERCLOCKED', name: 'CHRONOSTALL', desc: 'time slows while you hold fire',        effect: { chronostall: 0.55 } },
+  { id: 'hc_swarm',      tier: 'HYPERCLOCKED', name: 'IRON SWARM',  desc: 'four drones with your full build',      effect: { drones: 4, dronesCopyGun: true } },
+  { id: 'hc_absolution', tier: 'HYPERCLOCKED', name: 'ABSOLUTION',  desc: 'hits no longer strip upgrades',         effect: { noStrip: true } },
+
+  // --- UBERCLOCKED --------------------------------------------------------
+  { id: 'uc_eventhorizon',tier: 'UBERCLOCKED', name: 'EVENT HORIZON', desc: 'three singularities, and they feed you scrap', effect: { singularity: true, singularityCount: 3, scrapPerSecond: 120 } },
+  { id: 'uc_ruin',        tier: 'UBERCLOCKED', name: 'RUIN',          desc: '+400% damage',                          effect: { damageMul: 4.0 } },
+  { id: 'uc_phalanx',     tier: 'UBERCLOCKED', name: 'PHALANX',       desc: '+6 shield charges, they never break twice in a second', effect: { shieldCharges: 6, shieldIframes: 60 } },
+
+  // --- DYNACLOCKED --------------------------------------------------------
+  { id: 'dc_apotheosis', tier: 'DYNACLOCKED', name: 'APOTHEOSIS',   desc: 'every stat you own counts twice',        effect: { apotheosis: true } },
+  { id: 'dc_lastword',   tier: 'DYNACLOCKED', name: 'THE LAST WORD',desc: 'enemies under 40% HP simply stop existing', effect: { execute: 0.40 } },
+  { id: 'dc_undying',    tier: 'DYNACLOCKED', name: 'UNDYING',      desc: 'three extra lives, and death returns one', effect: { extraLife: 3, reviveOnDeath: 1 } }
 ];
 
-RLCore.tierOf = function (id) {
-  const t = RLCore.TIERS.find(t => t.id === id);
-  if (!t) throw new Error(`RLCore.tierOf: unknown tier id "${id}"`);
-  return t;
+RLCore.tierIndexOf = function (id) {
+  const i = RLCore.TIERS.findIndex(t => t.id === id);
+  if (i === -1) throw new Error('RLCore.tierIndexOf: unknown tier id "' + id + '"');
+  return i;
 };
 
-RLCore.eligible = function (tier, owned) {
+RLCore.tierOf = function (id) {
+  return RLCore.TIERS[RLCore.tierIndexOf(id)];
+};
+
+// An upgrade's tier climbs with voidbirth depth, capped at the top of the
+// ladder. This is what makes the whole catalogue move up together.
+RLCore.effectiveTier = function (upgrade, vb) {
+  const idx = Math.min(RLCore.MAX_TIER_INDEX, RLCore.tierIndexOf(upgrade.tier) + RLCore.clampVoidbirth(vb));
+  return RLCore.TIERS[idx].id;
+};
+
+RLCore.effectiveName = function (upgrade, vb) {
+  const v = RLCore.clampVoidbirth(vb);
+  if (upgrade.line && upgrade.line[v]) return upgrade.line[v];
+  return upgrade.name;
+};
+
+// Numbers scale with depth; flags do not. Scaling the flags would be
+// meaningless and scaling nothing would make a promoted upgrade a downgrade.
+RLCore.effectiveEffect = function (upgrade, vb) {
+  const v = RLCore.clampVoidbirth(vb);
+  if (v === 0) return upgrade.effect;
+  const mul = Math.pow(RLCore.LINEAGE_GROWTH, v);
+  const out = {};
+  Object.keys(upgrade.effect).forEach(k => {
+    const val = upgrade.effect[k];
+    out[k] = typeof val === 'number' ? RLCore.roundEffect(k, val * mul) : val;
+  });
+  return out;
+};
+
+// Counts stay whole; multipliers keep two decimals so a card never reads
+// "+0.12000000000000001% damage".
+RLCore.INTEGER_EFFECTS = ['shieldCharges', 'extraShots', 'lives', 'extraLife', 'drones', 'chain',
+  'fortress', 'pierce', 'overcharge', 'lifePerKills', 'shieldPerKills', 'splash', 'shieldRegen',
+  'scrapPerLevel', 'scrapPerSecond', 'ricochet', 'shopSlots', 'freeRerolls', 'strips',
+  'singularityCount', 'shieldIframes', 'reviveOnDeath'];
+
+RLCore.roundEffect = function (key, v) {
+  if (RLCore.INTEGER_EFFECTS.indexOf(key) !== -1) return Math.max(1, Math.round(v));
+  return Math.round(v * 100) / 100;
+};
+
+// A view of an upgrade as it exists at this depth: the shape the shop, the
+// HUD, and resolveStats all read.
+RLCore.resolve = function (upgrade, vb) {
+  return {
+    id: upgrade.id,
+    tier: RLCore.effectiveTier(upgrade, vb),
+    name: RLCore.effectiveName(upgrade, vb),
+    desc: upgrade.desc,
+    effect: RLCore.effectiveEffect(upgrade, vb)
+  };
+};
+
+RLCore.byId = function (id) {
+  return RLCore.UPGRADES.find(u => u.id === id) || null;
+};
+
+RLCore.eligible = function (tier, owned, vb) {
   const limit = RLCore.tierOf(tier).stackLimit;
   return RLCore.UPGRADES.filter(u => {
-    if (u.tier !== tier) return false;
+    if (RLCore.effectiveTier(u, vb) !== tier) return false;
     const have = owned.find(o => o.id === u.id);
     return !have || have.stacks < limit;
   });
 };
 
-RLCore.rollSlot = function (level, owned, rnd, exclude) {
+RLCore.rollSlot = function (level, vb, owned, rnd, exclude) {
   const skip = exclude || [];
-  const poolFor = (tierId) => RLCore.eligible(tierId, owned).filter(u => !skip.includes(u.id));
+  const poolFor = tierId => RLCore.eligible(tierId, owned, vb).filter(u => skip.indexOf(u.id) === -1);
 
-  // rollRarity consumes rnd() and must be called exactly once per slot: calling
-  // it inside a loop predicate would re-invoke it (with a fresh random draw)
-  // for every tier checked, which is not a single stable roll.
-  const rarity = RLCore.rollRarity(level, rnd);
-  const startIdx = RLCore.TIERS.findIndex(t => t.id === rarity);
-  const legendaryIdx = RLCore.TIERS.length - 2; // TIERS is COMMON..APEX; APEX is the last entry.
+  // rollRarity consumes rnd() and must be called exactly once per slot:
+  // calling it inside a loop predicate would re-draw for every tier checked,
+  // which is not a single stable roll.
+  const rarity = RLCore.rollRarity(level, vb, rnd);
+  const startIdx = RLCore.tierIndexOf(rarity);
+  const floorIdx = RLCore.floorTierIndex(vb);
 
-  // A shop slot must never come up empty while eligible upgrades remain, so
-  // an exhausted tier promotes to a rarer one first: maxing out cheap
-  // upgrades should make shops show better goods, not filler-then-nothing.
-  // The walk stops at LEGENDARY -- never promote INTO APEX -- so its 0.3%
-  // rate stays a fixed promise to the player. A roll that lands on APEX
-  // directly (rarity === 'APEX') still checks its own pool normally; that's
-  // not promotion, it's the roll rollRarity already made.
-  const upperCap = rarity === 'APEX' ? RLCore.TIERS.length - 1 : legendaryIdx;
-  for (let idx = startIdx; idx <= upperCap; idx++) {
+  // A slot must never come up empty while eligible upgrades remain, so an
+  // exhausted tier promotes upward first: maxing out the cheap things should
+  // make shops show better goods, not filler and then nothing. The walk stops
+  // below the three undriftable top positions so their odds stay a fixed
+  // promise -- a roll that lands there directly is honoured, promotion into
+  // them is not.
+  const topPromotable = Math.min(RLCore.MAX_TIER_INDEX,
+    RLCore.clampVoidbirth(vb) + RLCore.WEIGHT_VECTOR.length - 1 - RLCore.UNDRIFTABLE_POSITIONS);
+  const cap = startIdx > topPromotable ? startIdx : topPromotable;
+  for (let idx = startIdx; idx <= cap; idx++) {
     const pool = poolFor(RLCore.TIERS[idx].id);
     if (pool.length) return pool[Math.floor(rnd() * pool.length)];
   }
-
-  // Nothing eligible at or above the rolled tier (within the APEX-safe
-  // range): fall back downward toward COMMON.
-  for (let idx = startIdx - 1; idx >= 0; idx--) {
+  for (let idx = startIdx - 1; idx >= floorIdx; idx--) {
     const pool = poolFor(RLCore.TIERS[idx].id);
     if (pool.length) return pool[Math.floor(rnd() * pool.length)];
   }
-
   return null;
 };
 
-RLCore.rollShop = function (level, owned, rnd) {
+RLCore.BASE_SHOP_SLOTS = 3;
+
+RLCore.rollShop = function (level, vb, owned, rnd, slots) {
+  const n = Math.max(1, slots || RLCore.BASE_SHOP_SLOTS);
   const out = [];
-  for (let i = 0; i < 3; i++) {
-    const u = RLCore.rollSlot(level, owned, rnd, out.map(o => o.id));
+  for (let i = 0; i < n; i++) {
+    const u = RLCore.rollSlot(level, vb, owned, rnd, out.map(o => o.id));
     if (u) out.push(u);
   }
-  return out;
+  return out.map(u => RLCore.resolve(u, vb));
 };
 
-RLCore.BASE_FIRE_RATE = 10;
-RLCore.MIN_FIRE_RATE = 4;
+// ---------------------------------------------------------------------------
+// STAT RESOLUTION
+// ---------------------------------------------------------------------------
 
-// PHASE DRIVE recharges a single free hit on this cadence (12s at 60fps). It
-// is self-contained: the boost mechanic it was originally bolted to was
-// removed with the powerup orbs, so it owns its own timer.
 RLCore.PHASE_DRIVE_FRAMES = 720;
-
-// REPAIR KIT is capped by the spec at "the ship's starting lives + 2", so the
-// stack of five it can reach may only ever contribute two of those lives.
 RLCore.REPAIR_KIT_MAX = 2;
+RLCore.MAX_SHIELD_CHARGES = 4;
 
-RLCore.resolveStats = function (ship, owned) {
+RLCore.resolveStats = function (ship, owned, vb) {
+  const v = RLCore.clampVoidbirth(vb);
+  const eff = o => {
+    const u = RLCore.byId(o.id);
+    return u ? RLCore.effectiveEffect(u, v) : null;
+  };
+  const apotheosis = owned.some(o => { const e = eff(o); return e && e.apotheosis === true; });
+  const dup = apotheosis ? 2 : 1;
+
   const sum = key => owned.reduce((acc, o) => {
-    const u = RLCore.UPGRADES.find(x => x.id === o.id);
-    const v = u && u.effect[key];
-    return acc + (typeof v === 'number' ? v * o.stacks : 0);
+    const e = eff(o); const val = e && e[key];
+    return acc + (typeof val === 'number' ? val * o.stacks * dup : 0);
   }, 0);
-  const has = key => owned.some(o => {
-    const u = RLCore.UPGRADES.find(x => x.id === o.id);
-    return u && u.effect[key] === true;
-  });
+  const has = key => owned.some(o => { const e = eff(o); return e && e[key] === true; });
   const max = key => owned.reduce((acc, o) => {
-    const u = RLCore.UPGRADES.find(x => x.id === o.id);
-    const v = u && u.effect[key];
-    return typeof v === 'number' ? Math.max(acc, v) : acc;
+    const e = eff(o); const val = e && e[key];
+    return typeof val === 'number' ? Math.max(acc, val) : acc;
   }, 0);
 
   // Fire rate is an interval in frames, so a bonus divides rather than multiplies.
@@ -253,85 +630,158 @@ RLCore.resolveStats = function (ship, owned) {
 
   return {
     fireRate: Math.max(RLCore.MIN_FIRE_RATE, rate),
-    damage: 1 * (1 + sum('damageMul')),
+    damage: RLCore.BASE_DAMAGE * (1 + sum('damageMul')),
     speed: ship.speed * (1 + sum('speedMul')),
     spread: ship.spreadMul * (1 + sum('spreadMul')),
-    hitScale: 1 + sum('hitScaleMul'),
-    shieldCharges: sum('shieldCharges'),
+    hitScale: Math.max(0.4, 1 + sum('hitScaleMul')),
+    bulletSpeedMul: 1 + sum('bulletSpeedMul'),
+    shieldCharges: Math.min(RLCore.MAX_SHIELD_CHARGES, sum('shieldCharges')),
     extraShots: sum('extraShots'),
     extraLives: Math.min(RLCore.REPAIR_KIT_MAX, sum('lives')) + sum('extraLife'),
     scrapMul: 1 + sum('scrapMul'),
+    scrapPerLevel: sum('scrapPerLevel'),
+    scrapPerSecond: max('scrapPerSecond'),
+    critChance: Math.min(1, sum('critChance')),
+    critMul: 2 + max('critMul'),
+    bossDamageMul: 1 + sum('bossDamageMul'),
+    aimCone: max('aimCone'),
     pierce: sum('pierce'),
     homing: max('homing'),
     splash: max('splash'),
+    burn: max('burn'),
+    chill: max('chill'),
+    ricochet: max('ricochet'),
+    execute: max('execute'),
+    verdict: max('verdict'),
     shieldRegen: max('shieldRegen'),
+    shieldPerKills: max('shieldPerKills'),
+    shieldRefund: max('shieldRefund'),
+    shieldIframes: max('shieldIframes'),
+    graceSeconds: max('graceSeconds'),
     overcharge: max('overcharge'),
     lifePerKills: max('lifePerKills'),
+    reviveOnDeath: max('reviveOnDeath'),
     drones: sum('drones'),
     chain: max('chain'),
     fortress: max('fortress'),
-    enemyBulletMul: 1 + sum('enemyBulletMul'),
+    singularityCount: has('singularity') ? Math.max(1, max('singularityCount')) : 0,
+    chronostall: max('chronostall'),
+    priceDiscount: Math.min(0.6, sum('priceDiscount')),
+    shopSlots: RLCore.BASE_SHOP_SLOTS + sum('shopSlots'),
+    freeRerolls: sum('freeRerolls'),
+    strips: 1 + sum('strips'),
+    enemyBulletMul: Math.max(0.25, 1 + sum('enemyBulletMul')),
     split: has('split'),
     rear: has('rear'),
     sides: has('sides'),
+    tracer: has('tracer'),
+    thorns: has('thorns'),
+    needle: has('needle'),
+    noStrip: has('noStrip'),
+    dronesCopyGun: has('dronesCopyGun'),
     phaseDrive: has('phaseDrive'),
     twinCore: has('twinCore'),
+    apotheosis: apotheosis,
     singularity: has('singularity')
   };
 };
 
-RLCore.CREDIT_DIVISOR = 100;
+// ---------------------------------------------------------------------------
+// ECONOMY
+// ---------------------------------------------------------------------------
 
-// Cheapest-first is what lets commons act as armour around a rare build: three
-// stacks of a 240-scrap upgrade are three hits the Orbital Drone does not take.
+RLCore.CREDIT_DIVISOR = 100;
+RLCore.creditsForScore = function (score) { return Math.floor(score / RLCore.CREDIT_DIVISOR); };
+
+// Scrap deliberately ignores the combo multiplier: score keeps it, so combo
+// stays a scoring skill. If scrap scaled with combo, a hot streak would hand
+// out an APEX while a cold run could not afford a common.
+//
+// Income rises with depth so that thinning shops (see shopEvery) do not also
+// mean thinning purchasing power -- fewer visits, each one worth more.
+RLCore.scrapForKill = function (points, scrapMul, level) {
+  const depth = Math.pow(Math.max(1, level || 1), 0.55);
+  return Math.max(1, Math.round(points * scrapMul * depth));
+};
+
+RLCore.rerollCost = function (uses) { return 300 * Math.pow(2, uses); };
+
+RLCore.priceFor = function (tierId, priceDiscount) {
+  const base = RLCore.tierOf(tierId).price;
+  return Math.max(1, Math.round(base * (1 - Math.min(0.6, priceDiscount || 0))));
+};
+
+// Cheapest-first is what lets commons act as armour around a rare build:
+// three stacks of a cheap upgrade are three hits the Orbital Drone does not
+// take. ABSOLUTION (noStrip) turns this off entirely, which is why it is a
+// HYPERCLOCKED and not a rare.
 RLCore.stripCheapest = function (owned) {
   if (!owned.length) return { owned, removed: null };
-  const rank = id => RLCore.TIERS.findIndex(t => t.id === id);
+  const rank = id => RLCore.tierIndexOf(id);
   let best = -1;
   owned.forEach((o, i) => {
-    const u = RLCore.UPGRADES.find(x => x.id === o.id);
+    const u = RLCore.byId(o.id);
     if (!u) return;
     if (best === -1) { best = i; return; }
-    const bu = RLCore.UPGRADES.find(x => x.id === owned[best].id);
-    // Lower tier wins; ties go to the most recently acquired, which is the later index.
+    const bu = RLCore.byId(owned[best].id);
+    // Lower tier wins; ties go to the most recently acquired, the later index.
     if (rank(u.tier) < rank(bu.tier) || (rank(u.tier) === rank(bu.tier) && i > best)) best = i;
   });
   if (best === -1) return { owned, removed: null };
 
   const target = owned[best];
-  const u = RLCore.UPGRADES.find(x => x.id === target.id);
+  const u = RLCore.byId(target.id);
   const next = owned.map((o, i) => (i === best ? { id: o.id, stacks: o.stacks - 1 } : o))
                     .filter(o => o.stacks > 0);
   return { owned: next, removed: { id: target.id, tier: u.tier } };
 };
 
+RLCore.stripN = function (owned, n) {
+  let cur = owned, last = null;
+  for (let i = 0; i < Math.max(1, n); i++) {
+    const r = RLCore.stripCheapest(cur);
+    cur = r.owned;
+    if (r.removed) last = r.removed;
+    if (!cur.length) break;
+  }
+  return { owned: cur, removed: last };
+};
+
 // Firing pattern: the two base shots fly parallel until WIDE MOUNT adds more,
 // at which point the whole pattern fans out (narrower with TIGHT BARREL).
 RLCore.buildShots = function (s) {
+  if (s.needle) return [{ dx: 0, dy: -10, a: 0, needle: true }];
   const n = 2 + s.extraShots;
   const step = 0.085 * s.spread;
-  const fan = s.extraShots > 0;   // the two base shots fly parallel, as they do today
+  const fan = s.extraShots > 0;
   const shots = [];
-  // Centre the pattern on straight-up and keep its total width at 20px, so the
-  // muzzles stay on the hull no matter how many shots there are.
+  // Centre the pattern on straight-up and keep its total width at 20px, so
+  // the muzzles stay on the hull no matter how many shots there are.
   for (let i = 0; i < n; i++) {
     const off = i - (n - 1) / 2;
     shots.push({ dx: off * (n > 1 ? 20 / (n - 1) : 0), dy: -10, a: fan ? off * step : 0 });
   }
   if (s.rear)  shots.push({ dx: -6, dy: 12, a: Math.PI }, { dx: 6, dy: 12, a: -Math.PI });
-  if (s.sides) shots.push({ dx: -14, dy: 0, a: -Math.PI/2 }, { dx: 14, dy: 0, a: Math.PI/2 });
+  if (s.sides) shots.push({ dx: -14, dy: 0, a: -Math.PI / 2 }, { dx: 14, dy: 0, a: Math.PI / 2 });
   return s.twinCore ? shots.concat(shots.map(x => ({ dx: x.dx * 0.6, dy: x.dy + 4, a: x.a }))) : shots;
 };
 
-RLCore.scrapForKill = function (points, scrapMul) { return Math.round(points * scrapMul); };
-RLCore.creditsForScore = function (score) { return Math.floor(score / RLCore.CREDIT_DIVISOR); };
-RLCore.rerollCost = function (uses) { return 300 * Math.pow(2, uses); };
+// ---------------------------------------------------------------------------
+// ENEMY FIRING ARCS
+// ---------------------------------------------------------------------------
+// The fix for "they hit me from the side and I can't do anything about it":
+// past level 15 a shooting enemy may only fire within a cone of straight-down,
+// so it has to commit to your column first. That commitment is a telegraph,
+// and a telegraph is something you can read and punish.
 
-// Spent, not earned: hoarding scrap should not summon a tougher boss, only
-// actually being stronger should. The 12,000-scrap cap is provisional and will
-// be tuned during Task 16 playtesting.
-RLCore.bossHpMultiplier = function (scrapSpent) {
-  return 1 + 1.5 * Math.min(1, scrapSpent / 12000);
+RLCore.ARC_FROM_LEVEL = 15;
+RLCore.ARC_HALF_ANGLE = 0.70;   // ~40 degrees
+RLCore.ARC_KINDS = ['grunt', 'elite', 'lancer'];
+
+RLCore.canFireAt = function (kind, level, angleFromDown) {
+  if (level < RLCore.ARC_FROM_LEVEL) return true;
+  if (RLCore.ARC_KINDS.indexOf(kind) === -1) return true;
+  return Math.abs(angleFromDown) <= RLCore.ARC_HALF_ANGLE;
 };
 
 // ===== END ROGUELIKE CORE (PURE) =====
@@ -349,7 +799,8 @@ const Save = {
       version: RLCore.SAVE_VERSION,
       hiScore: 0, bestLevel: 1, totalRuns: 0, totalKills: 0,
       credits: 0, unlocked: ['vanguard'], selectedShip: 'vanguard', muted: false,
-      bestScrapSpent: 0, apexFound: 0
+      bestScrapSpent: 0, apexFound: 0,
+      voidbirths: 0, bestVoidbirth: 0, tiersFound: {}, bossesKilled: {}
     };
   },
 
@@ -525,6 +976,24 @@ const Sound = {
         Sound.tone(880, 0.5, 'sawtooth', 0.16, 1760);
         Sound.tone(1320, 0.7, 'triangle', 0.12, 2640, 0.08);
         break;
+      // Heavy, mechanical, and low — the clamps landing should feel like
+      // tonnage rather than a UI beep.
+      case 'dock':
+        Sound.noise(0.18, 900, 0.28, 120);
+        Sound.tone(96, 0.34, 'square', 0.20, 60);
+        Sound.tone(64, 0.5, 'sine', 0.16, 40, 0.06);
+        break;
+      // One card coming off the build. Short, downward, slightly sour.
+      case 'strip':
+        Sound.tone(420, 0.16, 'sawtooth', 0.13, 120);
+        Sound.noise(0.09, 1800, 0.10, 400);
+        break;
+      // The ascension. A rising stack of fifths under a long swell.
+      case 'voidbirth':
+        [110, 165, 220, 330, 440].forEach((f, i) =>
+          Sound.tone(f, 1.6 - i * 0.12, i < 2 ? 'sawtooth' : 'triangle', 0.13, f * 4, i * 0.13));
+        Sound.noise(1.9, 300, 0.16, 2800, 0.2);
+        break;
       case 'uiMove':
         Sound.tone(680, 0.05, 'square', 0.08);
         break;
@@ -675,12 +1144,14 @@ let selIndex = 0;   // start-screen ship selector
 // ---- ROGUELIKE RUN STATE (Task 8) ----
 let runUpgrades = [];       // [{id, stacks}] — this run only
 let scrap = 0, scrapSpent = 0;
-// Boss HP keys off scrap that actually bought power, not every scrap spent.
-// Rerolls cost scrap but grant nothing, so counting them would inflate the
-// boss for the player whose offers were bad enough to need rerolling —
-// exactly the "hoarding is not punished, only actual power is" rule inverted.
-// scrapSpent stays the player-facing total (game-over readout, best-ever stat).
+// Kept as a player-facing statistic only. It used to scale boss HP, which
+// meant buying upgrades could make your own run harder — a punishment for
+// playing the game. Boss health is now fixed per level (RLCore.bossHp), so
+// getting stronger only ever helps.
 let scrapOnUpgrades = 0;
+// How many times this run has ascended. Drives the tier floor, the odds
+// vector, the shop cadence, and every upgrade's name and strength.
+let voidbirths = 0;
 let stats = null;           // resolved by recomputeStats()
 let overchargeCount = 0, killsSinceLife = 0;
 
@@ -697,16 +1168,17 @@ let buildCacheVersion = -1;
 
 function rebuildBuildCache() {
   buildCache = runUpgrades.map(o => {
-    const u = RLCore.UPGRADES.find(x => x.id === o.id);
+    const u = RLCore.byId(o.id);
     if (!u) return null; // unknown id in the catalog: skip, don't throw
-    return { name: u.name, color: RLCore.tierOf(u.tier).color, stacks: o.stacks };
+    const r = RLCore.resolve(u, voidbirths);
+    return { name: r.name, color: RLCore.tierOf(r.tier).color, stacks: o.stacks };
   }).filter(Boolean);
   buildCacheVersion = runUpgradesVersion;
 }
 
 function recomputeStats() {
   const ship = currentShip();
-  stats = RLCore.resolveStats(ship, runUpgrades);
+  stats = RLCore.resolveStats(ship, runUpgrades, voidbirths);
   player.speed = stats.speed;
   // Evasion Field shrinks the hitbox relative to the ship's base size.
   // Recomputed here (not applyShip) so it updates live whenever the build
@@ -900,6 +1372,10 @@ document.addEventListener('keydown', e => {
     if (e.key === ' ' || e.key === 'Enter') tryBuySlot(shopSel);
     if (e.key === 'r' || e.key === 'R') tryReroll();
     if (e.key === 'd' || e.key === 'D' || e.key === 'Escape') closeShop();
+    // SKIP and DEPART do the same thing; both exist because at depth you are
+    // often saving for a tier this shop cannot show you, and clicking past
+    // three cards you do not want is friction rather than a decision.
+    if (e.key === 's' || e.key === 'S') { Sound.play('uiMove'); closeShop(); }
   }
   if (e.key === 'm' || e.key === 'M') toggleMute();
   if (['ArrowLeft','ArrowRight','ArrowUp','ArrowDown',' '].includes(e.key)) e.preventDefault();
@@ -910,13 +1386,17 @@ document.addEventListener('keyup', e => { keys[e.key] = false; });
 function handlePointer(p) {
   if (pointInRect(p, muteRect())) { toggleMute(); return true; }
   if (state === 'shop') {
+    const rects = slotRects(shopSlots.length);
     for (let i = 0; i < shopSlots.length; i++) {
-      if (pointInRect(p, SLOT_RECTS[i])) { shopSel = i; tryBuySlot(i); return true; }
+      if (pointInRect(p, rects[i])) { shopSel = i; tryBuySlot(i); return true; }
     }
     if (pointInRect(p, REROLL_RECT)) { tryReroll(); return true; }
     if (pointInRect(p, DEPART_RECT)) { closeShop(); return true; }
+    if (pointInRect(p, SKIP_RECT))   { Sound.play('uiMove'); closeShop(); return true; }
     return true;
   }
+  // The voidbirth sequence owns the screen; a stray tap must not skip it.
+  if (state === 'voidbirth') return true;
   if (state === 'start') {
     if (pointInRect(p, CHEV_L)) { cycleShip(-1); return true; }
     if (pointInRect(p, CHEV_R)) { cycleShip(1); return true; }
@@ -977,6 +1457,10 @@ function startGame() {
   dyingTimer = 0;
   boss = null; bossActive = false; bossWarning = 0;
   runUpgrades = []; scrap = 0; scrapSpent = 0; scrapOnUpgrades = 0;
+  // Ascension is per-run, like the upgrades it governs. A new run starts at
+  // the bottom of the ladder however deep the last one got.
+  voidbirths = 0;
+  vbInfo = null; vbCards = []; vbTick = 0;
   runUpgradesVersion++;
   overchargeCount = 0; killsSinceLife = 0;
   recomputeStats();
@@ -1000,14 +1484,158 @@ function levelUp() {
   // which lets levelTimer run out and call this).
   // Flat, deliberately: SCRAP MAGNET and SALVAGE RIG are both worded "+% scrap
   // from kills", and a level clear is not a kill.
-  scrap += LEVEL_CLEAR_SCRAP;
-  addFlashText('LEVEL CLEAR +' + LEVEL_CLEAR_SCRAP, W/2, H/2 - 40, '#ffdd44');
+  // Clearing a level pays a flat bonus that grows with depth, plus whatever
+  // SCRAP HOPPER contributes. Flat rather than multiplied, deliberately:
+  // SCRAP MAGNET and SALVAGE RIG are both worded "+% scrap from kills", and a
+  // level clear is not a kill.
+  const clearPay = LEVEL_CLEAR_SCRAP + Math.round(LEVEL_CLEAR_SCRAP * Math.pow(level, 0.55) - LEVEL_CLEAR_SCRAP)
+                 + (stats ? stats.scrapPerLevel : 0);
+  scrap += clearPay;
+  const cleared = level;
   levelTimer = 0; level++;
   Music.setIntensity(level);
   if (player.canPhase) player.phaseReady = true;   // Phantom recharges each level
-  // The boss spawn and level banner used to fire here, but that put them
-  // behind the shop panel. They now fire from closeShop, once play resumes.
-  openShop();
+
+  // Ascension takes priority over shopping: clearing a voidbirth level ends
+  // the segment, and there is nothing to spend scrap on when it is about to
+  // be burned anyway.
+  const vb = RLCore.voidbirthAfterClearing(cleared, voidbirths);
+  if (vb) { beginVoidbirth(vb); return; }
+
+  // The boss spawn and level banner fire from closeShop, once play resumes,
+  // so they are never drawn behind the shop panel.
+  if (RLCore.shopOpensAfter(cleared, voidbirths)) openShop();
+  else closeShop();
+}
+
+// ===== VOIDBIRTH =====
+// The run does not continue past a voidbirth level — it ascends. You keep your
+// score, credits and ships; you lose every upgrade and all unspent scrap; and
+// the entire rarity ladder shifts up one rung, permanently, for the rest of
+// the run.
+
+let vbTick = 0, vbInfo = null, vbCards = [];
+const VB_CARD_FRAMES = 12;
+const VB_BURN_START = 50;
+const VB_FLASH_HOLD = 26;
+
+function vbBurnEnd() { return VB_BURN_START + vbCards.length * VB_CARD_FRAMES; }
+function vbTotal() { return vbBurnEnd() + VB_FLASH_HOLD + 170; }
+
+function beginVoidbirth(info) {
+  vbInfo = info;
+  vbTick = 0;
+  // Snapshot the build at its CURRENT depth so the sequence burns the cards
+  // the player actually earned, not their promoted successors.
+  vbCards = runUpgrades.map(o => {
+    const u = RLCore.byId(o.id);
+    if (!u) return null;
+    const r = RLCore.resolve(u, voidbirths);
+    return { name: r.name, color: RLCore.tierOf(r.tier).color, stacks: o.stacks, burned: false };
+  }).filter(Boolean);
+  enemies = []; enemyBullets = []; bullets = []; boss = null; bossActive = false;
+  levelBanner = null;
+  state = 'voidbirth';
+  Music.setBoss(false);
+  Sound.play('voidbirth');
+}
+
+// Committed exactly once, on the flash frame. Split out from the animation so
+// a dropped frame or a backgrounded tab can never apply it twice or skip it.
+function commitVoidbirth() {
+  voidbirths = RLCore.clampVoidbirth(vbInfo.to);
+  runUpgrades = [];
+  runUpgradesVersion++;
+  scrap = 0;
+  Save.data.voidbirths = voidbirths;
+  Save.data.bestVoidbirth = Math.max(Save.data.bestVoidbirth || 0, voidbirths);
+  // Only unlock a ship that actually exists in the roster. Handing out an id
+  // with no CFG.ships entry would strand the player on an unrenderable hull.
+  if (voidbirths >= 3 && CFG.ships.some(s => s.id === 'ascendant') &&
+      Save.data.unlocked.indexOf('ascendant') === -1) {
+    Save.data.unlocked.push('ascendant');
+  }
+  Save.write();
+  recomputeStats();
+  // A fresh hull for the new segment: shields are gone with the upgrades that
+  // granted them, so leaving stale charges behind would be a free ride.
+  player.shieldCharges = 0;
+  player.invincible = 90;
+  FX.addShake(26);
+}
+
+function updateVoidbirth() {
+  vbTick++;
+  const idx = Math.floor((vbTick - VB_BURN_START) / VB_CARD_FRAMES);
+  if (idx >= 0 && idx < vbCards.length && !vbCards[idx].burned) {
+    vbCards[idx].burned = true;
+    spawnParticles(W/2, 250 + (idx % 6) * 22, vbCards[idx].color, 12);
+    Sound.play('strip');
+  }
+  if (vbTick === vbBurnEnd() + 1) commitVoidbirth();
+  if (vbTick >= vbTotal()) {
+    vbInfo = null; vbCards = [];
+    state = 'play';
+    levelBanner = { text: 'LEVEL ' + level, life: 120 };
+    Music.setIntensity(level);
+    Sound.play('levelUp');
+  }
+}
+
+function drawVoidbirth() {
+  drawBg();
+  const burnEnd = vbBurnEnd();
+  const flashT = vbTick - burnEnd;
+
+  // 1. the build comes apart, card by card
+  if (vbTick <= burnEnd + 4) {
+    ctx.textAlign = 'center';
+    ctx.font = 'bold 13px monospace';
+    ctx.fillStyle = 'rgba(255,255,255,0.5)';
+    ctx.fillText('THE VOID TAKES WHAT YOU BUILT', W/2, 200);
+    vbCards.forEach((c, i) => {
+      if (c.burned) return;
+      ctx.globalAlpha = 0.9;
+      ctx.fillStyle = c.color;
+      ctx.font = 'bold 12px monospace';
+      ctx.fillText(c.name + (c.stacks > 1 ? ' ×' + c.stacks : ''), W/2, 250 + (i % 6) * 22 + Math.floor(i / 6) * 0);
+      ctx.globalAlpha = 1;
+    });
+  }
+
+  // 2. the flash and the title
+  if (flashT >= 0 && flashT < VB_FLASH_HOLD) {
+    ctx.fillStyle = `rgba(255,255,255,${1 - flashT / VB_FLASH_HOLD})`;
+    ctx.fillRect(0, 0, W, H);
+  }
+  if (flashT >= 0) {
+    ctx.textAlign = 'center';
+    ctx.fillStyle = '#ffffff';
+    ctx.font = 'bold 40px monospace';
+    ctx.fillText('VOIDBIRTH', W/2, H/2 - 40);
+    ctx.fillStyle = '#00ffee';
+    ctx.font = 'bold 56px monospace';
+    ctx.fillText(vbInfo ? vbInfo.numeral : '', W/2, H/2 + 20);
+
+    // 3. the ladder redraws with its new floor and its new summit
+    const floor = RLCore.TIERS[RLCore.floorTierIndex(voidbirths)];
+    ctx.font = 'bold 12px monospace';
+    ctx.fillStyle = 'rgba(255,255,255,0.65)';
+    ctx.fillText('THE LADDER RISES', W/2, H/2 + 70);
+    ctx.fillStyle = floor.color;
+    ctx.fillText('FLOOR  ' + floor.name, W/2, H/2 + 94);
+    const unlocked = RLCore.tierUnlockedAt(voidbirths);
+    if (unlocked) {
+      const t = RLCore.tierOf(unlocked);
+      const pulse = 0.6 + 0.4 * Math.sin(vbTick * 0.15);
+      ctx.fillStyle = pulse > 0.8 ? t.color2 : t.color;
+      ctx.font = 'bold 15px monospace';
+      ctx.fillText('UNLOCKED  ' + t.name, W/2, H/2 + 120);
+    }
+    ctx.fillStyle = 'rgba(255,255,255,0.4)';
+    ctx.font = 'bold 11px monospace';
+    ctx.fillText('EVERY UPGRADE YOU FIND FROM NOW ON IS ONE TIER STRONGER', W/2, H/2 + 150);
+  }
 }
 
 function endRun() {
@@ -1433,7 +2061,8 @@ function makeEnemy(kind) {
   const e = {
     kind, x: 30 + Math.random()*(W-60), y: -30,
     vx: 0, vy: d.enemySpeed * 0.8,
-    hp: ENEMY[kind].hp, flash: 0, dead: false,
+    hp: RLCore.enemyHp(kind, level), maxHp: RLCore.enemyHp(kind, level),
+    scale: RLCore.enemyScale(level), flash: 0, dead: false,
     shootTimer: 0, zigzag: 0, zigzagDir: 1,
     formationId: 0, sweep: false, baseX: 0
   };
@@ -1470,21 +2099,21 @@ function makeEnemy(kind) {
 const BOSS_W = 112, BOSS_H = 54;
 
 function bossMaxHp(lv) {
-  // The base curve is set against the floor of the build space: a player who
-  // has bought nothing fires 2 shots of 1 damage every 10 frames = 12 dps, so
-  // a level-5 boss at 334 HP is ~28s of clean hits. Anything above the floor
-  // is handled by the multiplier, not the base.
-  // Scaled by scrap spent ON UPGRADES so a boss only gets tougher when the
-  // player is actually stronger — not for hoarding, and not for rerolling.
-  return Math.round((227 + 107 * (lv / 5)) * RLCore.bossHpMultiplier(scrapOnUpgrades));
+  // Hand-set per boss, fitted so a reasonable build at that level kills it in
+  // its target time. See the boss table in the pure core.
+  return RLCore.bossHp(lv);
 }
 
 function spawnBoss(lv) {
-  const hp = bossMaxHp(lv);
+  const def = RLCore.bossFor(lv);
+  const hp = def ? def.hp : RLCore.fittedBossHp(lv);
   boss = {
     x: W/2, y: -70, targetY: 150,
     hp, maxHp: hp,
-    tier: Math.max(1, Math.round(lv / 5)),
+    key: def ? def.key : 'scrapjaw',
+    name: def ? def.name : 'UNKNOWN CONTACT',
+    maxPhases: def ? def.phases : 3,
+    tier: Math.max(1, Math.round(lv / 10)),
     phase: 1, entering: true, flash: 0,
     attackTimer: 0, minionTimer: 0,
     laser: null, beamCooldown: 0,
@@ -1497,9 +2126,12 @@ function spawnBoss(lv) {
   Music.setBoss(true);
 }
 
+// Phases are even slices of the health bar, so a seven-phase mothership and a
+// two-phase Scrapjaw both change at predictable, readable moments.
 function bossPhaseFor(b) {
+  const n = Math.max(1, b.maxPhases || 3);
   const f = b.hp / b.maxHp;
-  return f > 0.66 ? 1 : f > 0.33 ? 2 : 3;
+  return Math.min(n, Math.max(1, n - Math.floor(f * n)));
 }
 
 function updateBoss() {
@@ -1526,7 +2158,7 @@ function updateBoss() {
       // The boss is the biggest kill in the game and used to pay no scrap at
       // all, because it never went through killEnemy. Routed through
       // scrapForKill so SCRAP MAGNET and SALVAGE RIG apply here too.
-      const bossScrap = RLCore.scrapForKill(pts, stats.scrapMul);
+      const bossScrap = RLCore.scrapForKill(pts, stats.scrapMul, level);
       scrap += bossScrap;
       addFlashText('+' + pts.toLocaleString(), b.x, b.y, '#ffdd44');
       addFlashText('+' + bossScrap.toLocaleString() + ' SCRAP', b.x, b.y + 24, '#ffdd44');
@@ -1875,7 +2507,7 @@ function killEnemy(e) {
   score += st.points * multiplier;
   // Scrap deliberately ignores the combo multiplier — score rewards a hot
   // streak, but the shop economy stays predictable only if scrap does not.
-  scrap += RLCore.scrapForKill(st.points, stats.scrapMul);
+  scrap += RLCore.scrapForKill(st.points, stats.scrapMul, level);
   // Vampiric Core: a life back every stats.lifePerKills kills.
   if (stats.lifePerKills > 0) {
     killsSinceLife++;
@@ -1942,14 +2574,18 @@ function hitPlayer() {
   // Only a hit that actually lands (past both the shield and phase early
   // returns above) strips an upgrade. Self-contained on purpose: a later
   // task's shield logic will touch the rest of hitPlayer, not this block.
-  const res = RLCore.stripCheapest(runUpgrades);
-  runUpgrades = res.owned;
-  if (res.removed) {
-    runUpgradesVersion++;
-    const t = RLCore.tierOf(res.removed.tier);
-    const u = RLCore.UPGRADES.find(x => x.id === res.removed.id);
-    addFlashText('-' + u.name, player.x, player.y - 30, t.color);
-    recomputeStats();
+  // ABSOLUTION (HYPERCLOCKED) switches this off entirely; GREED ENGINE makes
+  // it cost two. Both read through stats so the rule stays in one place.
+  if (!stats.noStrip) {
+    const res = RLCore.stripN(runUpgrades, stats.strips);
+    runUpgrades = res.owned;
+    if (res.removed) {
+      runUpgradesVersion++;
+      const t = RLCore.tierOf(RLCore.effectiveTier(RLCore.byId(res.removed.id), voidbirths));
+      const u = RLCore.resolve(RLCore.byId(res.removed.id), voidbirths);
+      addFlashText('-' + u.name, player.x, player.y - 30, t.color);
+      recomputeStats();
+    }
   }
   lives--;
   player.invincible = 120;
@@ -2345,6 +2981,7 @@ function draw() {
   // The shop owns the whole frame: it draws its own background and does not
   // want the screen-shake transform or the play HUD drawn under/over it.
   if (state === 'shop') { drawShop(); return; }
+  if (state === 'voidbirth') { drawVoidbirth(); return; }
 
   ctx.save();
   ctx.translate(FX.shakeX, FX.shakeY);
@@ -2874,23 +3511,30 @@ function drawGameOver() {
 
 // ===== SHOP =====
 
-const SHOP_SECONDS = 30;
-let shopSlots = [], shopTimer = 0, shopRerolls = 0, shopSel = 0, haulerX = W + 120;
-let shopApexFlash = 0;
+// The countdown is gone. A shop that rushes you is pressure applied to the one
+// moment in the run that is supposed to be a breather, so the hauler now stays
+// docked until you choose to leave.
+let shopSlots = [], shopRerolls = 0, shopSel = 0, haulerX = W + 120;
+let shopApexFlash = 0, shopDockTick = 0, shopFreeRerolls = 0, shopName = '';
+
+const HAULER_NAMES = ['MERIDIAN', 'BLACKFOOT', 'CALLOWAY', 'DUST ROSE', 'OLD SEPTEMBER',
+  'HANNIBAL GREY', 'TIN WIDOW', 'LONG MARCH', 'SALT & IRON', 'PATIENT MULE'];
 
 function openShop() {
   // update() does not run during the shop, so the player cannot move while
   // enemy bullets sit frozen mid-flight — one parked beside the hull would
   // land on the first frame after DEPART, costing a life AND the upgrade just
-  // bought. The spec says nothing threatens the ship while it is docked, so
-  // the in-flight bullets are cleared rather than paused.
+  // bought. Nothing threatens the ship while it is docked, so the in-flight
+  // bullets are cleared rather than paused.
   enemyBullets = [];
-  shopSlots = RLCore.rollShop(level, runUpgrades, Math.random);
-  shopTimer = 60 * SHOP_SECONDS;
+  shopSlots = RLCore.rollShop(level, voidbirths, runUpgrades, Math.random, stats.shopSlots);
   shopRerolls = 0;
+  shopFreeRerolls = stats.freeRerolls;
   shopSel = 0;
   haulerX = W + 120;
+  shopDockTick = 0;
   shopApexFlash = 0;
+  shopName = HAULER_NAMES[Math.floor(Math.random() * HAULER_NAMES.length)];
   state = 'shop';
   noteApex();
 }
@@ -2898,9 +3542,19 @@ function openShop() {
 // Standalone (not inlined into openShop) because Task 10's reroll calls it
 // too — an APEX rerolled into still counts. Tolerates null slots because
 // Task 10 sets a bought slot to null.
+// Anything at APEX or above is a story, so all five top tiers announce
+// themselves rather than only the one that happened to be top when the ladder
+// was six rungs long.
+const LOUD_TIERS = ['APEX', 'OVERCLOCKED', 'HYPERCLOCKED', 'UBERCLOCKED', 'DYNACLOCKED'];
+
 function noteApex() {
-  if (!shopSlots.some(s => s && s.tier === 'APEX')) return;
-  Save.data.apexFound += 1; Save.write();
+  const loud = shopSlots.filter(s => s && LOUD_TIERS.indexOf(s.tier) !== -1);
+  if (!loud.length) return;
+  loud.forEach(s => {
+    Save.data.tiersFound[s.tier] = (Save.data.tiersFound[s.tier] || 0) + 1;
+  });
+  Save.data.apexFound += loud.length;
+  Save.write();
   // FX.addShake is deliberately NOT used for the flash: draw() returns for the
   // shop before it ever applies the shake transform, and drawShop applies no
   // transform of its own, so an FX-driven flash would be invisible. drawShop
@@ -2911,11 +3565,12 @@ function noteApex() {
 }
 
 function updateShop() {
-  // The hauler slides in and parks; the clock runs regardless.
-  haulerX += (W - 96 - haulerX) * 0.08;
+  // The hauler flies in, decelerates, and clamps on. No clock: it leaves when
+  // you tell it to.
+  haulerX += (W/2 - haulerX) * 0.07;
+  shopDockTick++;
+  if (shopDockTick === 34) Sound.play('dock');
   if (shopApexFlash > 0) shopApexFlash--;
-  shopTimer--;
-  if (shopTimer <= 0) closeShop();
 }
 
 function closeShop() {
@@ -2924,21 +3579,39 @@ function closeShop() {
   spawnParticles(W/2, H/2, '#00ffff', 30);
   Sound.play('levelUp');
   if (stats.fortress > 0) player.shieldCharges = Math.max(player.shieldCharges, stats.fortress);
-  if (level % 5 === 0) spawnBoss(level);
+  if (RLCore.isBossLevel(level)) spawnBoss(level);
 }
 
 // Screen-space rects for the shop panel. shopSlots may hold fewer than 3
 // entries once the upgrade pool runs dry, but the rects still reserve all
 // three card positions so the remaining cards keep their original spots.
-const SLOT_RECTS = [0, 1, 2].map(i => ({ x: 24 + i*146, y: 300, w: 134, h: 150 }));
-const REROLL_RECT = { x: W/2 - 150, y: 474, w: 140, h: 34 };
-const DEPART_RECT = { x: W/2 + 10,  y: 474, w: 140, h: 34 };
+// BROKER LICENCE can add a fourth card, so the rects are computed from the
+// live slot count rather than fixed at three. Cards stay centred and shrink
+// to fit rather than running off the 480px canvas.
+function slotRects(n) {
+  const count = Math.max(1, n || shopSlots.length || 3);
+  const gap = 12;
+  const w = Math.min(134, Math.floor((W - 48 - gap * (count - 1)) / count));
+  const total = count * w + gap * (count - 1);
+  const x0 = Math.round((W - total) / 2);
+  return Array.from({ length: count }, (_, i) => ({ x: x0 + i * (w + gap), y: 300, w, h: 150 }));
+}
+const SLOT_RECTS = slotRects(3);   // retained for the pointer fallback path
+const REROLL_RECT = { x: W/2 - 228, y: 474, w: 142, h: 34 };
+const DEPART_RECT = { x: W/2 -  72, y: 474, w: 142, h: 34 };
+const SKIP_RECT   = { x: W/2 +  84, y: 474, w: 142, h: 34 };
+
+// WAR CHEST discounts everything on the rack. Read through one function so
+// the card, the affordability check, and the charge can never disagree.
+function slotPrice(u) {
+  return RLCore.priceFor(u.tier, stats ? stats.priceDiscount : 0);
+}
 
 function tryBuySlot(i) {
   const u = shopSlots[i];
   if (!u) { Sound.play('uiDeny'); return false; }
   const t = RLCore.tierOf(u.tier);
-  const price = t.price;
+  const price = slotPrice(u);
   if (scrap < price) { Sound.play('uiDeny'); return false; }
   // REPAIR KIT tops the ship up to its starting lives + 2 and no further. At
   // the ceiling the purchase is refused outright rather than taking 500 scrap
@@ -2965,41 +3638,118 @@ function tryBuySlot(i) {
   return true;
 }
 
+function rerollCost() {
+  return shopFreeRerolls > 0 ? 0 : RLCore.rerollCost(shopRerolls);
+}
+
 function tryReroll() {
-  const cost = RLCore.rerollCost(shopRerolls);
+  const cost = rerollCost();
   if (scrap < cost) { Sound.play('uiDeny'); return false; }
-  scrap -= cost;
-  // Counted in scrapSpent (the player's total outlay) but NOT in
-  // scrapOnUpgrades: a reroll buys zero power, so it must not raise boss HP.
-  scrapSpent += cost;
-  shopRerolls++;
-  shopSlots = RLCore.rollShop(level, runUpgrades, Math.random);
+  if (shopFreeRerolls > 0) {
+    shopFreeRerolls--;              // DEALER FRIEND: a free spin, and it does
+  } else {                          // not advance the doubling ladder.
+    scrap -= cost;
+    // Counted in scrapSpent (the player's total outlay) but not in
+    // scrapOnUpgrades, which tracks scrap that actually bought power.
+    scrapSpent += cost;
+    shopRerolls++;
+  }
+  shopSlots = RLCore.rollShop(level, voidbirths, runUpgrades, Math.random, stats.shopSlots);
   shopSel = Math.min(shopSel, Math.max(0, shopSlots.length - 1));
   noteApex();
   Sound.play('uiMove');
   return true;
 }
 
+// A real ship, not a slab: panel-lined hull, lit cargo bay, running lights, a
+// deceleration burn on approach, docking clamps that physically reach down to
+// the player, and a name stencilled on the flank.
+function drawHauler() {
+  const dock = Math.min(1, shopDockTick / 40);          // 0 → 1 as it settles
+  const clamp = Math.max(0, Math.min(1, (shopDockTick - 30) / 22));
+  ctx.save();
+  ctx.translate(haulerX, 118);
+
+  const HW = 118, HH = 46;
+
+  // deceleration burn, ahead of the hull while it is still braking
+  if (dock < 1) {
+    const b = (1 - dock);
+    ctx.fillStyle = `rgba(120,200,255,${0.55 * b})`;
+    ctx.beginPath();
+    ctx.moveTo(-HW - 4, -10); ctx.lineTo(-HW - 4 - 46 * b, 0); ctx.lineTo(-HW - 4, 10);
+    ctx.closePath(); ctx.fill();
+  }
+
+  // hull
+  ctx.fillStyle = '#22323f';
+  ctx.beginPath();
+  ctx.moveTo(-HW, -HH + 14); ctx.lineTo(-HW + 26, -HH);
+  ctx.lineTo(HW - 34, -HH);  ctx.lineTo(HW, -HH + 18);
+  ctx.lineTo(HW, HH - 10);   ctx.lineTo(HW - 40, HH);
+  ctx.lineTo(-HW + 18, HH);  ctx.lineTo(-HW, HH - 16);
+  ctx.closePath(); ctx.fill();
+  ctx.strokeStyle = '#4d6c88'; ctx.lineWidth = 2; ctx.stroke();
+
+  // panel lines and weathering
+  ctx.strokeStyle = 'rgba(255,255,255,0.06)'; ctx.lineWidth = 1;
+  for (let i = -3; i <= 3; i++) {
+    ctx.beginPath(); ctx.moveTo(i * 30, -HH + 6); ctx.lineTo(i * 30, HH - 6); ctx.stroke();
+  }
+  ctx.fillStyle = 'rgba(140,90,50,0.16)';
+  ctx.fillRect(-HW + 40, -HH + 8, 34, 9);
+  ctx.fillRect(HW - 72, HH - 20, 42, 7);
+
+  // lit cargo bay along the flank — the cards rise out of this
+  ctx.fillStyle = '#08131c';
+  ctx.fillRect(-HW + 24, 6, HW * 2 - 62, 22);
+  ctx.fillStyle = `rgba(255,196,90,${0.30 + 0.12 * Math.sin(frame * 0.07)})`;
+  ctx.fillRect(-HW + 24, 6, HW * 2 - 62, 22);
+  ctx.fillStyle = '#0c1a26';
+  for (let i = 0; i < 7; i++) ctx.fillRect(-HW + 32 + i * 28, 9, 8, 16);
+
+  // bridge windows
+  ctx.fillStyle = '#ffd47a';
+  for (let i = 0; i < 4; i++) ctx.fillRect(HW - 46 + i * 9, -HH + 12, 5, 8);
+
+  // running lights
+  const blink = Math.floor(frame / 22) % 2;
+  ctx.fillStyle = blink ? '#ff4444' : '#331111';
+  ctx.fillRect(-HW + 4, -6, 6, 6);
+  ctx.fillStyle = blink ? '#33ff77' : '#113322';
+  ctx.fillRect(HW - 10, -6, 6, 6);
+
+  // name stencil
+  ctx.textAlign = 'left';
+  ctx.fillStyle = 'rgba(190,215,235,0.45)';
+  ctx.font = 'bold 11px monospace';
+  ctx.fillText(shopName, -HW + 30, -HH + 26);
+
+  // docking clamps, reaching down to the player's hull
+  if (clamp > 0) {
+    ctx.strokeStyle = '#6f8ba6'; ctx.lineWidth = 5; ctx.lineCap = 'round';
+    [-34, 34].forEach(dx => {
+      ctx.beginPath();
+      ctx.moveTo(dx, HH - 2);
+      ctx.lineTo(dx * 0.55, HH + 52 * clamp);
+      ctx.stroke();
+    });
+    ctx.lineCap = 'butt';
+    if (clamp >= 1) {
+      ctx.fillStyle = `rgba(0,255,238,${0.25 + 0.2 * Math.sin(frame * 0.12)})`;
+      ctx.fillRect(-30, HH + 48, 60, 3);
+    }
+  }
+  ctx.restore();
+}
+
 function drawShop() {
   drawBg();
+  drawHauler();
 
-  // Hauler: a slab hull with lit windows, parked alongside the player.
-  ctx.save();
-  ctx.translate(haulerX, 150);
-  ctx.fillStyle = '#1b2836';
-  ctx.fillRect(-70, -46, 140, 92);
-  ctx.strokeStyle = '#3d5872'; ctx.lineWidth = 2;
-  ctx.strokeRect(-70, -46, 140, 92);
-  ctx.fillStyle = '#ffcc55';
-  for (let i = 0; i < 5; i++) ctx.fillRect(-56 + i*24, -30, 12, 10);
-  ctx.fillStyle = '#2a3d52';
-  ctx.fillRect(-70, 10, 140, 16);
-  ctx.fillStyle = '#00ddff';
-  ctx.font = 'bold 10px monospace'; ctx.textAlign = 'center';
-  ctx.fillText('CARGO', 0, 36);
-  ctx.restore();
-
-  drawShip(player.x, player.y, 0, player.shieldCharges, frame, 0);
+  // The player parks under the clamps rather than wherever it happened to be
+  // when the level ended, so the docking reads as one connected image.
+  drawShip(W/2, 218, 0, player.shieldCharges, frame, 0);
 
   ctx.fillStyle = 'rgba(0,5,20,0.82)';
   ctx.fillRect(0, 236, W, 300);
@@ -3008,17 +3758,22 @@ function drawShop() {
   ctx.fillStyle = '#00eeff'; ctx.font = 'bold 18px monospace';
   ctx.fillText('CARGO DOCKED', W/2, 268);
 
-  const secs = Math.ceil(shopTimer / 60);
-  ctx.fillStyle = secs <= 5 ? '#ff5544' : '#8fb4d4';
-  ctx.font = 'bold 14px monospace';
-  ctx.fillText('0:' + String(secs).padStart(2, '0'), W/2, 290);
+  ctx.fillStyle = '#5b7b96'; ctx.font = '10px monospace';
+  ctx.fillText('NO RUSH — LEAVE WHEN YOU ARE READY', W/2, 288);
 
   ctx.textAlign = 'left';
   ctx.fillStyle = '#ffdd44'; ctx.font = 'bold 13px monospace';
   ctx.fillText('SCRAP ' + Math.floor(scrap).toLocaleString(), 24, 268);
 
+  if (voidbirths > 0) {
+    ctx.textAlign = 'right';
+    ctx.fillStyle = '#00ffee'; ctx.font = 'bold 12px monospace';
+    ctx.fillText('VOIDBIRTH ' + RLCore.ROMAN[voidbirths - 1], W - 24, 268);
+  }
+
+  const rects = slotRects(shopSlots.length);
   shopSlots.forEach((u, i) => {
-    const r = SLOT_RECTS[i];
+    const r = rects[i];
     if (!u) {
       ctx.fillStyle = 'rgba(255,255,255,0.03)';
       ctx.fillRect(r.x, r.y, r.w, r.h);
@@ -3027,9 +3782,12 @@ function drawShop() {
       return;
     }
     const t = RLCore.tierOf(u.tier);
-    const afford = scrap >= t.price;
-    const col = u.tier === 'APEX'
-      ? (Math.floor(frame/6) % 2 ? '#00ffee' : '#ffdd33')
+    const price = slotPrice(u);
+    const afford = scrap >= price;
+    // Every tier from APEX up animates between its two colours, so the loud
+    // ones are unmistakable at a glance rather than only APEX being special.
+    const col = LOUD_TIERS.indexOf(u.tier) !== -1
+      ? (Math.floor(frame/6) % 2 ? t.color : t.color2)
       : t.color;
 
     ctx.globalAlpha = afford ? 1 : 0.45;
@@ -3049,17 +3807,18 @@ function drawShop() {
     wrapText(u.desc, r.x + r.w/2, r.y + 88, r.w - 14, 11);
 
     ctx.fillStyle = afford ? '#ffdd44' : '#7d6a4a'; ctx.font = 'bold 12px monospace';
-    ctx.fillText(t.price.toLocaleString(), r.x + r.w/2, r.y + r.h - 14);
+    ctx.fillText(price.toLocaleString(), r.x + r.w/2, r.y + r.h - 14);
     ctx.globalAlpha = 1;
   });
 
-  const rc = RLCore.rerollCost(shopRerolls);
-  drawShopButton(REROLL_RECT, 'REROLL ' + rc.toLocaleString(), scrap >= rc);
+  const rc = rerollCost();
+  drawShopButton(REROLL_RECT, rc === 0 ? 'REROLL FREE' : 'REROLL ' + rc.toLocaleString(), scrap >= rc);
   drawShopButton(DEPART_RECT, 'DEPART →', true);
+  drawShopButton(SKIP_RECT, 'SKIP', true);
 
   ctx.textAlign = 'center';
   ctx.fillStyle = '#5b6b80'; ctx.font = '10px monospace';
-  ctx.fillText('← → choose    SPACE buy    R reroll    D depart', W/2, 524);
+  ctx.fillText('← → choose   SPACE buy   R reroll   D depart   S skip', W/2, 524);
 
   // APEX flash. Drawn here, last and full-screen, because draw() returns for
   // the shop before the FX shake transform and drawShop applies none — an
@@ -3118,6 +3877,7 @@ function loop() {
     nebulae.forEach(n => { n.y += n.speed; if (n.y - n.ry > H) n.y = -n.ry; });
 
     if (state === 'shop') updateShop();
+    if (state === 'voidbirth') updateVoidbirth();
 
     // Animate the credit payout on the game-over screen.
     if (state === 'dead' && creditsShown < runCredits) {
