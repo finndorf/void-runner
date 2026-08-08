@@ -3751,8 +3751,11 @@ function drawShop() {
   // when the level ended, so the docking reads as one connected image.
   drawShip(W/2, 218, 0, player.shieldCharges, frame, 0);
 
+  // The panel runs to the bottom of the canvas: stopping it at 536 left a band
+  // of dead black under the buttons that read as a rendering fault rather than
+  // as space.
   ctx.fillStyle = 'rgba(0,5,20,0.82)';
-  ctx.fillRect(0, 236, W, 300);
+  ctx.fillRect(0, 236, W, H - 236);
 
   ctx.textAlign = 'center';
   ctx.fillStyle = '#00eeff'; ctx.font = 'bold 18px monospace';
@@ -3820,6 +3823,8 @@ function drawShop() {
   ctx.fillStyle = '#5b6b80'; ctx.font = '10px monospace';
   ctx.fillText('← → choose   SPACE buy   R reroll   D depart   S skip', W/2, 524);
 
+  drawShopBuild();
+
   // APEX flash. Drawn here, last and full-screen, because draw() returns for
   // the shop before the FX shake transform and drawShop applies none — an
   // FX-driven flash would never reach the screen.
@@ -3828,6 +3833,48 @@ function drawShop() {
     const rgb = Math.floor(frame/4) % 2 ? '0,255,238' : '255,221,51';   // APEX's two colours
     ctx.fillStyle = 'rgba(' + rgb + ',' + a + ')';
     ctx.fillRect(0, 0, W, H);
+  }
+}
+
+// What you already own, listed under the rack. You are deciding what to buy,
+// so the thing you most need to see is what you have — and at depth the build
+// is also the only place the tier colours of your run are visible at once.
+function drawShopBuild() {
+  const top = 552;
+  ctx.textAlign = 'left';
+  ctx.fillStyle = '#4d5f73'; ctx.font = 'bold 10px monospace';
+  ctx.fillText('YOUR BUILD', 24, top);
+
+  if (!runUpgrades.length) {
+    ctx.fillStyle = '#39485a'; ctx.font = '10px monospace';
+    ctx.fillText('nothing yet — a hit costs you your cheapest upgrade first,', 24, top + 20);
+    ctx.fillText('so cheap ones are armour around the expensive ones.', 24, top + 34);
+    return;
+  }
+
+  // Cheapest first, matching the order a hit will strip them in — so the
+  // list doubles as a readout of what you are about to lose.
+  const rows = runUpgrades.map(o => {
+    const u = RLCore.byId(o.id);
+    if (!u) return null;
+    const r = RLCore.resolve(u, voidbirths);
+    return { name: r.name, stacks: o.stacks, tier: r.tier, idx: RLCore.tierIndexOf(r.tier) };
+  }).filter(Boolean).sort((a, b) => a.idx - b.idx);
+
+  const COLS = 2, ROWS = 7;
+  rows.slice(0, COLS * ROWS).forEach((r, i) => {
+    const cx = 24 + (i % COLS) * 220;
+    const cy = top + 18 + Math.floor(i / COLS) * 15;
+    ctx.fillStyle = RLCore.tierOf(r.tier).color;
+    ctx.font = '10px monospace';
+    const label = r.name + (r.stacks > 1 ? ' ×' + r.stacks : '');
+    ctx.fillText(label.length > 26 ? label.slice(0, 25) + '…' : label, cx, cy);
+  });
+
+  const hidden = rows.length - COLS * ROWS;
+  if (hidden > 0) {
+    ctx.fillStyle = '#4d5f73'; ctx.font = '10px monospace';
+    ctx.fillText('+' + hidden + ' more', 24, top + 18 + ROWS * 15);
   }
 }
 
