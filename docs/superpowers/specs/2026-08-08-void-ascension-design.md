@@ -186,8 +186,8 @@ Each upgrade carries a **lineage**, and voidbirth advances every lineage one ste
 RELOAD COIL (COMMON, +5% fire rate)
   → VB1 → RELOAD ARRAY      (UNCOMMON, +11%)
   → VB2 → RELOAD LATTICE    (RARE,     +24%)
-  → VB3 → RELOAD CASCADE    (EPIC,     +52%)
-  → VB4 → RELOAD SINGULARITY(LEGENDARY,+110%)
+  → VB3 → RELOAD CASCADE    (EPIC,     +53%)
+  → VB4 → RELOAD SINGULARITY(LEGENDARY,+117%)
 ```
 
 So the shop's floor tier rises with each voidbirth: after VB1 no COMMON ever
@@ -283,7 +283,13 @@ Rerolls stay, at `300 × 2^uses`, reset each visit.
 
 ## 5. Upgrades
 
-**114 upgrades**, up from 29, spread across all eleven tiers.
+**114 upgrades**, up from 29, spread across all eleven tiers. Twenty-two of them
+carry a lineage, so voidbirth renames them as they climb.
+
+Every effect key in the catalogue is read by `resolveStats`, and every stat
+`resolveStats` produces is consumed by the game. That is checked mechanically,
+not by eye: a card whose effect goes nowhere is the exact bug that shipped a
+2,100-scrap dead PHASE DRIVE last time.
 
 | tier | count | stacks | character |
 | --- | --- | --- | --- |
@@ -370,9 +376,11 @@ readable at a glance:
 | swarmling | tiny darting mote, always in tens |
 | harbinger | a small mothership with its own health bar |
 
-They also **grow**: enemy render radius scales `r × (1 + level^0.35 / 22)`, capped
+They also **grow**: enemy render radius scales `r × (1 + level^0.35 / 11)`, capped
 at 2.4×, so a level-2000 grunt is genuinely a large ship rather than the same
-sprite with more HP.
+sprite with more HP. The divisor is 11 rather than 22 because at 22 the cap was
+unreachable — a level-2500 enemy only reached 1.70×, and 2.4× would not have
+arrived until somewhere past level 17,000.
 
 ### Fixing the side attack
 

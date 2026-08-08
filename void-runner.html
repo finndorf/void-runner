@@ -66,9 +66,13 @@ RLCore.SAVE_VERSION = 3;
 // any save whose version does not match would wipe every player's credits and
 // ships the moment the format changed. v1 and v2 both upgrade in place.
 RLCore.migrateSave = function (parsed, defaults) {
-  if (!parsed || typeof parsed !== 'object') return { data: defaults, ok: false };
+  // The failure path returns a COPY: handing back the caller's own defaults
+  // object means anything that later writes to the result corrupts the
+  // defaults for the rest of the session.
+  const fresh = () => ({ data: Object.assign({}, defaults), ok: false });
+  if (!parsed || typeof parsed !== 'object') return fresh();
   const v = parsed.version;
-  if (v !== 1 && v !== 2 && v !== RLCore.SAVE_VERSION) return { data: defaults, ok: false };
+  if (v !== 1 && v !== 2 && v !== RLCore.SAVE_VERSION) return fresh();
 
   const data = Object.assign({}, defaults, parsed);
   data.version = RLCore.SAVE_VERSION;
@@ -210,9 +214,12 @@ RLCore.enemyHp = function (kind, level) {
 
 // Enemies grow as well as toughen, so a deep-run grunt reads as a real ship
 // rather than the same sprite with a bigger number behind it.
+// Divisor set so the cap is actually approached inside the playable range:
+// at 22 it only reached 1.70x at level 2500 and would not have hit 2.4x until
+// somewhere past level 17,000, which is not a size curve anyone would ever see.
 RLCore.ENEMY_SCALE_CAP = 2.4;
 RLCore.enemyScale = function (level) {
-  return Math.min(RLCore.ENEMY_SCALE_CAP, 1 + Math.pow(Math.max(1, level), 0.35) / 22);
+  return Math.min(RLCore.ENEMY_SCALE_CAP, 1 + Math.pow(Math.max(1, level), 0.35) / 11);
 };
 
 RLCore.METEORS = [
@@ -312,8 +319,16 @@ RLCore.bossHp = function (level) {
   return b ? b.hp : 0;
 };
 
+// Both sources have to be consulted, not just the table: past level 1000 the
+// every-100 rule supplies bosses the table does not list, and scanning the
+// table alone reported the next boss after 1000 as 2500 -- skipping fourteen
+// real fights.
 RLCore.nextBossLevel = function (level) {
-  for (const b of RLCore.BOSS_TABLE) if (b.level > level) return b.level;
+  const table = RLCore.BOSS_TABLE.find(b => b.level > level);
+  const cycle = level >= 1000 ? (Math.floor(level / RLCore.ARMADA_INTERVAL) + 1) * RLCore.ARMADA_INTERVAL : null;
+  if (table && cycle) return Math.min(table.level, cycle);
+  if (table) return table.level;
+  if (cycle) return cycle;
   return (Math.floor(level / RLCore.ARMADA_INTERVAL) + 1) * RLCore.ARMADA_INTERVAL;
 };
 
@@ -397,22 +412,46 @@ RLCore.UPGRADES = [
     line: ['SCRAP MAGNET', 'SALVAGE RIG', 'SALVAGE ENGINE', 'REFINERY', 'ALCHEMICAL HOLD', 'MIDAS FIELD'] },
   { id: 'tight_barrel', tier: 'COMMON', name: 'TIGHT BARREL', desc: '-8% shot spread',  effect: { spreadMul: -0.08 },
     line: ['TIGHT BARREL', 'RIFLED BORE', 'RAIL ALIGNMENT', 'COHERENT BORE', 'THE PIN', 'THE NEEDLE'] },
-  { id: 'muzzle_brake', tier: 'COMMON', name: 'MUZZLE BRAKE', desc: '+10% bullet speed', effect: { bulletSpeedMul: 0.10 } },
-  { id: 'targeting_fin',tier: 'COMMON', name: 'TARGETING FIN',desc: '+3% crit chance',  effect: { critChance: 0.03 } },
-  { id: 'scrap_hopper', tier: 'COMMON', name: 'SCRAP HOPPER', desc: '+150 scrap each level', effect: { scrapPerLevel: 150 } },
-  { id: 'ablative_trim',tier: 'COMMON', name: 'ABLATIVE TRIM',desc: '-4% your hitbox',  effect: { hitScaleMul: -0.04 } },
+  { id: 'muzzle_brake', tier: 'COMMON', name: 'MUZZLE BRAKE', desc: '+10% bullet speed', effect: { bulletSpeedMul: 0.10 },
+    line: ['MUZZLE BRAKE', 'GAS PORT', 'ACCELERATOR', 'MASS RAIL', 'LIGHTBRINGER', 'FIRST LIGHT'] },
+  { id: 'targeting_fin',tier: 'COMMON', name: 'TARGETING FIN',desc: '+3% crit chance',  effect: { critChance: 0.03 },
+    line: ['TARGETING FIN', 'RANGE CARD', 'MARKSMAN CORE', 'KILLING EYE', 'PERFECT AIM', 'THE INEVITABLE'] },
+  { id: 'scrap_hopper', tier: 'COMMON', name: 'SCRAP HOPPER', desc: '+150 scrap each level', effect: { scrapPerLevel: 150 },
+    line: ['SCRAP HOPPER', 'CARGO HOLD', 'BULK BAY', 'FOUNDRY DECK', 'TREASURY', 'THE HOARD'] },
+  { id: 'ablative_trim',tier: 'COMMON', name: 'ABLATIVE TRIM',desc: '-4% your hitbox',  effect: { hitScaleMul: -0.04 },
+    line: ['ABLATIVE TRIM', 'SLIM PROFILE', 'GHOST FRAME', 'HALF-THERE', 'BARELY THERE', 'NOT THERE AT ALL'] },
+  { id: 'coolant_line', tier: 'COMMON', name: 'COOLANT LINE', desc: '+4% fire rate, +6% bullet speed', effect: { fireRateMul: 0.04, bulletSpeedMul: 0.06 },
+    line: ['COOLANT LINE', 'HEAT SINK', 'CRYO LOOP', 'ZERO-POINT LOOP', 'ABSOLUTE COOL', 'THERMODYNAMIC HERESY'] },
+  { id: 'impact_tips',  tier: 'COMMON', name: 'IMPACT TIPS',  desc: '+5% damage, +2% crit chance', effect: { damageMul: 0.05, critChance: 0.02 },
+    line: ['IMPACT TIPS', 'HARD POINTS', 'PENETRATORS', 'STAR-METAL TIPS', 'VOIDSTEEL', 'THE OPENING ARGUMENT'] },
+  { id: 'nav_trim',     tier: 'COMMON', name: 'NAV TRIM',     desc: '+4% speed, -3% hitbox', effect: { speedMul: 0.04, hitScaleMul: -0.03 },
+    line: ['NAV TRIM', 'FLIGHT COMPUTER', 'REFLEX LINK', 'PRECOGNITION', 'THE SIDESTEP', 'ALREADY GONE'] },
+  { id: 'field_kit',    tier: 'COMMON', name: 'FIELD KIT',    desc: 'a shield every 60 kills', effect: { shieldPerKills: 60 },
+    line: ['FIELD KIT', 'REPAIR DRONE', 'NANOFORGE', 'SELF-KNITTING HULL', 'THE MENDING', 'NEVER SCRATCHED'] },
 
   // --- UNCOMMON -----------------------------------------------------------
-  { id: 'twin_feed',    tier: 'UNCOMMON', name: 'TWIN FEED',    desc: '+10% fire rate',        effect: { fireRateMul: 0.10 } },
-  { id: 'ap_rounds',    tier: 'UNCOMMON', name: 'AP ROUNDS',    desc: '+12% damage',           effect: { damageMul: 0.12 } },
-  { id: 'repair_kit',   tier: 'UNCOMMON', name: 'REPAIR KIT',   desc: '+1 life',               effect: { lives: 1 } },
-  { id: 'evasion',      tier: 'UNCOMMON', name: 'EVASION FIELD',desc: '+8% speed, -6% size',   effect: { speedMul: 0.08, hitScaleMul: -0.06 } },
-  { id: 'wide_mount',   tier: 'UNCOMMON', name: 'WIDE MOUNT',   desc: '+1 shot',               effect: { extraShots: 1 } },
-  { id: 'gimbal_mount', tier: 'UNCOMMON', name: 'GIMBAL MOUNT', desc: 'shots aim up to 18 degrees', effect: { aimCone: 0.31 } },
-  { id: 'hardened_hull',tier: 'UNCOMMON', name: 'HARDENED HULL',desc: '+6% crit chance',       effect: { critChance: 0.06 } },
-  { id: 'salvage_rig',  tier: 'UNCOMMON', name: 'SALVAGE RIG',  desc: '+16% scrap from kills', effect: { scrapMul: 0.16 } },
+  { id: 'twin_feed',    tier: 'UNCOMMON', name: 'TWIN FEED',    desc: '+10% fire rate',        effect: { fireRateMul: 0.10 },
+    line: ['TWIN FEED', 'TRIPLE FEED', 'BELT DRIVE', 'CYCLIC ENGINE', 'THE DELUGE', 'CONTINUOUS FIRE'] },
+  { id: 'ap_rounds',    tier: 'UNCOMMON', name: 'AP ROUNDS',    desc: '+12% damage',           effect: { damageMul: 0.12 },
+    line: ['AP ROUNDS', 'SABOT ROUNDS', 'DEPLETED CORE', 'COLLAPSAR SLUG', 'STARKILLER', 'FULL STOP'] },
+  { id: 'repair_kit',   tier: 'UNCOMMON', name: 'REPAIR KIT',   desc: '+1 life',               effect: { lives: 1 },
+    line: ['REPAIR KIT', 'MED BAY', 'CLONE VAT', 'PATTERN BUFFER', 'RESURRECTION', 'THE SPARE LIFE'] },
+  { id: 'evasion',      tier: 'UNCOMMON', name: 'EVASION FIELD',desc: '+8% speed, -6% size',   effect: { speedMul: 0.08, hitScaleMul: -0.06 },
+    line: ['EVASION FIELD', 'BLUR DRIVE', 'PHASE SHIFT', 'SMEAR', 'AFTERIMAGE', 'THE UNHITTABLE'] },
+  { id: 'wide_mount',   tier: 'UNCOMMON', name: 'WIDE MOUNT',   desc: '+1 shot',               effect: { extraShots: 1 },
+    line: ['WIDE MOUNT', 'TRIPLE MOUNT', 'BATTERY MOUNT', 'BROADSIDE', 'THE FAN', 'ALL OF THEM AT ONCE'] },
+  { id: 'gimbal_mount', tier: 'UNCOMMON', name: 'GIMBAL MOUNT', desc: 'shots aim up to 18 degrees', effect: { aimCone: 0.31 },
+    line: ['GIMBAL MOUNT', 'SERVO MOUNT', 'PREDICTIVE GIMBAL', 'SOLUTION ENGINE', 'THE LEAD', 'ALWAYS ALREADY AIMED'] },
+  { id: 'hardened_hull',tier: 'UNCOMMON', name: 'HARDENED HULL',desc: '+6% crit chance',       effect: { critChance: 0.06 },
+    line: ['HARDENED HULL', 'WEAK-POINT SCAN', 'FAULT FINDER', 'ACHILLES ARRAY', 'THE FLAW', 'EVERYTHING HAS A SEAM'] },
+  { id: 'salvage_rig',  tier: 'UNCOMMON', name: 'SALVAGE RIG',  desc: '+16% scrap from kills', effect: { scrapMul: 0.16 },
+    line: ['SALVAGE RIG', 'BREAKER YARD', 'SMELTER', 'TRANSMUTER', 'GOLD FROM LEAD', 'THE PHILOSOPHER'] },
   { id: 'siege_optics', tier: 'UNCOMMON', name: 'SIEGE OPTICS', desc: '+12% damage to bosses', effect: { bossDamageMul: 0.12 } },
   { id: 'kill_shield',  tier: 'UNCOMMON', name: 'KILL SHIELD',  desc: 'a shield every 40 kills', effect: { shieldPerKills: 40 } },
+  { id: 'burst_cells',  tier: 'UNCOMMON', name: 'BURST CELLS',  desc: '+8% fire rate, +10% bullet speed', effect: { fireRateMul: 0.08, bulletSpeedMul: 0.10 } },
+  { id: 'shaped_charge',tier: 'UNCOMMON', name: 'SHAPED CHARGE',desc: 'shots burst slightly on impact', effect: { splash: 18 } },
+  { id: 'flash_freeze', tier: 'UNCOMMON', name: 'FLASH FREEZE', desc: 'hits slow enemies by 20%', effect: { chill: 0.20 } },
+  { id: 'pocket_forge', tier: 'UNCOMMON', name: 'POCKET FORGE', desc: '+250 scrap a level, -6% prices', effect: { scrapPerLevel: 250, priceDiscount: 0.06 } },
 
   // --- RARE ---------------------------------------------------------------
   { id: 'piercing',     tier: 'RARE', name: 'PIERCING ROUNDS', desc: 'shots pass through one enemy', effect: { pierce: 1 } },
@@ -425,6 +464,10 @@ RLCore.UPGRADES = [
   { id: 'ricochet',     tier: 'RARE', name: 'RICOCHET',        desc: 'shots bounce off the walls twice', effect: { ricochet: 2 } },
   { id: 'thorns',       tier: 'RARE', name: 'REACTIVE ARMOUR', desc: 'blocked hits detonate around you', effect: { thorns: true } },
   { id: 'war_chest',    tier: 'RARE', name: 'WAR CHEST',       desc: 'shop prices -12%',             effect: { priceDiscount: 0.12 } },
+  { id: 'bounce_plate', tier: 'RARE', name: 'BOUNCE PLATE',    desc: 'shots bounce off a wall once', effect: { ricochet: 1 } },
+  { id: 'ember_rounds', tier: 'RARE', name: 'EMBER ROUNDS',    desc: 'hits burn for 25% more over 2s', effect: { burn: 0.25 } },
+  { id: 'gyro_gimbal',  tier: 'RARE', name: 'GYRO GIMBAL',     desc: 'shots aim up to 29 degrees',   effect: { aimCone: 0.50 } },
+  { id: 'siege_sight',  tier: 'RARE', name: 'SIEGE SIGHT',     desc: '+22% boss damage, +5% crit',   effect: { bossDamageMul: 0.22, critChance: 0.05 } },
 
   // --- EPIC ---------------------------------------------------------------
   { id: 'rear_cannon',  tier: 'EPIC', name: 'REAR CANNON',   desc: 'you also fire backwards',      effect: { rear: true } },
@@ -435,6 +478,11 @@ RLCore.UPGRADES = [
   { id: 'executioner',  tier: 'EPIC', name: 'EXECUTIONER',   desc: 'finishes enemies under 12% HP', effect: { execute: 0.12 } },
   { id: 'fourth_slot',  tier: 'EPIC', name: 'BROKER LICENCE',desc: 'the shop shows a fourth card',  effect: { shopSlots: 1 } },
   { id: 'free_reroll',  tier: 'EPIC', name: 'DEALER FRIEND', desc: 'one free reroll every shop',    effect: { freeRerolls: 1 } },
+  { id: 'scout_drone',  tier: 'EPIC', name: 'SCOUT DRONE',   desc: 'a light drone flies with you',  effect: { drones: 1 } },
+  { id: 'cryo_lance',   tier: 'EPIC', name: 'CRYO LANCE',    desc: 'hits slow by 50% and pierce',   effect: { chill: 0.50, pierce: 1 } },
+  { id: 'pyre',         tier: 'EPIC', name: 'PYRE',          desc: 'hits burn for 70% more',        effect: { burn: 0.70 } },
+  { id: 'deep_pockets', tier: 'EPIC', name: 'DEEP POCKETS',  desc: '-20% prices, a free reroll',    effect: { priceDiscount: 0.20, freeRerolls: 1 } },
+  { id: 'reinf_core',   tier: 'EPIC', name: 'REINFORCED CORE',desc: '+1 shield, longer mercy after a break', effect: { shieldCharges: 1, shieldIframes: 45 } },
 
   // --- LEGENDARY ----------------------------------------------------------
   { id: 'orbital_drone',tier: 'LEGENDARY', name: 'ORBITAL DRONE',  desc: 'a drone fights beside you',  effect: { drones: 1 } },
@@ -443,13 +491,26 @@ RLCore.UPGRADES = [
   { id: 'fortress',     tier: 'LEGENDARY', name: 'FORTRESS',       desc: 'start each level shielded',  effect: { fortress: 2 } },
   { id: 'aegis_lattice',tier: 'LEGENDARY', name: 'AEGIS LATTICE',  desc: '+2 shield charges',          effect: { shieldCharges: 2 } },
   { id: 'siege_engine', tier: 'LEGENDARY', name: 'SIEGE ENGINE',   desc: '+45% damage to bosses',      effect: { bossDamageMul: 0.45 } },
+  { id: 'headsman',     tier: 'LEGENDARY', name: 'HEADSMAN',       desc: 'finishes enemies under 20% HP', effect: { execute: 0.20 } },
+  { id: 'stormcaller',  tier: 'LEGENDARY', name: 'STORMCALLER',    desc: 'arcs to three enemies, and burns', effect: { chain: 3, burn: 0.40 } },
+  { id: 'glacier',      tier: 'LEGENDARY', name: 'GLACIER',        desc: 'hits slow 60%, enemy fire 15% slower', effect: { chill: 0.60, enemyBulletMul: -0.15 } },
+  { id: 'rail_align',   tier: 'LEGENDARY', name: 'RAIL ALIGNMENT', desc: 'much tighter fan, +40% damage', effect: { spreadMul: -0.50, damageMul: 0.40 } },
+  { id: 'warlord_tithe',tier: 'LEGENDARY', name: "WARLORD'S TITHE",desc: '+60% scrap, +900 a level',   effect: { scrapMul: 0.60, scrapPerLevel: 900 } },
+  { id: 'bastion',      tier: 'LEGENDARY', name: 'BASTION',        desc: '+2 shields, 30% refund',     effect: { shieldCharges: 2, shieldRefund: 0.30 } },
 
   // --- MYTHIC -------------------------------------------------------------
   { id: 'mirror_drones',tier: 'MYTHIC', name: 'MIRROR WING',   desc: 'two drones, and they copy your gun', effect: { drones: 2, dronesCopyGun: true } },
-  { id: 'deadeye',      tier: 'MYTHIC', name: 'DEADEYE',       desc: '+25% crit chance, crits deal 4x',    effect: { critChance: 0.25, critMul: 1 } },
+  // critMul is added to a base of 2, so 2 here is the advertised 4x.
+  { id: 'deadeye',      tier: 'MYTHIC', name: 'DEADEYE',       desc: '+25% crit chance, crits deal 4x',    effect: { critChance: 0.25, critMul: 2 } },
   { id: 'bulwark_field',tier: 'MYTHIC', name: 'BULWARK FIELD', desc: 'blocked hits refund a shield 50% of the time', effect: { shieldRefund: 0.5 } },
   { id: 'greed',        tier: 'MYTHIC', name: 'GREED ENGINE',  desc: 'double scrap, but hits cost two upgrades', effect: { scrapMul: 1.0, strips: 1 } },
   { id: 'second_wind',  tier: 'MYTHIC', name: 'SECOND WIND',   desc: 'surviving a hit grants 3s of invulnerability', effect: { graceSeconds: 3 } },
+  { id: 'bank_shot',    tier: 'MYTHIC', name: 'BANK SHOT',     desc: 'four wall bounces, +50% damage',     effect: { ricochet: 4, damageMul: 0.50 } },
+  { id: 'hellfire',     tier: 'MYTHIC', name: 'HELLFIRE',      desc: 'shots burst and set the field alight', effect: { burn: 1.20, splash: 40 } },
+  { id: 'absolute_zero',tier: 'MYTHIC', name: 'ABSOLUTE ZERO', desc: 'hits slow 75%, enemy fire 25% slower', effect: { chill: 0.75, enemyBulletMul: -0.25 } },
+  { id: 'kings_ransom', tier: 'MYTHIC', name: "KING'S RANSOM", desc: '+150% scrap, -25% prices',           effect: { scrapMul: 1.50, priceDiscount: 0.25 } },
+  { id: 'aegis_prime',  tier: 'MYTHIC', name: 'AEGIS PRIME',   desc: '+3 shields, one regrows every 10s',  effect: { shieldCharges: 3, shieldRegen: 600 } },
+  { id: 'sniper_doc',   tier: 'MYTHIC', name: 'SNIPER DOCTRINE',desc: '+35% crit, +50% boss damage',       effect: { critChance: 0.35, bossDamageMul: 0.50 } },
 
   // --- APEX ---------------------------------------------------------------
   { id: 'twin_core',    tier: 'APEX', name: 'TWIN CORE',       desc: 'every weapon effect fires twice',    effect: { twinCore: true } },
@@ -458,27 +519,44 @@ RLCore.UPGRADES = [
   { id: 'hunter_rounds',tier: 'APEX', name: 'HUNTER ROUNDS',   desc: 'shots steer toward enemies',         effect: { homing: 0.03 } },
   { id: 'reload_sing',  tier: 'APEX', name: 'RELOAD SINGULARITY', desc: '+110% fire rate',                 effect: { fireRateMul: 1.10 } },
   { id: 'annihilator',  tier: 'APEX', name: 'ANNIHILATOR',     desc: '+140% damage',                       effect: { damageMul: 1.40 } },
+  { id: 'apex_verdict', tier: 'APEX', name: 'OPENING VERDICT', desc: 'first hit each level takes 3% of max HP', effect: { verdict: 0.03 } },
+  { id: 'apex_swarm',   tier: 'APEX', name: 'HUNTING PACK',    desc: 'three drones carrying your gun',     effect: { drones: 3, dronesCopyGun: true } },
+  { id: 'apex_grace',   tier: 'APEX', name: 'LAST RITES',      desc: '2s of mercy after any hit',          effect: { graceSeconds: 2, shieldIframes: 90 } },
+  { id: 'apex_greed',   tier: 'APEX', name: 'GOLDEN HOUR',     desc: 'enemies bleed scrap, +120% scrap',   effect: { scrapPerSecond: 60, scrapMul: 1.20 } },
 
   // --- OVERCLOCKED --------------------------------------------------------
   { id: 'oc_needle',    tier: 'OVERCLOCKED', name: 'THE NEEDLE',    desc: 'one shot, infinite pierce, full screen', effect: { needle: true } },
   { id: 'oc_midas',     tier: 'OVERCLOCKED', name: 'MIDAS FIELD',   desc: 'enemies bleed scrap while they live',    effect: { scrapPerSecond: 40 } },
   { id: 'oc_unbroken',  tier: 'OVERCLOCKED', name: 'THE UNBROKEN',  desc: 'a shield charge regrows every 4s',       effect: { shieldRegen: 240, shieldCharges: 2 } },
   { id: 'oc_verdict',   tier: 'OVERCLOCKED', name: 'KINETIC VERDICT',desc: 'first hit each level deals 5% of max HP', effect: { verdict: 0.05 } },
+  { id: 'oc_headsman',  tier: 'OVERCLOCKED', name: 'THE HEADSMAN',  desc: 'finishes enemies under 25% HP',         effect: { execute: 0.25 } },
+  { id: 'oc_chronos',   tier: 'OVERCLOCKED', name: 'SLOW HOUR',     desc: 'time drags while you hold fire',        effect: { chronostall: 0.40 } },
+  { id: 'oc_twin',      tier: 'OVERCLOCKED', name: 'MIRROR BATTERY',desc: 'every effect twice, and two more shots',effect: { twinCore: true, extraShots: 2 } },
+  { id: 'oc_bastion',   tier: 'OVERCLOCKED', name: 'THE KEEP',      desc: '+4 shields, 60% of breaks refunded',    effect: { shieldCharges: 4, shieldRefund: 0.60 } },
 
   // --- HYPERCLOCKED -------------------------------------------------------
   { id: 'hc_chronostall',tier: 'HYPERCLOCKED', name: 'CHRONOSTALL', desc: 'time slows while you hold fire',        effect: { chronostall: 0.55 } },
   { id: 'hc_swarm',      tier: 'HYPERCLOCKED', name: 'IRON SWARM',  desc: 'four drones with your full build',      effect: { drones: 4, dronesCopyGun: true } },
   { id: 'hc_absolution', tier: 'HYPERCLOCKED', name: 'ABSOLUTION',  desc: 'hits no longer strip upgrades',         effect: { noStrip: true } },
+  { id: 'hc_verdict',    tier: 'HYPERCLOCKED', name: 'FINAL VERDICT',desc: 'first hit each level takes 12% of max HP', effect: { verdict: 0.12 } },
+  { id: 'hc_ruin',       tier: 'HYPERCLOCKED', name: 'CATACLYSM',   desc: '+250% damage, +40% crit chance',        effect: { damageMul: 2.50, critChance: 0.40 } },
+  { id: 'hc_glacier',    tier: 'HYPERCLOCKED', name: 'DEEP WINTER', desc: 'near-freezes enemies, halves their fire', effect: { chill: 0.90, enemyBulletMul: -0.40 } },
+  { id: 'hc_midas',      tier: 'HYPERCLOCKED', name: 'GOLD RUSH',   desc: 'a river of scrap, +250% from kills',    effect: { scrapPerSecond: 200, scrapMul: 2.50 } },
 
   // --- UBERCLOCKED --------------------------------------------------------
   { id: 'uc_eventhorizon',tier: 'UBERCLOCKED', name: 'EVENT HORIZON', desc: 'three singularities, and they feed you scrap', effect: { singularity: true, singularityCount: 3, scrapPerSecond: 120 } },
   { id: 'uc_ruin',        tier: 'UBERCLOCKED', name: 'RUIN',          desc: '+400% damage',                          effect: { damageMul: 4.0 } },
   { id: 'uc_phalanx',     tier: 'UBERCLOCKED', name: 'PHALANX',       desc: '+6 shield charges, they never break twice in a second', effect: { shieldCharges: 6, shieldIframes: 60 } },
+  { id: 'uc_needle',      tier: 'UBERCLOCKED', name: 'THE LONG NEEDLE',desc: 'one screen-length lance, nothing stops it', effect: { needle: true, damageMul: 2.0 } },
+  { id: 'uc_execution',   tier: 'UBERCLOCKED', name: 'SUMMARY',       desc: 'enemies under 30% HP stop existing',    effect: { execute: 0.30 } },
+  { id: 'uc_chronos',     tier: 'UBERCLOCKED', name: 'THE LONG NOW',  desc: 'time crawls while you fire, 4s of mercy', effect: { chronostall: 0.60, graceSeconds: 4 } },
 
   // --- DYNACLOCKED --------------------------------------------------------
   { id: 'dc_apotheosis', tier: 'DYNACLOCKED', name: 'APOTHEOSIS',   desc: 'every stat you own counts twice',        effect: { apotheosis: true } },
   { id: 'dc_lastword',   tier: 'DYNACLOCKED', name: 'THE LAST WORD',desc: 'enemies under 40% HP simply stop existing', effect: { execute: 0.40 } },
-  { id: 'dc_undying',    tier: 'DYNACLOCKED', name: 'UNDYING',      desc: 'three extra lives, and death returns one', effect: { extraLife: 3, reviveOnDeath: 1 } }
+  { id: 'dc_undying',    tier: 'DYNACLOCKED', name: 'UNDYING',      desc: 'three extra lives, and death returns one', effect: { extraLife: 3, reviveOnDeath: 1 } },
+  { id: 'dc_eventfield', tier: 'DYNACLOCKED', name: 'THE MAELSTROM',desc: 'five black holes, and they pay you',      effect: { singularity: true, singularityCount: 5, scrapPerSecond: 300 } },
+  { id: 'dc_perfection', tier: 'DYNACLOCKED', name: 'PERFECTION',   desc: 'every shot crits, for six times damage',  effect: { critChance: 1, critMul: 4, bossDamageMul: 1.50 } }
 ];
 
 RLCore.tierIndexOf = function (id) {
@@ -506,14 +584,17 @@ RLCore.effectiveName = function (upgrade, vb) {
 
 // Numbers scale with depth; flags do not. Scaling the flags would be
 // meaningless and scaling nothing would make a promoted upgrade a downgrade.
+// Always returns a fresh object, including at depth 0. Handing back the
+// catalogue entry itself meant any caller that wrote into a resolved card's
+// effect would permanently rewrite the catalogue for the session -- and it
+// made depth 0 behave differently from every other depth.
 RLCore.effectiveEffect = function (upgrade, vb) {
   const v = RLCore.clampVoidbirth(vb);
-  if (v === 0) return upgrade.effect;
-  const mul = Math.pow(RLCore.LINEAGE_GROWTH, v);
+  const mul = v === 0 ? 1 : Math.pow(RLCore.LINEAGE_GROWTH, v);
   const out = {};
   Object.keys(upgrade.effect).forEach(k => {
     const val = upgrade.effect[k];
-    out[k] = typeof val === 'number' ? RLCore.roundEffect(k, val * mul) : val;
+    out[k] = (typeof val === 'number' && v > 0) ? RLCore.roundEffect(k, val * mul) : val;
   });
   return out;
 };
@@ -526,7 +607,11 @@ RLCore.INTEGER_EFFECTS = ['shieldCharges', 'extraShots', 'lives', 'extraLife', '
   'singularityCount', 'shieldIframes', 'reviveOnDeath'];
 
 RLCore.roundEffect = function (key, v) {
-  if (RLCore.INTEGER_EFFECTS.indexOf(key) !== -1) return Math.max(1, Math.round(v));
+  // Only positive integer effects are floored at 1 — clamping a zero or a
+  // negative up to +1 would invent a bonus that the catalogue never granted.
+  if (RLCore.INTEGER_EFFECTS.indexOf(key) !== -1) {
+    return v > 0 ? Math.max(1, Math.round(v)) : Math.round(v);
+  }
   return Math.round(v * 100) / 100;
 };
 
@@ -589,7 +674,11 @@ RLCore.rollSlot = function (level, vb, owned, rnd, exclude) {
 RLCore.BASE_SHOP_SLOTS = 3;
 
 RLCore.rollShop = function (level, vb, owned, rnd, slots) {
-  const n = Math.max(1, slots || RLCore.BASE_SHOP_SLOTS);
+  // Only an absent slot count falls back to the default; an explicit 0 means
+  // zero and clamps to one card. The old `slots || DEFAULT` read 0 as
+  // "unspecified" while the Math.max next to it read it as a number.
+  const want = (slots === undefined || slots === null) ? RLCore.BASE_SHOP_SLOTS : slots;
+  const n = Math.max(1, want);
   const out = [];
   for (let i = 0; i < n; i++) {
     const u = RLCore.rollSlot(level, vb, owned, rnd, out.map(o => o.id));
@@ -632,7 +721,11 @@ RLCore.resolveStats = function (ship, owned, vb) {
     fireRate: Math.max(RLCore.MIN_FIRE_RATE, rate),
     damage: RLCore.BASE_DAMAGE * (1 + sum('damageMul')),
     speed: ship.speed * (1 + sum('speedMul')),
-    spread: ship.spreadMul * (1 + sum('spreadMul')),
+    // Floored: TIGHT BARREL's lineage scales hard with depth, and a negative
+    // spread does not mean "very tight", it means the fan crosses over itself
+    // and the shot pattern inverts. Every sibling stat has a floor; this one
+    // was missing its own.
+    spread: Math.max(0.06, ship.spreadMul * (1 + sum('spreadMul'))),
     hitScale: Math.max(0.4, 1 + sum('hitScaleMul')),
     bulletSpeedMul: 1 + sum('bulletSpeedMul'),
     shieldCharges: Math.min(RLCore.MAX_SHIELD_CHARGES, sum('shieldCharges')),
@@ -1153,7 +1246,10 @@ let scrapOnUpgrades = 0;
 // vector, the shop cadence, and every upgrade's name and strength.
 let voidbirths = 0;
 let stats = null;           // resolved by recomputeStats()
-let overchargeCount = 0, killsSinceLife = 0;
+let overchargeCount = 0, killsSinceLife = 0, killsSinceShield = 0;
+// KINETIC VERDICT fires once per level; UNDYING once per run.
+let verdictSpent = false, revivedThisRun = false;
+let scrapDrip = 0;          // MIDAS FIELD's fractional carry
 
 // ---- HUD build-list cache (Task 15) ----
 // runUpgrades mutates in place on purchase (stacks++ / push) rather than
@@ -1462,7 +1558,8 @@ function startGame() {
   voidbirths = 0;
   vbInfo = null; vbCards = []; vbTick = 0;
   runUpgradesVersion++;
-  overchargeCount = 0; killsSinceLife = 0;
+  overchargeCount = 0; killsSinceLife = 0; killsSinceShield = 0;
+  verdictSpent = false; revivedThisRun = false; scrapDrip = 0;
   recomputeStats();
   lives += stats.extraLives;
   player.shieldCharges = stats.shieldCharges;
@@ -1773,20 +1870,171 @@ function drawAsteroid(a) {
   ctx.restore();
 }
 
+// A lit engine bell, used by every hull that has one. Drawn behind the body
+// (enemies fly downward, so their engines face up).
+function drawEngine(x, y, w, h, hot) {
+  ctx.fillStyle = '#1a1a22';
+  ctx.fillRect(x - w/2, y - h, w, h);
+  const g = ctx.createLinearGradient(0, y - h, 0, y - h - 14);
+  g.addColorStop(0, hot); g.addColorStop(1, 'rgba(255,255,255,0)');
+  ctx.fillStyle = g;
+  ctx.beginPath();
+  ctx.moveTo(x - w/2, y - h); ctx.lineTo(x, y - h - 12 - Math.random()*4); ctx.lineTo(x + w/2, y - h);
+  ctx.closePath(); ctx.fill();
+}
+
 function drawEnemy(e) {
   ctx.save(); ctx.translate(e.x, e.y);
+  // Enemies grow as you descend, so a level-2000 grunt reads as a real ship
+  // rather than the same sprite with a bigger number behind it.
+  if (e.scale && e.scale !== 1) ctx.scale(e.scale, e.scale);
   const flashFill = () => { if (e.flash > 0) { ctx.fillStyle = `rgba(255,255,255,${0.30*e.flash})`; ctx.fill(); } };
 
   switch (e.kind) {
     case 'elite': {
-      ctx.beginPath(); ctx.moveTo(0,-20); ctx.lineTo(16,0); ctx.lineTo(0,16); ctx.lineTo(-16,0); ctx.closePath();
-      const eg = ctx.createRadialGradient(0,0,2,0,0,18);
-      eg.addColorStop(0,'#ffaa00'); eg.addColorStop(1,'#880000');
+      // Broad gunship: armoured canopy, side weapon pods, four engines.
+      drawEngine(-9, -12, 7, 5, 'rgba(255,170,40,0.85)');
+      drawEngine( 9, -12, 7, 5, 'rgba(255,170,40,0.85)');
+      ctx.fillStyle = '#5a2a10';
+      ctx.fillRect(-22, -6, 8, 18);          // port pod
+      ctx.fillRect( 14, -6, 8, 18);          // starboard pod
+      ctx.strokeStyle = '#ff7722'; ctx.lineWidth = 1.5;
+      ctx.strokeRect(-22, -6, 8, 18); ctx.strokeRect(14, -6, 8, 18);
+      ctx.fillStyle = '#ffcc44';
+      ctx.fillRect(-20, 11, 4, 5); ctx.fillRect(16, 11, 4, 5);   // pod muzzles
+
+      ctx.beginPath();
+      ctx.moveTo(0, 20); ctx.lineTo(13, 8); ctx.lineTo(16, -8);
+      ctx.lineTo(8, -14); ctx.lineTo(-8, -14); ctx.lineTo(-16, -8);
+      ctx.lineTo(-13, 8); ctx.closePath();
+      const eg = ctx.createLinearGradient(0, -14, 0, 20);
+      eg.addColorStop(0, '#ffcc55'); eg.addColorStop(0.5, '#dd6600'); eg.addColorStop(1, '#771100');
       ctx.fillStyle = eg; ctx.fill();
-      ctx.strokeStyle = '#ff4400'; ctx.lineWidth = 2; ctx.stroke();
+      ctx.strokeStyle = '#ff5500'; ctx.lineWidth = 2; ctx.stroke();
       flashFill();
-      ctx.beginPath(); ctx.moveTo(-8,0); ctx.lineTo(8,0); ctx.moveTo(0,-8); ctx.lineTo(0,8);
-      ctx.strokeStyle='rgba(255,200,0,0.6)'; ctx.lineWidth=1; ctx.stroke();
+
+      ctx.strokeStyle = 'rgba(0,0,0,0.35)'; ctx.lineWidth = 1;
+      ctx.beginPath(); ctx.moveTo(-11, 2); ctx.lineTo(11, 2); ctx.stroke();
+
+      ctx.beginPath(); ctx.ellipse(0, 6, 5, 4, 0, 0, Math.PI*2);
+      ctx.fillStyle = '#ffee99'; ctx.fill();
+      ctx.strokeStyle = '#442200'; ctx.lineWidth = 1.2; ctx.stroke();
+      break;
+    }
+
+    case 'lancer': {
+      // Long, thin, one big barrel. Everything about it points down.
+      drawEngine(0, -18, 8, 6, 'rgba(120,220,255,0.9)');
+      ctx.beginPath();
+      ctx.moveTo(0, 24); ctx.lineTo(5, 4); ctx.lineTo(7, -16);
+      ctx.lineTo(-7, -16); ctx.lineTo(-5, 4); ctx.closePath();
+      const lg = ctx.createLinearGradient(0, -16, 0, 24);
+      lg.addColorStop(0, '#bfefff'); lg.addColorStop(1, '#0d4a66');
+      ctx.fillStyle = lg; ctx.fill();
+      ctx.strokeStyle = '#66ddff'; ctx.lineWidth = 1.6; ctx.stroke();
+      flashFill();
+      // swept fins
+      ctx.fillStyle = '#0d4a66';
+      ctx.beginPath(); ctx.moveTo(-7,-14); ctx.lineTo(-17,-4); ctx.lineTo(-6,-2); ctx.closePath(); ctx.fill();
+      ctx.beginPath(); ctx.moveTo( 7,-14); ctx.lineTo( 17,-4); ctx.lineTo( 6,-2); ctx.closePath(); ctx.fill();
+      // the barrel, glowing when it has a shot ready
+      const ready = e.shootTimer >= 60;
+      ctx.fillStyle = ready ? '#ffffff' : '#2a6a88';
+      ctx.fillRect(-2.5, 18, 5, 10);
+      if (ready) {
+        ctx.fillStyle = 'rgba(120,220,255,0.45)';
+        ctx.beginPath(); ctx.arc(0, 28, 5 + Math.sin(frame*0.4)*1.5, 0, Math.PI*2); ctx.fill();
+      }
+      break;
+    }
+
+    case 'weaver': {
+      // Twin-boom frame that visibly banks into its strafe.
+      ctx.save();
+      ctx.rotate(Math.max(-0.5, Math.min(0.5, (e.bank || 0) * 0.35)));
+      drawEngine(-11, -10, 6, 5, 'rgba(210,120,255,0.9)');
+      drawEngine( 11, -10, 6, 5, 'rgba(210,120,255,0.9)');
+      ctx.fillStyle = '#3a1155';
+      ctx.fillRect(-14, -10, 5, 22);
+      ctx.fillRect(  9, -10, 5, 22);
+      ctx.strokeStyle = '#cc66ff'; ctx.lineWidth = 1.4;
+      ctx.strokeRect(-14, -10, 5, 22); ctx.strokeRect(9, -10, 5, 22);
+      ctx.beginPath();
+      ctx.moveTo(0, 16); ctx.lineTo(8, 2); ctx.lineTo(8, -8); ctx.lineTo(-8, -8); ctx.lineTo(-8, 2); ctx.closePath();
+      const wg = ctx.createLinearGradient(0, -8, 0, 16);
+      wg.addColorStop(0, '#e9c4ff'); wg.addColorStop(1, '#5a1188');
+      ctx.fillStyle = wg; ctx.fill();
+      ctx.strokeStyle = '#cc66ff'; ctx.lineWidth = 1.6; ctx.stroke();
+      flashFill();
+      ctx.beginPath(); ctx.arc(0, 2, 3.5, 0, Math.PI*2);
+      ctx.fillStyle = '#ffddff'; ctx.fill();
+      ctx.restore();
+      break;
+    }
+
+    case 'bulwark': {
+      // Heavy wedge with a physical shield plate across its underside.
+      drawEngine(-12, -16, 8, 6, 'rgba(120,255,170,0.85)');
+      drawEngine( 12, -16, 8, 6, 'rgba(120,255,170,0.85)');
+      ctx.beginPath();
+      ctx.moveTo(0, 10); ctx.lineTo(26, 0); ctx.lineTo(22, -14);
+      ctx.lineTo(-22, -14); ctx.lineTo(-26, 0); ctx.closePath();
+      const bwg = ctx.createLinearGradient(0, -14, 0, 10);
+      bwg.addColorStop(0, '#d8ffe6'); bwg.addColorStop(1, '#14603a');
+      ctx.fillStyle = bwg; ctx.fill();
+      ctx.strokeStyle = '#88ffaa'; ctx.lineWidth = 2; ctx.stroke();
+      flashFill();
+      ctx.strokeStyle = 'rgba(0,0,0,0.3)'; ctx.lineWidth = 1;
+      for (let i = -2; i <= 2; i++) { ctx.beginPath(); ctx.moveTo(i*9, -13); ctx.lineTo(i*9, 6); ctx.stroke(); }
+
+      if (e.plate > 0) {
+        const frac = e.plate / e.plateMax;
+        ctx.strokeStyle = `rgba(140,255,190,${0.4 + 0.5*frac})`;
+        ctx.lineWidth = 4;
+        ctx.beginPath(); ctx.arc(0, 6, 25, 0.18*Math.PI, 0.82*Math.PI); ctx.stroke();
+        // the plate cracks as it takes damage, so its state is readable
+        if (frac < 0.66) {
+          ctx.strokeStyle = 'rgba(10,40,25,0.9)'; ctx.lineWidth = 1.6;
+          ctx.beginPath(); ctx.moveTo(-8, 28); ctx.lineTo(-2, 22); ctx.stroke();
+        }
+        if (frac < 0.33) {
+          ctx.beginPath(); ctx.moveTo(10, 27); ctx.lineTo(4, 21); ctx.stroke();
+        }
+      }
+      break;
+    }
+
+    case 'swarmling': {
+      const p = 0.75 + 0.25*Math.sin(frame*0.3 + (e.jitter || 0));
+      ctx.beginPath();
+      ctx.moveTo(0, 8); ctx.lineTo(5, -2); ctx.lineTo(0, -6); ctx.lineTo(-5, -2); ctx.closePath();
+      ctx.fillStyle = '#ffee66'; ctx.fill();
+      ctx.strokeStyle = '#ffaa22'; ctx.lineWidth = 1; ctx.stroke();
+      flashFill();
+      ctx.globalAlpha = 0.35 * p;
+      ctx.beginPath(); ctx.arc(0, 0, 9, 0, Math.PI*2);
+      ctx.fillStyle = '#ffee66'; ctx.fill();
+      ctx.globalAlpha = 1;
+      break;
+    }
+
+    case 'harbinger': {
+      // A small mothership: layered plating, a lit hangar mouth, four engines.
+      [-24, -8, 8, 24].forEach(x => drawEngine(x, -22, 8, 6, 'rgba(255,80,140,0.85)'));
+      ctx.beginPath();
+      ctx.moveTo(-38, -18); ctx.lineTo(38, -18); ctx.lineTo(30, 6);
+      ctx.lineTo(14, 18); ctx.lineTo(-14, 18); ctx.lineTo(-30, 6); ctx.closePath();
+      const hb = ctx.createLinearGradient(0, -18, 0, 18);
+      hb.addColorStop(0, '#ffc0d8'); hb.addColorStop(0.55, '#c01a55'); hb.addColorStop(1, '#4a0020');
+      ctx.fillStyle = hb; ctx.fill();
+      ctx.strokeStyle = '#ff4488'; ctx.lineWidth = 2; ctx.stroke();
+      flashFill();
+      ctx.strokeStyle = 'rgba(0,0,0,0.35)'; ctx.lineWidth = 1;
+      [-10, 0, 10].forEach(y => { ctx.beginPath(); ctx.moveTo(-34, y); ctx.lineTo(34, y); ctx.stroke(); });
+      // hangar mouth — brightens just before it releases a brood
+      const soon = e.broodTimer < 30;
+      ctx.fillStyle = soon ? 'rgba(255,240,120,0.9)' : 'rgba(255,120,170,0.45)';
+      ctx.fillRect(-13, 12, 26, 6);
       break;
     }
 
@@ -1835,7 +2083,7 @@ function drawEnemy(e) {
       ctx.strokeStyle = '#001122'; ctx.lineWidth = 1; ctx.stroke();
       // Health pips so its 8 HP doesn't feel arbitrary.
       ctx.fillStyle = 'rgba(255,255,255,0.75)';
-      ctx.fillRect(-14, -22, 28*(e.hp/ENEMY.turret.hp), 2.5);
+      ctx.fillRect(-14, -22, 28*Math.max(0, e.hp/e.maxHp), 2.5);
       break;
     }
 
@@ -1867,18 +2115,48 @@ function drawEnemy(e) {
       break;
     }
 
-    default: { // grunt
-      ctx.beginPath(); ctx.moveTo(0,18); ctx.lineTo(14,-10); ctx.lineTo(8,-4); ctx.lineTo(0,-14); ctx.lineTo(-8,-4); ctx.lineTo(-14,-10); ctx.closePath();
-      const bg = ctx.createLinearGradient(-14,-14,14,18);
-      bg.addColorStop(0,'#ff6600'); bg.addColorStop(1,'#aa0000');
+    default: { // grunt — stubby four-fin interceptor, twin engines
+      drawEngine(-6, -10, 6, 4, 'rgba(255,140,40,0.85)');
+      drawEngine( 6, -10, 6, 4, 'rgba(255,140,40,0.85)');
+      ctx.fillStyle = '#7a1d00';
+      ctx.beginPath(); ctx.moveTo(-9,-8); ctx.lineTo(-18,2); ctx.lineTo(-8,4); ctx.closePath(); ctx.fill();
+      ctx.beginPath(); ctx.moveTo( 9,-8); ctx.lineTo( 18,2); ctx.lineTo( 8,4); ctx.closePath(); ctx.fill();
+
+      ctx.beginPath();
+      ctx.moveTo(0, 18); ctx.lineTo(9, 6); ctx.lineTo(10, -8);
+      ctx.lineTo(4, -12); ctx.lineTo(-4, -12); ctx.lineTo(-10, -8);
+      ctx.lineTo(-9, 6); ctx.closePath();
+      const bg = ctx.createLinearGradient(0, -12, 0, 18);
+      bg.addColorStop(0, '#ffb066'); bg.addColorStop(0.5, '#ee5500'); bg.addColorStop(1, '#8a0d00');
       ctx.fillStyle = bg; ctx.fill();
-      ctx.strokeStyle = '#ff3300'; ctx.lineWidth = 1.5; ctx.stroke();
+      ctx.strokeStyle = '#ff5522'; ctx.lineWidth = 1.6; ctx.stroke();
       flashFill();
-      ctx.beginPath(); ctx.arc(0, 0, 5, 0, Math.PI*2);
-      ctx.fillStyle='#ffdd00'; ctx.fill();
+
+      ctx.strokeStyle = 'rgba(0,0,0,0.3)'; ctx.lineWidth = 1;
+      ctx.beginPath(); ctx.moveTo(-7, 0); ctx.lineTo(7, 0); ctx.stroke();
+      ctx.beginPath(); ctx.ellipse(0, 5, 3.5, 3, 0, 0, Math.PI*2);
+      ctx.fillStyle = '#ffdd66'; ctx.fill();
+      ctx.strokeStyle = '#552200'; ctx.lineWidth = 1; ctx.stroke();
     }
   }
   ctx.restore();
+
+  // Health bar for anything tanky enough that "how close am I?" is a real
+  // question. Drawn outside the scale transform so it stays legible at depth.
+  drawEnemyHealth(e);
+}
+
+const BAR_KINDS = ['elite', 'turret', 'lancer', 'bulwark', 'harbinger'];
+
+function drawEnemyHealth(e) {
+  if (!e.maxHp || e.hp >= e.maxHp) return;
+  if (BAR_KINDS.indexOf(e.kind) === -1) return;
+  const w = e.kind === 'harbinger' ? 66 : 34;
+  const y = e.y - (ENEMY[e.kind].r * (e.scale || 1)) - 10;
+  ctx.fillStyle = 'rgba(0,0,0,0.55)';
+  ctx.fillRect(e.x - w/2, y, w, 3.5);
+  ctx.fillStyle = ENEMY[e.kind].color;
+  ctx.fillRect(e.x - w/2, y, w * Math.max(0, e.hp / e.maxHp), 3.5);
 }
 
 function drawBoss(b) {
@@ -2029,22 +2307,36 @@ function makeAsteroid(big) {
 
 // Per-kind stats. Everything that differs between enemy types lives here so
 // the update and render paths only branch on behaviour, not on numbers.
+// Health now comes from RLCore.enemyHp(kind, level) — the `hp` field that used
+// to live here was a flat number that could not scale to level 2500.
 const ENEMY = {
-  grunt:    { hp: 2, points: 100, r: 22, color: '#ff5500', boom: 24, shake: 5,  hitStop: 0 },
-  elite:    { hp: 4, points: 200, r: 24, color: '#ffaa00', boom: 40, shake: 12, hitStop: 3 },
-  kamikaze: { hp: 1, points: 120, r: 18, color: '#ff2255', boom: 28, shake: 8,  hitStop: 0 },
-  turret:   { hp: 8, points: 300, r: 26, color: '#99bbdd', boom: 44, shake: 12, hitStop: 3 },
-  mine:     { hp: 2, points:  80, r: 20, color: '#ffcc00', boom: 46, shake: 14, hitStop: 0 }
+  grunt:     { points: 100, r: 22, color: '#ff5500', boom: 24, shake: 5,  hitStop: 0 },
+  elite:     { points: 200, r: 24, color: '#ffaa00', boom: 40, shake: 12, hitStop: 3 },
+  kamikaze:  { points: 120, r: 18, color: '#ff2255', boom: 28, shake: 8,  hitStop: 0 },
+  turret:    { points: 300, r: 26, color: '#99bbdd', boom: 44, shake: 12, hitStop: 3 },
+  mine:      { points:  80, r: 20, color: '#ffcc00', boom: 46, shake: 14, hitStop: 0 },
+  lancer:    { points: 260, r: 22, color: '#66ddff', boom: 34, shake: 9,  hitStop: 2 },
+  weaver:    { points: 220, r: 20, color: '#cc66ff', boom: 30, shake: 8,  hitStop: 1 },
+  bulwark:   { points: 480, r: 30, color: '#88ffaa', boom: 52, shake: 16, hitStop: 4 },
+  swarmling: { points:  40, r: 11, color: '#ffee66', boom: 14, shake: 2,  hitStop: 0 },
+  harbinger: { points: 900, r: 40, color: '#ff4488', boom: 70, shake: 22, hitStop: 6 }
 };
 
-// Which kinds can appear, and how often, at a given level.
+// Which kinds can appear, and how often, at a given level. New kinds phase in
+// as you descend so the roster keeps changing rather than settling.
 function enemyWeights() {
+  const from = (lv, cap, div) => level >= lv ? Math.min(cap, (level - lv + 2) / (div || 1)) : 0;
   return [
-    ['grunt',    Math.max(3, 12 - level)],
-    ['elite',    level >= 3 ? Math.min(8, level - 1) : 0],
-    ['kamikaze', level >= 3 ? Math.min(7, level)     : 0],
-    ['mine',     level >= 4 ? Math.min(5, level - 2) : 0],
-    ['turret',   level >= 6 ? Math.min(5, level - 4) : 0]
+    ['grunt',     Math.max(3, 12 - level)],
+    ['elite',     level >= 3 ? Math.min(8, level - 1) : 0],
+    ['kamikaze',  level >= 3 ? Math.min(7, level)     : 0],
+    ['mine',      level >= 4 ? Math.min(5, level - 2) : 0],
+    ['turret',    level >= 6 ? Math.min(5, level - 4) : 0],
+    ['lancer',    from(15,  7, 2)],
+    ['weaver',    from(22,  6, 3)],
+    ['swarmling', from(30,  9, 2)],
+    ['bulwark',   from(60,  5, 8)],
+    ['harbinger', from(200, 2, 100)]
   ];
 }
 
@@ -2089,6 +2381,43 @@ function makeEnemy(kind) {
       e.vy = 0.6;
       e.vx = (Math.random()-0.5)*0.4;
       e.arming = 0;
+      break;
+    case 'lancer':
+      // Fires straight down and only straight down. It has to line itself up
+      // with you, which is a telegraph you can read and get out of.
+      e.vy = d.enemySpeed * 0.6;
+      e.vx = 0;
+      e.shootTimer = Math.floor(Math.random()*60);
+      e.chargeUp = 0;
+      break;
+    case 'weaver':
+      // Wide, fast strafing — the one that punishes standing still.
+      e.vy = d.enemySpeed * 0.5;
+      e.weavePhase = Math.random()*Math.PI*2;
+      e.weaveAmp = 60 + Math.random()*50;
+      e.baseX = e.x;
+      e.bank = 0;
+      e.shootTimer = Math.floor(Math.random()*70);
+      break;
+    case 'bulwark':
+      // A shield plate covers its underside. Shoot it from the flank — which
+      // is the answer to "how do I hit the thing that is off to the side".
+      e.vy = d.enemySpeed * 0.34;
+      e.vx = (Math.random()-0.5)*0.8;
+      e.plate = RLCore.enemyHp('bulwark', level) * 0.45;
+      e.plateMax = e.plate;
+      break;
+    case 'swarmling':
+      e.vy = d.enemySpeed * 1.5;
+      e.vx = (Math.random()-0.5)*3;
+      e.jitter = Math.random()*Math.PI*2;
+      break;
+    case 'harbinger':
+      // A small mothership with its own bar. Escorts itself.
+      e.vy = d.enemySpeed * 0.3;
+      e.vx = (Math.random()-0.5)*1.2;
+      e.broodTimer = 90;
+      e.shootTimer = 0;
       break;
   }
   return e;
@@ -2260,7 +2589,9 @@ function updateBoss() {
     if (bl.dead) return;
     if (Math.abs(bl.x - b.x) < BOSS_W/2 && Math.abs(bl.y - b.y) < BOSS_H/2) {
       if (bl.pierce > 0) bl.pierce--; else bl.dead = true;
-      b.hp -= bl.damage;
+      // SIEGE OPTICS / SIEGE ENGINE only ever apply here, which is the whole
+      // point of them: they are a boss-fight investment, not a general one.
+      b.hp -= bl.damage * stats.bossDamageMul;
       b.flash = Math.max(b.flash, 2);
       spawnParticles(bl.x, bl.y, '#ffaa44', 3);
 
@@ -2323,18 +2654,60 @@ function spawnFormation(type) {
 
 const BULLET_SPEED = 11;
 
+// Nearest live target, boss included. Shared by GIMBAL MOUNT and TRACER
+// ROUNDS so the line you are shown and the line you shoot always agree.
+function nearestTarget(x, y) {
+  let best = null, bestD = 1e9;
+  enemies.forEach(e => {
+    if (e.dead) return;
+    const d = (e.x - x) ** 2 + (e.y - y) ** 2;
+    if (d < bestD) { bestD = d; best = e; }
+  });
+  if (boss && !boss.entering && boss.dying === 0) {
+    const d = (boss.x - x) ** 2 + (boss.y - y) ** 2;
+    if (d < bestD) { bestD = d; best = boss; }
+  }
+  return best;
+}
+
 function fireWeapon() {
   overchargeCount++;
-  const crit = stats.overcharge > 0 && overchargeCount % stats.overcharge === 0;
-  const dmg = stats.damage * (crit ? 3 : 1);
+  // OVERCHARGE (every Nth shot) and the crit stat are one system: whichever
+  // fires, the shot crits once and pays out once. Rolling them separately
+  // would let a single bullet multiply twice.
+  const timed = stats.overcharge > 0 && overchargeCount % stats.overcharge === 0;
+  const rolled = stats.critChance > 0 && Math.random() < stats.critChance;
+  const crit = timed || rolled;
+  const dmg = stats.damage * (crit ? stats.critMul : 1);
+  const speed = BULLET_SPEED * stats.bulletSpeedMul;
+
+  // GIMBAL MOUNT: the whole pattern rotates toward the nearest enemy, but
+  // only up to aimCone. It closes the gap on a target off to your side
+  // without ever becoming the auto-aim that HUNTER ROUNDS is.
+  let bias = 0;
+  if (stats.aimCone > 0) {
+    const t = nearestTarget(player.x, player.y);
+    if (t) {
+      const want = Math.atan2(t.x - player.x, -(t.y - player.y));
+      bias = Math.max(-stats.aimCone, Math.min(stats.aimCone, want));
+    }
+  }
+
   RLCore.buildShots(stats).forEach(s => {
+    const a = s.a + (s.needle ? 0 : bias);
     bullets.push({
       x: player.x + s.dx, y: player.y + s.dy,
-      vx: Math.sin(s.a) * BULLET_SPEED,
-      vy: -Math.cos(s.a) * BULLET_SPEED,
-      w: 3, h: 10,
-      pierce: stats.pierce, damage: dmg, homing: stats.homing,
+      vx: Math.sin(a) * speed,
+      vy: -Math.cos(a) * speed,
+      // THE NEEDLE is one screen-height lance that never stops.
+      w: s.needle ? 7 : 3, h: s.needle ? 26 : 10,
+      pierce: s.needle ? 9999 : stats.pierce,
+      damage: s.needle ? dmg * 2.2 : dmg,
+      homing: stats.homing,
       splash: stats.splash, split: stats.split, crit,
+      burn: stats.burn, chill: stats.chill,
+      bounces: stats.ricochet,
+      needle: !!s.needle,
       dead: false
     });
   });
@@ -2370,15 +2743,27 @@ function updateDrones() {
     d.x = player.x + Math.cos(d.angle) * 46;
     d.y = player.y + Math.sin(d.angle) * 32;
     if (--d.fire <= 0) {
-      d.fire = 22;
+      d.fire = stats.dronesCopyGun ? Math.max(8, Math.round(stats.fireRate)) : 22;
       // Carries the full bullet field set the collision code in update()
-      // reads (pierce/damage/homing/splash/split/crit/dead) — matching
-      // fireWeapon()'s shape so a drone bullet can't leave any of these
-      // undefined and corrupt the damage arithmetic.
+      // reads (pierce/damage/homing/splash/split/crit/burn/chill/bounces/dead)
+      // — matching fireWeapon()'s shape so a drone bullet can't leave any of
+      // these undefined and corrupt the damage arithmetic.
+      //
+      // MIRROR WING / IRON SWARM give the drones your actual gun instead of
+      // the stock peashooter, which is what makes them worth their tier.
+      const copy = stats.dronesCopyGun;
       bullets.push({
-        x: d.x, y: d.y - 6, vx: 0, vy: -BULLET_SPEED,
-        w: 2, h: 8, pierce: 0, damage: stats.damage * 0.5,
-        homing: 0, splash: 0, split: false, crit: false, dead: false
+        x: d.x, y: d.y - 6, vx: 0, vy: -BULLET_SPEED * (copy ? stats.bulletSpeedMul : 1),
+        w: copy ? 3 : 2, h: copy ? 10 : 8,
+        pierce: copy ? stats.pierce : 0,
+        damage: stats.damage * (copy ? 0.75 : 0.5),
+        homing: copy ? stats.homing : 0,
+        splash: copy ? stats.splash : 0,
+        split: copy ? stats.split : false,
+        burn: copy ? stats.burn : 0,
+        chill: copy ? stats.chill : 0,
+        bounces: copy ? stats.ricochet : 0,
+        crit: false, dead: false
       });
     }
   });
@@ -2400,27 +2785,44 @@ function drawDrones() {
 // routed through damageEnemy (not a direct e.hp-- / killEnemy) so mines still
 // arm instead of dying outright — see damageEnemy's comment for why that
 // decision must live in exactly one place.
+// EVENT HORIZON runs three of these at once, evenly spaced on the same orbit.
+// `singularity` stays the first one so drawSingularity and anything else that
+// reads a single hole keeps working; the rest live in singularityExtra.
+let singularityExtra = [];
+
 function updateSingularity() {
-  if (!stats.singularity) { singularity = null; return; }
+  const n = stats.singularityCount;
+  if (n <= 0) { singularity = null; singularityExtra = []; return; }
   if (!singularity) singularity = { angle: 0 };
   singularity.angle += 0.02;
-  singularity.x = player.x + Math.cos(singularity.angle) * 70;
-  singularity.y = player.y + Math.sin(singularity.angle) * 52;
+
+  const holes = [];
+  for (let i = 0; i < n; i++) {
+    const a = singularity.angle + (i * Math.PI * 2) / n;
+    holes.push({ x: player.x + Math.cos(a) * 70, y: player.y + Math.sin(a) * 52 });
+  }
+  singularity.x = holes[0].x; singularity.y = holes[0].y;
+  singularityExtra = holes.slice(1);
+
   enemies.forEach(e => {
     if (e.dead) return;
-    const dx = singularity.x - e.x, dy = singularity.y - e.y;
-    const d = Math.max(Math.hypot(dx, dy), 0.001); // guard against div-by-zero if exactly co-located
-    if (d < 120) {
-      e.x += (dx / d) * 1.6; e.y += (dy / d) * 1.6;
-      if (d < 26) damageEnemy(e, 0.5);
-    }
+    holes.forEach(h => {
+      if (e.dead) return;
+      const dx = h.x - e.x, dy = h.y - e.y;
+      const d = Math.max(Math.hypot(dx, dy), 0.001); // guard div-by-zero if exactly co-located
+      if (d < 120) {
+        e.x += (dx / d) * 1.6; e.y += (dy / d) * 1.6;
+        // Scales with your damage so it does not become a rounding error at
+        // depth, the way a flat 0.5 did.
+        if (d < 26) damageEnemy(e, Math.max(0.5, stats.damage * 0.05));
+      }
+    });
   });
 }
 
-function drawSingularity() {
-  if (!singularity) return;
+function drawOneSingularity(h) {
   ctx.save();
-  ctx.translate(singularity.x, singularity.y);
+  ctx.translate(h.x, h.y);
   const g = ctx.createRadialGradient(0, 0, 2, 0, 0, 24);
   g.addColorStop(0, '#000000');
   g.addColorStop(0.6, 'rgba(120,0,200,0.7)');
@@ -2429,6 +2831,33 @@ function drawSingularity() {
   ctx.beginPath(); ctx.arc(0, 0, 24, 0, Math.PI*2); ctx.fill();
   ctx.strokeStyle = 'rgba(200,120,255,0.8)'; ctx.lineWidth = 1.5;
   ctx.beginPath(); ctx.arc(0, 0, 9 + Math.sin(frame*0.1)*2, 0, Math.PI*2); ctx.stroke();
+  ctx.restore();
+}
+
+function drawSingularity() {
+  if (!singularity) return;
+  drawOneSingularity(singularity);
+  singularityExtra.forEach(drawOneSingularity);
+}
+
+// TRACER ROUNDS: shows where the nearest target is, and nothing more. All of
+// the information HUNTER ROUNDS gives you, none of the aiming — which is why
+// one is a RARE and the other is an APEX.
+function drawTracer() {
+  if (!stats || !stats.tracer) return;
+  const t = nearestTarget(player.x, player.y);
+  if (!t) return;
+  ctx.save();
+  ctx.strokeStyle = 'rgba(120,255,200,0.30)';
+  ctx.lineWidth = 1;
+  ctx.setLineDash([5, 7]);
+  ctx.beginPath();
+  ctx.moveTo(player.x, player.y - 12);
+  ctx.lineTo(t.x, t.y);
+  ctx.stroke();
+  ctx.setLineDash([]);
+  ctx.strokeStyle = 'rgba(120,255,200,0.6)';
+  ctx.beginPath(); ctx.arc(t.x, t.y, 14, 0, Math.PI*2); ctx.stroke();
   ctx.restore();
 }
 
@@ -2442,14 +2871,69 @@ function drawSingularity() {
 // detonate — including a *directly*-hit mine, since a mine's 2 hp is often
 // wiped out by the splash from its own impact before a per-site special case
 // would ever get a turn to run.
-function damageEnemy(e, dmg) {
+// The single damage path. `hitX` is optional and only the BULWARK DRONE reads
+// it: a shield plate covers its underside, so shots landing under its centre
+// hit the plate while shots landing on its flanks reach the hull. That is the
+// answer to "how do I deal with the thing sitting off to my side" — you go
+// wide and shoot in, rather than sitting under it.
+function damageEnemy(e, dmg, hitX) {
   if (e.dead) return;
+  if (e.kind === 'bulwark' && e.plate > 0) {
+    const flank = typeof hitX === 'number' && Math.abs(hitX - e.x) > ENEMY.bulwark.r * 0.55 * (e.scale || 1);
+    if (!flank) {
+      e.plate -= dmg;
+      e.flash = 3;
+      if (e.plate <= 0) {
+        e.plate = 0;
+        spawnParticles(e.x, e.y + 12, '#88ffaa', 16);
+        FX.addShake(8);
+        Sound.play('shieldBreak');
+      }
+      return;                       // the plate ate it; the hull is untouched
+    }
+  }
+  // KINETIC VERDICT: the first hit of each level bites a flat slice out of
+  // whatever it lands on, however large. One per level, tracked on the run.
+  if (stats.verdict > 0 && !verdictSpent) {
+    verdictSpent = true;
+    dmg += e.maxHp * stats.verdict;
+    addFlashText('VERDICT', e.x, e.y - 20, '#ffffff');
+    FX.addShake(10);
+  }
   e.hp -= dmg;
   e.flash = 4;
+
+  // EXECUTIONER / THE LAST WORD: below the threshold it simply ends.
+  if (e.hp > 0 && stats.execute > 0 && e.maxHp > 0 && e.hp / e.maxHp < stats.execute) {
+    e.hp = 0;
+    spawnParticles(e.x, e.y, '#ffffff', 10);
+  }
+
   if (e.hp <= 0) {
     if (e.kind === 'mine') { e.hp = 1; if (e.arming === 0) e.arming = 30; }
     else killEnemy(e);
   }
+}
+
+// INCENDIARY and CRYO ROUNDS. Applied after the hit lands so a killing blow
+// does not waste them, and stored on the enemy so the pure core stays out of
+// per-frame state.
+function applyOnHitEffects(e, b) {
+  if (e.dead) return;
+  if (b.burn > 0) { e.burnDps = Math.max(e.burnDps || 0, b.damage * b.burn / 2); e.burnLeft = 120; }
+  if (b.chill > 0) { e.chill = Math.max(e.chill || 0, b.chill); e.chillLeft = 120; }
+}
+
+function tickStatusEffects() {
+  enemies.forEach(e => {
+    if (e.dead) return;
+    if (e.burnLeft > 0) {
+      e.burnLeft--;
+      damageEnemy(e, e.burnDps / 60);
+      if (frame % 8 === 0) spawnParticles(e.x, e.y, '#ff8833', 1);
+    }
+    if (e.chillLeft > 0) e.chillLeft--; else e.chill = 0;
+  });
 }
 
 // Flak Burst: on-impact AoE against nearby enemies. Deliberately does not
@@ -2516,6 +3000,18 @@ function killEnemy(e) {
       addFlashText('+1 LIFE', player.x, player.y - 40, '#44ff88');
     }
   }
+  // KILL SHIELD: a charge back every N kills, capped by the same ceiling
+  // every other shield source respects.
+  if (stats.shieldPerKills > 0) {
+    killsSinceShield++;
+    if (killsSinceShield >= stats.shieldPerKills) {
+      killsSinceShield = 0;
+      if (player.shieldCharges < RLCore.MAX_SHIELD_CHARGES) {
+        player.shieldCharges++;
+        addFlashText('+SHIELD', player.x, player.y - 40, '#66ddff');
+      }
+    }
+  }
   combo++; comboTimer = 120;
   addFlashText('+' + st.points*multiplier, e.x, e.y - 10, st.color);
 
@@ -2553,10 +3049,23 @@ function hitPlayer() {
   // Plating / Fortress / Kinetic Barrier all just add to this same charge
   // count — one system, no separate timer.
   if (player.shieldCharges > 0) {
-    player.shieldCharges--;
-    player.invincible = 60;
+    // BULWARK FIELD sometimes gives the charge straight back.
+    if (!(stats.shieldRefund > 0 && Math.random() < stats.shieldRefund)) {
+      player.shieldCharges--;
+    } else {
+      addFlashText('HELD', player.x, player.y - 34, '#88ffcc');
+    }
+    // PHALANX widens the window after a break so a burst cannot strip every
+    // charge in a handful of frames.
+    player.invincible = Math.max(60, stats.shieldIframes);
     FX.addShake(10);
     FX.explode(player.x, player.y, 22, '#00ffff');
+    // REACTIVE ARMOUR turns a blocked hit into a counterattack.
+    if (stats.thorns) {
+      applySplash(player.x, player.y, 110, stats.damage * 6);
+      spawnParticles(player.x, player.y, '#ffdd66', 22);
+      FX.addShake(14);
+    }
     Sound.play('shieldBreak');
     return;
   }
@@ -2588,10 +3097,22 @@ function hitPlayer() {
     }
   }
   lives--;
-  player.invincible = 120;
+  // SECOND WIND buys breathing room after a hit that actually landed.
+  player.invincible = Math.max(120, Math.round(stats.graceSeconds * 60));
   FX.addShake(20);
   FX.explode(player.x, player.y, 24, '#ff4400');
   combo = 0; comboTimer = 0;
+  if (lives <= 0 && stats.reviveOnDeath > 0 && !revivedThisRun) {
+    // UNDYING: death hands one life back, once per run.
+    revivedThisRun = true;
+    lives = stats.reviveOnDeath;
+    player.invincible = 180;
+    enemyBullets = [];
+    addFlashText('UNDYING', player.x, player.y - 44, '#ffffff');
+    FX.addShake(30);
+    Sound.play('apex');
+    return;
+  }
   if (lives <= 0) endRun();
   else Sound.play('explode');
 }
@@ -2698,6 +3219,21 @@ function update() {
   // singularity's drag/grind against enemies happens once per frame.
   updateDrones();
   updateSingularity();
+  tickStatusEffects();
+
+  // MIDAS FIELD: enemies bleed scrap while they are alive, so a screen full
+  // of tanky things at depth is income rather than only a threat. Fractions
+  // are carried in scrapDrip so a low rate still pays out.
+  if (stats.scrapPerSecond > 0 && enemies.length) {
+    scrapDrip += (stats.scrapPerSecond * Math.min(enemies.length, 12)) / 60;
+    if (scrapDrip >= 1) { const whole = Math.floor(scrapDrip); scrap += whole; scrapDrip -= whole; }
+  }
+
+  // CHRONOSTALL: holding fire slows the world. Re-armed every frame the
+  // trigger is down, so it decays the moment you stop shooting.
+  if (stats.chronostall > 0 && (keys[' '] || touchX !== null)) {
+    FX.slowMo(4, 1 - stats.chronostall);
+  }
 
   // Normal spawning is suspended for the duration of a boss fight; the boss
   // supplies its own minions in phase 3.
@@ -2753,8 +3289,16 @@ function update() {
     }
   });
 
-  // Move bullets
-  bullets.forEach(b => { b.x += b.vx; b.y += b.vy; });
+  // Move bullets. RICOCHET reflects off the side walls a limited number of
+  // times, which is what lets a shot reach something tucked against an edge.
+  bullets.forEach(b => {
+    b.x += b.vx; b.y += b.vy;
+    if (b.bounces > 0) {
+      if (b.x < 4)     { b.x = 4;     b.vx = Math.abs(b.vx);  b.bounces--; }
+      else if (b.x > W-4) { b.x = W-4; b.vx = -Math.abs(b.vx); b.bounces--; }
+      else if (b.y < 4)   { b.y = 4;   b.vy = Math.abs(b.vy);  b.bounces--; }
+    }
+  });
 
   // Move enemy bullets
   enemyBullets.forEach(b => { b.x += b.vx; b.y += b.vy; });
@@ -2791,6 +3335,13 @@ function update() {
   enemies.forEach(e => {
     const st = ENEMY[e.kind];
 
+    // CRYO ROUNDS slow whatever they hit. Applied by scaling the velocity for
+    // the duration of the movement step and restoring it after, so every
+    // movement branch is chilled without each one having to know about it.
+    const chillF = e.chill > 0 ? Math.max(0.15, 1 - e.chill) : 1;
+    const _cvx = e.vx, _cvy = e.vy;
+    if (chillF !== 1) { e.vx *= chillF; e.vy *= chillF; }
+
     // ---- movement ----
     switch (e.kind) {
       case 'kamikaze':
@@ -2816,6 +3367,41 @@ function update() {
         if (e.x < 16 || e.x > W-16) e.vx *= -1;
         break;
 
+      case 'lancer':
+        // Slides toward the player's column, then commits. The slide IS the
+        // warning: it cannot shoot until it is nearly lined up.
+        e.x += Math.sign(player.x - e.x) * Math.min(1.1, Math.abs(player.x - e.x) * 0.05);
+        e.y += e.vy;
+        break;
+
+      case 'weaver':
+        e.weavePhase += 0.045;
+        {
+          const nx = e.baseX + Math.sin(e.weavePhase) * e.weaveAmp;
+          e.bank = (nx - e.x) * 0.12;      // banks into the turn
+          e.x = nx;
+        }
+        e.y += e.vy;
+        if (e.x < 24) e.baseX += 3; if (e.x > W-24) e.baseX -= 3;
+        break;
+
+      case 'bulwark':
+        e.x += e.vx; e.y += e.vy;
+        if (e.x < 34 || e.x > W-34) e.vx *= -1;
+        break;
+
+      case 'swarmling':
+        e.jitter += 0.3;
+        e.x += e.vx + Math.sin(e.jitter) * 1.6;
+        e.y += e.vy;
+        if (e.x < 12 || e.x > W-12) e.vx *= -1;
+        break;
+
+      case 'harbinger':
+        e.x += e.vx; e.y += Math.max(0, e.vy * (e.y < 130 ? 1 : 0.12));
+        if (e.x < 50 || e.x > W-50) e.vx *= -1;
+        break;
+
       default: // grunt, elite
         if (e.sweep) {
           e.x = e.baseX + Math.sin(frame*0.02)*70;   // whole line moves as one
@@ -2828,19 +3414,70 @@ function update() {
         }
     }
 
+    if (chillF !== 1) { e.vx = _cvx; e.vy = _cvy; }
+
     // ---- firing ----
-    if (e.kind === 'grunt' || e.kind === 'elite') {
+    // The side-attack fix. Past ARC_FROM_LEVEL a grunt, elite, or lancer may
+    // only shoot within a cone of straight-down, so one sitting off to your
+    // flank physically cannot hit you — it has to commit to your column
+    // first, and that commitment is something you can see coming.
+    if (e.kind === 'grunt' || e.kind === 'elite' || e.kind === 'lancer') {
       e.shootTimer++;
-      const eRate = e.kind === 'elite' ? 55 : 90;
+      const eRate = e.kind === 'elite' ? 55 : e.kind === 'lancer' ? 75 : 90;
       if (e.shootTimer >= eRate) {
+        const angle = Math.atan2(player.y - e.y, player.x - e.x);
+        // Straight down is +PI/2; measure the deviation from it, wrapped.
+        let off = angle - Math.PI/2;
+        while (off > Math.PI) off -= Math.PI*2;
+        while (off < -Math.PI) off += Math.PI*2;
+        if (!RLCore.canFireAt(e.kind, level, off)) {
+          // Out of arc: hold the shot rather than firing sideways. Timer is
+          // left charged so it fires the instant it does line up.
+          e.shootTimer = eRate;
+        } else {
+          e.shootTimer = 0;
+          const spd2 = diff.bulletSpeed * stats.enemyBulletMul;
+          if (e.kind === 'lancer') {
+            // One heavy, fast round straight down its own nose.
+            enemyBullets.push({x: e.x, y: e.y + 14, vx: 0, vy: spd2*1.9, r: 5.5, elite: true, dead: false});
+          } else {
+            enemyBullets.push({x: e.x, y: e.y + 10, vx: Math.cos(angle)*spd2, vy: Math.sin(angle)*spd2, r: 4, elite: e.kind === 'elite', dead: false});
+            if (e.kind === 'elite') {
+              [-0.3, 0.3].forEach(o => {
+                enemyBullets.push({x: e.x, y: e.y + 10, vx: Math.cos(angle+o)*spd2, vy: Math.sin(angle+o)*spd2, r: 4, elite: true, dead: false});
+              });
+            }
+          }
+        }
+      }
+    } else if (e.kind === 'weaver') {
+      // Not arc-limited: dodging it is the point, and it fires while moving.
+      e.shootTimer++;
+      if (e.shootTimer >= 80) {
         e.shootTimer = 0;
         const angle = Math.atan2(player.y - e.y, player.x - e.x);
-        const spd2 = diff.bulletSpeed * stats.enemyBulletMul;
-        enemyBullets.push({x: e.x, y: e.y + 10, vx: Math.cos(angle)*spd2, vy: Math.sin(angle)*spd2, r: 4, elite: e.kind === 'elite', dead: false});
-        if (e.kind === 'elite') {
-          [-0.3, 0.3].forEach(o => {
-            enemyBullets.push({x: e.x, y: e.y + 10, vx: Math.cos(angle+o)*spd2, vy: Math.sin(angle+o)*spd2, r: 4, elite: true, dead: false});
-          });
+        const spd2 = diff.bulletSpeed * 0.9 * stats.enemyBulletMul;
+        [-0.16, 0.16].forEach(o => {
+          enemyBullets.push({x: e.x, y: e.y + 8, vx: Math.cos(angle+o)*spd2, vy: Math.sin(angle+o)*spd2, r: 4, elite: false, dead: false});
+        });
+      }
+    } else if (e.kind === 'harbinger') {
+      e.shootTimer++;
+      e.broodTimer--;
+      if (e.broodTimer <= 0) {
+        e.broodTimer = 150;
+        for (let i = -1; i <= 1; i++) {
+          const m = makeEnemy('swarmling');
+          m.x = e.x + i*24; m.y = e.y + 26;
+          enemies.push(m);
+        }
+      }
+      if (e.shootTimer >= 100) {
+        e.shootTimer = 0;
+        const spd2 = diff.bulletSpeed * 0.85 * stats.enemyBulletMul;
+        for (let i = 0; i < 10; i++) {
+          const a = (i/10)*Math.PI*2 + frame*0.01;
+          enemyBullets.push({x: e.x, y: e.y, vx: Math.cos(a)*spd2, vy: Math.sin(a)*spd2, r: 4.5, elite: true, dead: false});
         }
       }
     } else if (e.kind === 'turret' && e.phase === 'hold') {
@@ -2883,7 +3520,8 @@ function update() {
         Sound.play('hit');
         // damageEnemy applies the hp loss and decides mine-arms-vs-dies; see
         // its definition for why that decision lives in one place.
-        damageEnemy(e, b.damage);
+        damageEnemy(e, b.damage, b.x);
+        applyOnHitEffects(e, b);
 
         // On-impact bullet behaviours (Task 12). These fire on every hit,
         // independent of whether this hit kills the enemy. Split children
@@ -3026,6 +3664,7 @@ function draw() {
       drawShip(player.x, player.y, player.invincible, player.shieldCharges, frame, player.muzzle);
       drawDrones();
       drawSingularity();
+      drawTracer();
     }
 
     particles.forEach(p => {
@@ -3575,6 +4214,7 @@ function updateShop() {
 
 function closeShop() {
   state = 'play';
+  verdictSpent = false;          // KINETIC VERDICT re-arms each level
   levelBanner = { text: 'LEVEL ' + level, life: 120 };
   spawnParticles(W/2, H/2, '#00ffff', 30);
   Sound.play('levelUp');
