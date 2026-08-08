@@ -14791,12 +14791,10 @@ function drawShop() {
   drawShopButton(DEPART_RECT, 'DEPART →', true);
   drawShopButton(SKIP_RECT, 'SKIP', true);
   ctx.textAlign = 'center';
-  ctx.fillStyle = '#4a6070'; ctx.font = '8px monospace';
-  ctx.fillText('S SKIP  ·  SHIFT+S ALWAYS SKIP  ·  ESC IN SETTINGS TO UNDO', W/2, 522);
-
-  ctx.textAlign = 'center';
   ctx.fillStyle = '#5b6b80'; ctx.font = '10px monospace';
   ctx.fillText('← → choose   SPACE buy   R reroll   D depart   S skip', W/2, 524);
+  ctx.fillStyle = '#41556b'; ctx.font = '9px monospace';
+  ctx.fillText('SHIFT+S skips every shop from now on — undo it in SETTINGS', W/2, 539);
 
   drawShopBuild();
 
@@ -14815,20 +14813,22 @@ function drawShop() {
 // so the thing you most need to see is what you have — and at depth the build
 // is also the only place the tier colours of your run are visible at once.
 function drawShopBuild() {
-  const top = 552;
+  // Sits clear of the two hint lines above it (524 and 539). There is nothing
+  // below it on the panel, so the space is free.
+  const top = 570;
   ctx.textAlign = 'left';
   ctx.fillStyle = '#4d5f73'; ctx.font = 'bold 10px monospace';
   ctx.fillText('YOUR BUILD', 24, top);
 
   if (!runUpgrades.length) {
     ctx.fillStyle = '#39485a'; ctx.font = '10px monospace';
-    ctx.fillText('nothing yet — a hit costs you your cheapest upgrade first,', 24, top + 20);
-    ctx.fillText('so cheap ones are armour around the expensive ones.', 24, top + 34);
+    ctx.fillText('nothing yet — buy something. a hit costs you half your', 24, top + 20);
+    ctx.fillText('scrap now, never the build you spent the run making.', 24, top + 34);
     return;
   }
 
-  // Cheapest first, matching the order a hit will strip them in — so the
-  // list doubles as a readout of what you are about to lose.
+  // Cheapest first. It used to be the order a hit would strip them in; a hit
+  // takes scrap now, so this is simply the clearest way to read a long build.
   const rows = runUpgrades.map(o => {
     const u = RLCore.byId(o.id);
     if (!u) return null;
