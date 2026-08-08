@@ -49,7 +49,40 @@ const CFG = {
       blurb: 'Slow tank. Starts each run shielded.' },
     { id: 'phantom',  name: 'PHANTOM',  cost: 3000, lives: 3, speed: 6.0, fireMul: 0.92, hitW: 18, hitH: 28, spreadMul: 1.0, phase: true,
       hull: ['#e8ccff', '#9955ff', '#4400aa'], trim: '#cc88ff',
-      blurb: 'Tiny hitbox. Phases one hit per level.' }
+      blurb: 'Tiny hitbox. Phases one hit per level.' },
+
+    // --- the ascension roster -------------------------------------------
+    // Each of these carries exactly one hook, and every hook is wired to real
+    // game code. A ship whose special did nothing would be the dead-upgrade
+    // bug wearing a different hat.
+    { id: 'warden',   name: 'WARDEN',   cost: 1800, lives: 3, speed: 5.0, fireMul: 1.05, hitW: 30, hitH: 38, spreadMul: 1.1, phase: false,
+      hull: ['#cfe3ff', '#5577cc', '#1b2a55'], trim: '#88bbff',
+      graceHits: 1,
+      blurb: 'The first hit each level costs no upgrade.' },
+    { id: 'scavenger',name: 'SCAVENGER',cost: 2500, lives: 3, speed: 5.8, fireMul: 1.10, hitW: 30, hitH: 38, spreadMul: 1.2, phase: false,
+      hull: ['#ffe6b0', '#c8973a', '#4a3208'], trim: '#ffcc55',
+      scrapBonus: 0.25, creditMul: 1.25,
+      blurb: '+25% scrap, and a bigger payout.' },
+    { id: 'revenant', name: 'REVENANT', cost: 4500, lives: 2, speed: 6.5, fireMul: 0.85, hitW: 24, hitH: 34, spreadMul: 0.9, phase: false,
+      hull: ['#ffd0d8', '#bb3355', '#3d0713'], trim: '#ff5577',
+      startTier: 'RARE',
+      blurb: 'Starts every run with a free RARE. Two lives.' },
+    { id: 'titan',    name: 'TITAN',    cost: 9000, lives: 5, speed: 4.2, fireMul: 1.15, hitW: 36, hitH: 42, spreadMul: 1.5, phase: false,
+      hull: ['#d7ffe8', '#3a9e6a', '#0d3320'], trim: '#5fffaa',
+      startShield: 2, regenEvery: 5,
+      blurb: 'Five lives, starts shielded, regrows one every 5 levels.' },
+    { id: 'oracle',   name: 'ORACLE',   cost: 14000, lives: 3, speed: 5.5, fireMul: 1.00, hitW: 28, hitH: 36, spreadMul: 1.0, phase: false,
+      hull: ['#e0ffff', '#3fb8c8', '#08343d'], trim: '#66eeff',
+      shopBump: 1,
+      blurb: 'The shop always shows one card a tier better.' },
+    { id: 'wraith',   name: 'WRAITH',   cost: 22000, lives: 2, speed: 7.0, fireMul: 0.90, hitW: 20, hitH: 30, spreadMul: 0.85, phase: false,
+      hull: ['#dcd6ff', '#6a54c8', '#150a3d'], trim: '#a892ff',
+      cloakFrames: 120,
+      blurb: 'Untargetable for 2s after every kill. Two lives.' },
+    { id: 'ascendant',name: 'ASCENDANT',cost: 50000, lives: 3, speed: 6.0, fireMul: 0.95, hitW: 26, hitH: 34, spreadMul: 1.0, phase: true,
+      hull: ['#ffffff', '#ffcc22', '#7a3d00'], trim: '#ffee88',
+      startVoidbirth: 1,
+      blurb: 'Begins already ascended. Unlocked by reaching Voidbirth III.' }
   ]
 };
 
@@ -676,7 +709,7 @@ RLCore.eligible = function (tier, owned, vb) {
   });
 };
 
-RLCore.rollSlot = function (level, vb, owned, rnd, exclude) {
+RLCore.rollSlot = function (level, vb, owned, rnd, exclude, bump) {
   const skip = exclude || [];
   const poolFor = tierId => RLCore.eligible(tierId, owned, vb).filter(u => skip.indexOf(u.id) === -1);
 
@@ -684,7 +717,10 @@ RLCore.rollSlot = function (level, vb, owned, rnd, exclude) {
   // calling it inside a loop predicate would re-draw for every tier checked,
   // which is not a single stable roll.
   const rarity = RLCore.rollRarity(level, vb, rnd);
-  const startIdx = RLCore.tierIndexOf(rarity);
+  // ORACLE nudges a roll up the ladder AFTER it is made, so it improves the
+  // draw without ever changing the odds themselves — the published rates stay
+  // exactly the published rates.
+  const startIdx = Math.min(RLCore.MAX_TIER_INDEX, RLCore.tierIndexOf(rarity) + Math.max(0, bump || 0));
   const floorIdx = RLCore.floorTierIndex(vb);
 
   // A slot must never come up empty while eligible upgrades remain, so an
@@ -709,7 +745,7 @@ RLCore.rollSlot = function (level, vb, owned, rnd, exclude) {
 
 RLCore.BASE_SHOP_SLOTS = 3;
 
-RLCore.rollShop = function (level, vb, owned, rnd, slots) {
+RLCore.rollShop = function (level, vb, owned, rnd, slots, bumpFirst) {
   // Only an absent slot count falls back to the default; an explicit 0 means
   // zero and clamps to one card. The old `slots || DEFAULT` read 0 as
   // "unspecified" while the Math.max next to it read it as a number.
@@ -717,7 +753,9 @@ RLCore.rollShop = function (level, vb, owned, rnd, slots) {
   const n = Math.max(1, want);
   const out = [];
   for (let i = 0; i < n; i++) {
-    const u = RLCore.rollSlot(level, vb, owned, rnd, out.map(o => o.id));
+    // Only the first slot is bumped (ORACLE): a whole shop of promoted cards
+    // would make the tier ladder meaningless.
+    const u = RLCore.rollSlot(level, vb, owned, rnd, out.map(o => o.id), i === 0 ? bumpFirst : 0);
     if (u) out.push(u);
   }
   return out.map(u => RLCore.resolve(u, vb));
@@ -969,6 +1007,12 @@ Save.load();
 // a single portable document. If the AudioContext can't be created the module
 // goes inert and the game runs silent rather than failing.
 
+// Rebuilt sound effects. Populated below; consulted by Sound.play before its
+// own switch, so a name present here replaces the built-in version of it.
+// Declared up here (rather than beside its contents) because Sound.play holds
+// a reference to it and const declarations do not hoist their initialiser.
+const SFX = {};
+
 const Sound = {
   ctx: null, master: null, sfxBus: null,
   dead: false, muted: Save.data.muted,
@@ -1069,6 +1113,11 @@ const Sound = {
 
   play(name) {
     if (!Sound.ready()) return;
+    // The SFX table takes precedence over the built-in switch, so a rebuilt
+    // sound overrides the original without either having to know about the
+    // other. Unknown names fall through and do nothing, as before.
+    const custom = SFX[name];
+    if (custom) { custom(); return; }
     switch (name) {
       case 'laser':
         Sound.tone(900, 0.08, 'square', 0.10, 240);
@@ -1291,6 +1340,19 @@ let stats = null;           // resolved by recomputeStats()
 let overchargeCount = 0, killsSinceLife = 0, killsSinceShield = 0;
 // KINETIC VERDICT fires once per level; UNDYING once per run.
 let verdictSpent = false, revivedThisRun = false;
+// WARDEN's per-level grace: hits that cost a life but no upgrade.
+let graceLeft = 0;
+// WRAITH's cloak works by freezing where the enemy THINKS you are. Shots go to
+// your last known position rather than becoming harmless, so a cloaked run
+// still has to dodge everything already in the air.
+let lastSeenX = W / 2, lastSeenY = H - 120;
+
+function enemyAimAngle(fromX, fromY) {
+  const cloaked = player.cloak > 0;
+  const tx = cloaked ? lastSeenX : player.x;
+  const ty = cloaked ? lastSeenY : player.y;
+  return Math.atan2(ty - fromY, tx - fromX);
+}
 let scrapDrip = 0;          // MIDAS FIELD's fractional carry
 
 // ---- HUD build-list cache (Task 15) ----
@@ -1317,6 +1379,10 @@ function rebuildBuildCache() {
 function recomputeStats() {
   const ship = currentShip();
   stats = RLCore.resolveStats(ship, runUpgrades, voidbirths);
+  // SCAVENGER's cut. Applied after resolution rather than inside it so the
+  // pure core stays a function of (ship stats, upgrades, depth) and never has
+  // to know about per-hull specials.
+  if (ship.scrapBonus) stats.scrapMul += ship.scrapBonus;
   player.speed = stats.speed;
   // Evasion Field shrinks the hitbox relative to the ship's base size.
   // Recomputed here (not applyShip) so it updates live whenever the build
@@ -1349,6 +1415,8 @@ const player = {
   invincible: 0, shieldCharges: 0, shieldRegenTimer: 0, trail: [],
   // PHASE DRIVE: one banked free hit plus the frames counted toward the next.
   phaseCharge: 0, phaseDriveTimer: 0,
+  // WRAITH: frames of remaining invisibility to enemy targeting.
+  cloak: 0,
   muzzle: 0
 };
 
@@ -1568,6 +1636,9 @@ function applyShip(def) {
   player.canPhase = def.phase;
   player.phaseReady = def.phase;
   lives = def.lives;
+  // WARDEN's grace refills each level, like Phantom's phase.
+  graceLeft = def.graceHits || 0;
+  player.cloak = 0;
   // Bulwark's starting shield charge is added in startGame, after
   // player.shieldCharges is set from stats — applyShip runs first and would
   // otherwise have its bonus wiped out by that assignment.
@@ -1596,11 +1667,31 @@ function startGame() {
   overchargeCount = 0; killsSinceLife = 0; killsSinceShield = 0;
   verdictSpent = false; revivedThisRun = false; scrapDrip = 0;
   recomputeStats();
+  // ASCENDANT begins the run already ascended, so the floor tier, the odds,
+  // the shop cadence and every upgrade's strength all start one rung up.
+  // Set before the first recomputeStats below so its stats resolve at depth.
+  if (ship.startVoidbirth) {
+    voidbirths = RLCore.clampVoidbirth(ship.startVoidbirth);
+    recomputeStats();
+  }
+  // REVENANT opens every run holding something good.
+  if (ship.startTier) {
+    const pick = RLCore.rollSlot(1, voidbirths, [], Math.random, []);
+    const pool = RLCore.eligible(ship.startTier, [], voidbirths);
+    const u = pool.length ? pool[Math.floor(Math.random() * pool.length)] : pick;
+    if (u) {
+      runUpgrades.push({ id: u.id, stacks: 1 });
+      runUpgradesVersion++;
+      recomputeStats();
+    }
+  }
   lives += stats.extraLives;
   player.shieldCharges = stats.shieldCharges;
   // Bulwark starts each run with one shield charge already up. Added here,
   // after the stats-based assignment above, so it isn't wiped out by it.
   if (ship.id === 'bulwark') player.shieldCharges += 1;
+  // TITAN comes out of the gate armoured.
+  if (ship.startShield) player.shieldCharges = Math.min(RLCore.MAX_SHIELD_CHARGES, player.shieldCharges + ship.startShield);
   FX.reset();
   Music.setBoss(false);
   Music.setIntensity(1);
@@ -1626,7 +1717,14 @@ function levelUp() {
   const cleared = level;
   levelTimer = 0; level++;
   Music.setIntensity(level);
+  const shipNow = currentShip();
   if (player.canPhase) player.phaseReady = true;   // Phantom recharges each level
+  graceLeft = shipNow.graceHits || 0;              // Warden's grace refills too
+  // TITAN knits a life back every few levels, never past its own maximum.
+  if (shipNow.regenEvery && cleared % shipNow.regenEvery === 0 && lives < shipNow.lives) {
+    lives++;
+    addFlashText('+1 LIFE', W/2, H/2 - 70, '#5fffaa');
+  }
 
   // Ascension takes priority over shopping: clearing a voidbirth level ends
   // the segment, and there is nothing to spend scrap on when it is about to
@@ -1686,6 +1784,7 @@ function commitVoidbirth() {
   if (voidbirths >= 3 && CFG.ships.some(s => s.id === 'ascendant') &&
       Save.data.unlocked.indexOf('ascendant') === -1) {
     Save.data.unlocked.push('ascendant');
+    addFlashText('ASCENDANT UNLOCKED', W/2, H/2 + 180, '#ffee88');
   }
   Save.write();
   recomputeStats();
@@ -1780,7 +1879,8 @@ function endRun() {
   Save.data.bestLevel = Math.max(Save.data.bestLevel, level);
   Save.data.totalRuns += 1;
   Save.data.totalKills += runKills;
-  runCredits = RLCore.creditsForScore(score);
+  // SCAVENGER banks a bigger share of the run.
+  runCredits = Math.floor(RLCore.creditsForScore(score) * (currentShip().creditMul || 1));
   Save.data.bestScrapSpent = Math.max(Save.data.bestScrapSpent, scrapSpent);
   creditsShown = 0;
   Save.data.credits += runCredits;
@@ -1798,6 +1898,36 @@ function endRun() {
 }
 
 // ===== ENTITIES =====
+
+// ===== SHIP HULLS =====
+// One entry per ship id. Each draws the body around the origin, nose at -y,
+// roughly bounded by that ship's hitW/hitH so the menu preview and the
+// in-game sprite agree. Colours arrive from the ship's own `hull` triple and
+// `trim`, so a hull reads as itself without hardcoding any palette.
+const SHIP_ART = {};
+
+SHIP_ART.vanguard = function (c0, c1, c2, trim) {
+  ctx.beginPath();
+  ctx.moveTo(0, -18); ctx.lineTo(14, 14); ctx.lineTo(10, 10); ctx.lineTo(10, 18);
+  ctx.lineTo(-10, 18); ctx.lineTo(-10, 10); ctx.lineTo(-14, 14); ctx.closePath();
+  const hullG = ctx.createLinearGradient(-14, -18, 14, 18);
+  hullG.addColorStop(0, c0); hullG.addColorStop(0.5, c1); hullG.addColorStop(1, c2);
+  ctx.fillStyle = hullG; ctx.fill();
+  ctx.strokeStyle = trim; ctx.lineWidth = 1.5; ctx.stroke();
+
+  ctx.beginPath(); ctx.ellipse(0, -4, 6, 8, 0, 0, Math.PI*2);
+  const cg = ctx.createRadialGradient(0, -6, 1, 0, -4, 8);
+  cg.addColorStop(0, '#ffffff'); cg.addColorStop(0.4, c0); cg.addColorStop(1, c2);
+  ctx.fillStyle = cg; ctx.fill();
+
+  ctx.beginPath(); ctx.moveTo(-10, 6); ctx.lineTo(-22, 18); ctx.lineTo(-10, 14); ctx.closePath();
+  ctx.fillStyle = c1; ctx.fill(); ctx.strokeStyle = trim; ctx.lineWidth = 1; ctx.stroke();
+  ctx.beginPath(); ctx.moveTo(10, 6); ctx.lineTo(22, 18); ctx.lineTo(10, 14); ctx.closePath();
+  ctx.fillStyle = c1; ctx.fill(); ctx.stroke();
+
+  ctx.fillStyle = c0;
+  ctx.fillRect(-13, -4, 4, 14); ctx.fillRect(9, -4, 4, 14);
+};
 
 function drawShip(x, y, invincible, shield, t, muzzle, shipDef) {
   const def = shipDef || currentShip();
@@ -1820,31 +1950,23 @@ function drawShip(x, y, invincible, shield, t, muzzle, shipDef) {
   ctx.beginPath(); ctx.ellipse(9, 18+flameLen/2, flameW/2, flameLen/2, 0, 0, Math.PI*2); ctx.fill();
   ctx.restore();
 
-  // Hull
-  ctx.beginPath();
-  ctx.moveTo(0, -18); ctx.lineTo(14, 14); ctx.lineTo(10, 10); ctx.lineTo(10, 18);
-  ctx.lineTo(-10, 18); ctx.lineTo(-10, 10); ctx.lineTo(-14, 14); ctx.closePath();
-  let hullG = ctx.createLinearGradient(-14, -18, 14, 18);
-  hullG.addColorStop(0, c0); hullG.addColorStop(0.5, c1); hullG.addColorStop(1, c2);
-  ctx.fillStyle = hullG;
-  ctx.fill();
-  ctx.strokeStyle = trim; ctx.lineWidth = 1.5; ctx.stroke();
+  // WRAITH's cloak has to be visible to the player even though it is invisible
+  // to the enemy — otherwise its one mechanic is something you can only infer.
+  const cloaked = !shipDef && player.cloak > 0;
+  if (cloaked) {
+    ctx.globalAlpha = 0.45 + 0.15 * Math.sin(t * 0.25);
+    ctx.save();
+    ctx.strokeStyle = 'rgba(168,146,255,0.5)'; ctx.lineWidth = 1;
+    ctx.beginPath(); ctx.arc(0, 0, 26 + Math.sin(t * 0.2) * 3, 0, Math.PI*2); ctx.stroke();
+    ctx.restore();
+  }
 
-  // Cockpit
-  ctx.beginPath(); ctx.ellipse(0, -4, 6, 8, 0, 0, Math.PI*2);
-  let cg = ctx.createRadialGradient(0,-6,1,0,-4,8);
-  cg.addColorStop(0,'#ffffff'); cg.addColorStop(0.4, c0); cg.addColorStop(1, c2);
-  ctx.fillStyle = cg; ctx.fill();
-
-  // Wings
-  ctx.beginPath(); ctx.moveTo(-10, 6); ctx.lineTo(-22, 18); ctx.lineTo(-10, 14); ctx.closePath();
-  ctx.fillStyle = c1; ctx.fill(); ctx.strokeStyle = trim; ctx.lineWidth=1; ctx.stroke();
-  ctx.beginPath(); ctx.moveTo(10, 6); ctx.lineTo(22, 18); ctx.lineTo(10, 14); ctx.closePath();
-  ctx.fillStyle = c1; ctx.fill(); ctx.stroke();
-
-  // Cannons
-  ctx.fillStyle = c0;
-  ctx.fillRect(-13, -4, 4, 14); ctx.fillRect(9, -4, 4, 14);
+  // Body. Each ship owns its own silhouette; drawShip keeps the shared chrome
+  // (engine flames, shield bubble, phase ring, muzzle flash, the invincibility
+  // flicker) so a new hull only has to draw a shape. Falls back to the
+  // Vanguard outline for any ship without art yet, which keeps every ship
+  // flyable rather than invisible.
+  (SHIP_ART[def.id] || SHIP_ART.vanguard)(c0, c1, c2, trim);
 
   // Phase charge indicator
   if (def.phase && player.phaseReady && !shipDef) {
@@ -2473,7 +2595,7 @@ function bossRing(x, y, n, speedMul, offset, r) {
 }
 
 function bossAimed(x, y, spreads, speedMul, r) {
-  const a = Math.atan2(player.y - y, player.x - x);
+  const a = enemyAimAngle(x, y);
   (spreads || [0]).forEach(o => bossShot(x, y, a + o, speedMul, r));
 }
 
@@ -3837,7 +3959,7 @@ BOSS.threshold = {
     if (b.thFire >= rate && b.thParry <= 0) {
       b.thFire = 0;
       b.thRecoil = 6;
-      var aim = Math.atan2(player.y - (b.y + 34), player.x - b.x);
+      var aim = enemyAimAngle(b.x, b.y + 34);
       var n = b.thM.shots;
       var spread = 0.12;
       for (i = 0; i < n; i++) {
@@ -5364,7 +5486,7 @@ BOSS.paleherald = {
       } else if (pick === 1) {
         // THE TOLL — a ring with one wide gap, so there is always an out.
         const n = 16 + ph * 2;
-        const gap = Math.atan2(player.y - b.y, player.x - b.x) + Math.PI;
+        const gap = enemyAimAngle(b.x, b.y) + Math.PI;
         for (let i = 0; i < n; i++) {
           const a = (i / n) * Math.PI * 2;
           let d = a - gap;
@@ -6521,7 +6643,7 @@ function mothershipFire(b, ph, cast) {
     Sound.play('explode');
 
   } else if (k === 'wall') {
-    b.wall = { t: 70, gap: Math.atan2(player.y - b.y, player.x - b.x), rot: 0 };
+    b.wall = { t: 70, gap: enemyAimAngle(b.x, b.y), rot: 0 };
     Sound.play('warning');
 
   } else if (k === 'pull') {
@@ -8869,6 +8991,9 @@ function killEnemy(e) {
     }
   }
   combo++; comboTimer = 120;
+  // WRAITH: every kill drops it off enemy targeting for a couple of seconds.
+  const cloakShip = currentShip();
+  if (cloakShip.cloakFrames) player.cloak = cloakShip.cloakFrames;
   addFlashText('+' + st.points*multiplier, e.x, e.y - 10, st.color);
 
   // Clearing an entire formation pays a bonus.
@@ -8941,7 +9066,11 @@ function hitPlayer() {
   // task's shield logic will touch the rest of hitPlayer, not this block.
   // ABSOLUTION (HYPERCLOCKED) switches this off entirely; GREED ENGINE makes
   // it cost two. Both read through stats so the rule stays in one place.
-  if (!stats.noStrip) {
+  // WARDEN: the first hit each level still costs a life, but not an upgrade.
+  if (graceLeft > 0) {
+    graceLeft--;
+    addFlashText('GRACE', player.x, player.y - 30, '#88bbff');
+  } else if (!stats.noStrip) {
     const res = RLCore.stripN(runUpgrades, stats.strips);
     runUpgrades = res.owned;
     if (res.removed) {
@@ -9034,6 +9163,10 @@ function update() {
   // for the rest of the run. Easing back to the resting line here means the
   // displacement self-heals and no boss has to remember to release it; a boss
   // that keeps pulling simply wins against the spring while it is alive.
+  // Enemies only refresh where they think you are while you are visible.
+  if (player.cloak > 0) player.cloak--;
+  else { lastSeenX = player.x; lastSeenY = player.y; }
+
   player.y = Math.max(90, Math.min(H - 24, player.y));
   if (player.y !== PLAYER_HOME_Y) {
     player.y += (PLAYER_HOME_Y - player.y) * 0.06;
@@ -9227,7 +9360,7 @@ function update() {
         } else {
           e.y -= 2.2;
         }
-        e.aim = Math.atan2(player.y - e.y, player.x - e.x);
+        e.aim = enemyAimAngle(e.x, e.y);
         break;
 
       case 'mine':
@@ -9293,7 +9426,7 @@ function update() {
       e.shootTimer++;
       const eRate = e.kind === 'elite' ? 55 : e.kind === 'lancer' ? 75 : 90;
       if (e.shootTimer >= eRate) {
-        const angle = Math.atan2(player.y - e.y, player.x - e.x);
+        const angle = enemyAimAngle(e.x, e.y);
         // Straight down is +PI/2; measure the deviation from it, wrapped.
         let off = angle - Math.PI/2;
         while (off > Math.PI) off -= Math.PI*2;
@@ -9323,7 +9456,7 @@ function update() {
       e.shootTimer++;
       if (e.shootTimer >= 80) {
         e.shootTimer = 0;
-        const angle = Math.atan2(player.y - e.y, player.x - e.x);
+        const angle = enemyAimAngle(e.x, e.y);
         const spd2 = diff.bulletSpeed * 0.9 * stats.enemyBulletMul;
         [-0.16, 0.16].forEach(o => {
           enemyBullets.push({x: e.x, y: e.y + 8, vx: Math.cos(angle+o)*spd2, vy: Math.sin(angle+o)*spd2, r: 4, elite: false, dead: false});
@@ -10034,7 +10167,7 @@ function openShop() {
   // bought. Nothing threatens the ship while it is docked, so the in-flight
   // bullets are cleared rather than paused.
   enemyBullets = [];
-  shopSlots = RLCore.rollShop(level, voidbirths, runUpgrades, Math.random, stats.shopSlots);
+  shopSlots = RLCore.rollShop(level, voidbirths, runUpgrades, Math.random, stats.shopSlots, currentShip().shopBump || 0);
   shopRerolls = 0;
   shopFreeRerolls = stats.freeRerolls;
   shopSel = 0;
@@ -10162,7 +10295,7 @@ function tryReroll() {
     scrapSpent += cost;
     shopRerolls++;
   }
-  shopSlots = RLCore.rollShop(level, voidbirths, runUpgrades, Math.random, stats.shopSlots);
+  shopSlots = RLCore.rollShop(level, voidbirths, runUpgrades, Math.random, stats.shopSlots, currentShip().shopBump || 0);
   shopSel = Math.min(shopSel, Math.max(0, shopSlots.length - 1));
   noteApex();
   Sound.play('uiMove');
