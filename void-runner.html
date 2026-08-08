@@ -112,12 +112,12 @@ const CFG = {
       blurb: 'A kill spills its extra damage into the next one.' },
     { id: 'lottery',  name: 'LOTTERY',  cost: 25500, lives: 2, speed: 6.4, fireMul: 0.96, hitW: 25, hitH: 33, spreadMul: 1.0, phase: false,
       hull: ['#c8ffe8', '#20c07a', '#03301e'], trim: '#66ffbb',
-      secretOdds: 60,
-      blurb: 'Sixty times the odds of finding the ??? tier.' },
+      luckStart: 2,
+      blurb: 'Every shop rolls two cards better than it should.' },
     // Bought with credits like anything else, but ONLY once the hangar has
     // seen a run reach the top of the ladder. It used to be purchasable the
     // moment you could afford it, which made "Unlocked by Voidbirth" a lie.
-    { id: 'ascendant',name: 'ASCENDANT',cost: 27000, lives: 4, speed: 6.4, fireMul: 0.88, hitW: 25, hitH: 33, spreadMul: 0.95, phase: true,
+    { id: 'ascendant',name: 'ASCENDANT',cost: 27000, lives: 4, speed: 6.4, fireMul: 0.62, hitW: 25, hitH: 33, spreadMul: 0.95, phase: true,
       hull: ['#ffffff', '#ffcc22', '#7a3d00'], trim: '#ffee88',
       startVoidbirth: 2, requiresVoidbirth: 5,
       blurb: 'Begins two ascensions deep. Needs a run that reached Voidbirth V.' }
@@ -354,7 +354,34 @@ RLCore.rollRarity = function (level, vb, rnd) {
 RLCore.BASE_DAMAGE = 10;
 RLCore.BASE_FIRE_RATE = 10;   // frames between shots; lower is faster
 RLCore.MIN_FIRE_RATE = 6;     // 10 shots/sec, so aiming never stops mattering
-RLCore.HP_EXPONENT = 0.95;
+// The two exponents are DELIBERATELY different now. Enemy health climbs on
+// 1.00 and the floor of your damage on 0.92, so the gap widens as level^0.08 —
+// the deeper you go, the more your build has to be carrying. When they were
+// equal (both 0.95) relative difficulty was flat forever, which is exactly why
+// the game stopped being hard once you had a few upgrades.
+RLCore.HP_EXPONENT = 1.00;
+RLCore.DAMAGE_EXPONENT = 0.92;
+
+// "make the game harder; but only after level 7 or so." Everything at or below
+// the knee is untouched, so the opening minutes play exactly as they did, then
+// enemy health takes on a second multiplier that saturates so it cannot
+// compound with the exponent gap forever.
+RLCore.PRESSURE_KNEE = 7;
+RLCore.PRESSURE_PER_LEVEL = 0.02;
+RLCore.PRESSURE_CAP = 2.5;
+
+// Past the cap it keeps creeping, very gently, so the deep game never settles
+// into a fixed difficulty — but slowly enough that it cannot run away.
+RLCore.PRESSURE_CREEP = 0.0008;
+
+RLCore.pressureAt = function (level) {
+  const lv = Math.max(1, level || 1);
+  if (lv <= RLCore.PRESSURE_KNEE) return 1;
+  const ramp = 1 + (lv - RLCore.PRESSURE_KNEE) * RLCore.PRESSURE_PER_LEVEL;
+  if (ramp <= RLCore.PRESSURE_CAP) return ramp;
+  const capLevel = RLCore.PRESSURE_KNEE + (RLCore.PRESSURE_CAP - 1) / RLCore.PRESSURE_PER_LEVEL;
+  return RLCore.PRESSURE_CAP + (lv - capLevel) * RLCore.PRESSURE_CREEP;
+};
 
 // The baseline a bare ship deals at this depth. THIS is what lets a level-10
 // boss have 1,000 HP and the level-2500 Mothership have 1,000,000,000 in the
@@ -366,7 +393,7 @@ RLCore.HP_EXPONENT = 0.95;
 // A voidbirth drops you back to level 1, so this drops with you. That is the
 // point: the ladder you climb again is the same ladder, with better cards.
 RLCore.baseDamageAt = function (level) {
-  return RLCore.BASE_DAMAGE * Math.pow(Math.max(1, level || 1), RLCore.HP_EXPONENT);
+  return RLCore.BASE_DAMAGE * Math.pow(Math.max(1, level || 1), RLCore.DAMAGE_EXPONENT);
 };
 
 // Legacy per-kind table, kept because the boss minions and a handful of tests
@@ -376,11 +403,26 @@ RLCore.ENEMY_HP = {
   lancer: 45, elite: 60, turret: 90, bulwark: 160, harbinger: 400
 };
 
+// Past band 9 the roster CYCLES, so a ship's own base HP would make level 101
+// easier than level 100 — band 4's hulls weigh a fifth of band 9's. Past that
+// cliff a ship contributes only its RELATIVE weight inside its own band, and
+// the absolute number comes from a reference pinned to where band 9 left off.
+RLCore.DEEP_REFERENCE = 1400;    // band 9's lightest hull
+
+RLCore.deepBase = function (def, level) {
+  const bd = Math.floor((Math.max(1, level || 1) - 1) / RLCore.BAND_SIZE);
+  if (bd < RLCore.ENEMY_BANDS.length) return def.hp;
+  const band = RLCore.ENEMY_BANDS[def.band];
+  const lightest = band.reduce((a, x) => Math.min(a, x.hp), Infinity);
+  return RLCore.DEEP_REFERENCE * (def.hp / lightest);
+};
+
 RLCore.enemyHp = function (kind, level) {
-  const band = RLCore.ENEMY_BY_ID && RLCore.ENEMY_BY_ID[kind];
-  const base = band ? band.hp : RLCore.ENEMY_HP[kind];
+  const def = RLCore.ENEMY_BY_ID && RLCore.ENEMY_BY_ID[kind];
+  const base = def ? RLCore.deepBase(def, level) : RLCore.ENEMY_HP[kind];
   if (typeof base !== 'number') throw new Error('RLCore.enemyHp: unknown kind "' + kind + '"');
-  return Math.max(1, Math.round(base * Math.pow(Math.max(1, level), RLCore.HP_EXPONENT)));
+  return Math.max(1, Math.round(base * Math.pow(Math.max(1, level), RLCore.HP_EXPONENT)
+    * RLCore.pressureAt(level)));
 };
 
 // Nothing is deleted in a single frame. An enemy tough enough to be worth
@@ -858,24 +900,24 @@ RLCore.meteorHp = function (id, level) {
 // past level 100, so nothing in the first hundred levels asks you to solve a
 // shield before you have a build capable of breaking one.
 RLCore.BOSS_TABLE = [
-  { level:   10, key: 'choir',        name: 'TRIAD',               hp:        1000, phases: 3, mechanic: 'three hulls flying as one, sharing a single HP pool' },
-  { level:   20, key: 'magnetar',     name: 'MAGNETAR',            hp:        5600, phases: 3, mechanic: 'polarity flips between pulling you in and shoving you out' },
-  { level:   30, key: 'rustfall',     name: 'RUSTFALL',            hp:       15000, phases: 3, mechanic: 'sheds permanent wreckage that fills the arena' },
-  { level:   40, key: 'longsilence',  name: 'THE LONG SILENCE',    hp:       32000, phases: 4, mechanic: 'kills the lights; you fight by muzzle flash' },
-  { level:   50, key: 'voidgate',     name: 'MIRRORGATE',          hp:       56000, phases: 4, mechanic: 'spawns mirrors of your own ship running your build' },
-  { level:   75, key: 'widow',        name: 'THE WIDOW',           hp:      154000, phases: 4, mechanic: 'a tether that hurts while taut, so you must close in' },
-  { level:  100, key: 'sevenangles',  name: 'SEVEN ANGLES',        hp:      316000, phases: 5, mechanic: 'a hull that gains a face, and a gun, each phase' },
-  { level:  150, key: 'halowarden',   name: 'HALO WARDEN',         hp:      870000, phases: 3, mechanic: 'a rotating shield ring with a single gap' },
-  { level:  200, key: 'scrapjaw',     name: 'SCRAPJAW TITAN',      hp:     1790000, phases: 2, mechanic: 'armour plates absorb all damage until broken off' },
-  { level:  250, key: 'hiveempress',  name: 'HIVE EMPRESS',        hp:     3125000, phases: 4, mechanic: 'regenerates unless her brood is cleared' },
-  { level:  300, key: 'cartographer', name: 'THE CARTOGRAPHER',    hp:     4930000, phases: 4, mechanic: 'detonates telegraphed cells of a lit grid' },
-  { level:  350, key: 'nullpoint',    name: 'NULLPOINT',           hp:     7240000, phases: 4, mechanic: 'jams one of your upgrades at a time' },
-  { level:  400, key: 'choirmaster',  name: 'ASHEN CHOIRMASTER',   hp:    10100000, phases: 5, mechanic: 'every attack lands on an audible four-beat bar' },
-  { level:  500, key: 'threshold',    name: 'THE THRESHOLD',       hp:    17700000, phases: 5, mechanic: 'copies your build and fights you with it' },
-  { level:  750, key: 'paleherald',   name: 'PALE HERALD',         hp:    48700000, phases: 5, mechanic: 'destructible hangar bays guard the core' },
-  { level: 1000, key: 'ironlitany',   name: 'IRON LITANY',         hp:   100000000, phases: 6, mechanic: 'so large the fight scrolls sideways along its flank' },
+  { level:   10, key: 'choir',        name: 'TRIAD',               hp:        6000, phases: 3, mechanic: 'three hulls flying as one, sharing a single HP pool' },
+  { level:   20, key: 'magnetar',     name: 'MAGNETAR',            hp:        31000, phases: 3, mechanic: 'polarity flips between pulling you in and shoving you out' },
+  { level:   30, key: 'rustfall',     name: 'RUSTFALL',            hp:       82000, phases: 3, mechanic: 'sheds permanent wreckage that fills the arena' },
+  { level:   40, key: 'longsilence',  name: 'THE LONG SILENCE',    hp:       162000, phases: 4, mechanic: 'kills the lights; you fight by muzzle flash' },
+  { level:   50, key: 'voidgate',     name: 'MIRRORGATE',          hp:       275000, phases: 4, mechanic: 'spawns mirrors of your own ship running your build' },
+  { level:   75, key: 'widow',        name: 'THE WIDOW',           hp:      721000, phases: 4, mechanic: 'a tether that hurts while taut, so you must close in' },
+  { level:  100, key: 'sevenangles',  name: 'SEVEN ANGLES',        hp:      1400000, phases: 5, mechanic: 'a hull that gains a face, and a gun, each phase' },
+  { level:  150, key: 'halowarden',   name: 'HALO WARDEN',         hp:      3700000, phases: 3, mechanic: 'a rotating shield ring with a single gap' },
+  { level:  200, key: 'scrapjaw',     name: 'SCRAPJAW TITAN',      hp:     7400000, phases: 2, mechanic: 'armour plates absorb all damage until broken off' },
+  { level:  250, key: 'hiveempress',  name: 'HIVE EMPRESS',        hp:     12600000, phases: 4, mechanic: 'regenerates unless her brood is cleared' },
+  { level:  300, key: 'cartographer', name: 'THE CARTOGRAPHER',    hp:     19500000, phases: 4, mechanic: 'detonates telegraphed cells of a lit grid' },
+  { level:  350, key: 'nullpoint',    name: 'NULLPOINT',           hp:     28100000, phases: 4, mechanic: 'jams one of your upgrades at a time' },
+  { level:  400, key: 'choirmaster',  name: 'ASHEN CHOIRMASTER',   hp:    38600000, phases: 5, mechanic: 'every attack lands on an audible four-beat bar' },
+  { level:  500, key: 'threshold',    name: 'THE THRESHOLD',       hp:    65600000, phases: 5, mechanic: 'copies your build and fights you with it' },
+  { level:  750, key: 'paleherald',   name: 'PALE HERALD',         hp:    171900000, phases: 5, mechanic: 'destructible hangar bays guard the core' },
+  { level: 1000, key: 'ironlitany',   name: 'IRON LITANY',         hp:   340500000, phases: 6, mechanic: 'so large the fight scrolls sideways along its flank' },
   { level: 2500, key: 'mothership',   name: 'THE DREADED SCOURGE OF HUMANITY — WARR MOTHERSHIP',
-                                                                   hp:  1000000000, phases: 7, mechanic: 'the Devouring: it eats the arena permanently, phase by phase' }
+                                                                   hp:  3000000000, phases: 7, mechanic: 'the Devouring: it eats the arena permanently, phase by phase' }
 ];
 
 RLCore.ARMADA_INTERVAL = 100;
@@ -889,8 +931,11 @@ RLCore.isBossLevel = function (level) {
 // The curve the table was fitted from. Used for the ARMADA escorts that fill
 // the 1100-2400 stretch, so their health sits on the same line as the
 // hand-set bosses rather than on a second, disagreeing one.
-RLCore.BOSS_HP_BASE = 1000;      // the level-10 boss, exactly
-RLCore.BOSS_HP_EXPONENT = 2.5;   // carries it to 1,000,000,000 at level 2500
+// Raised hard. The old 1,000 first boss died in about a second to a bare ship
+// and in a third of one to any real build, which is not a boss, it is a speed
+// bump. 6,000 at level 10 and 3,000,000,000 at level 2,500.
+RLCore.BOSS_HP_BASE = 6000;       // the level-10 boss, exactly
+RLCore.BOSS_HP_EXPONENT = 2.377;  // carries it to 3,000,000,000 at level 2500
 
 RLCore.fittedBossHp = function (level) {
   const raw = RLCore.BOSS_HP_BASE * Math.pow(Math.max(1, level) / 10, RLCore.BOSS_HP_EXPONENT);
@@ -1064,7 +1109,7 @@ RLCore.UPGRADES = [
     line: ['EVASION FIELD', 'BLUR DRIVE', 'PHASE SHIFT', 'SMEAR', 'AFTERIMAGE', 'THE UNHITTABLE'] },
   { id: 'wide_mount',   tier: 'UNCOMMON', name: 'WIDE MOUNT',   desc: '+1 shot',               effect: { extraShots: 1 },
     line: ['WIDE MOUNT', 'TRIPLE MOUNT', 'BATTERY MOUNT', 'BROADSIDE', 'THE FAN', 'ALL OF THEM AT ONCE'] },
-  { id: 'gimbal_mount', tier: 'UNCOMMON', name: 'GIMBAL MOUNT', desc: 'shots aim up to 18 degrees', effect: { aimCone: 0.31 },
+  { id: 'gimbal_mount', tier: 'RARE', name: 'GIMBAL MOUNT', desc: 'shots aim up to 18 degrees', effect: { aimCone: 0.31 },
     line: ['GIMBAL MOUNT', 'SERVO MOUNT', 'PREDICTIVE GIMBAL', 'SOLUTION ENGINE', 'THE LEAD', 'ALWAYS ALREADY AIMED'] },
   { id: 'hardened_hull',tier: 'UNCOMMON', name: 'HARDENED HULL',desc: '+6% crit chance',       effect: { critChance: 0.06 },
     line: ['HARDENED HULL', 'WEAK-POINT SCAN', 'FAULT FINDER', 'ACHILLES ARRAY', 'THE FLAW', 'EVERYTHING HAS A SEAM'] },
@@ -1082,7 +1127,7 @@ RLCore.UPGRADES = [
   { id: 'split_shot',   tier: 'RARE', name: 'SPLIT SHOT',      desc: 'shots split in two on impact', effect: { split: true } },
   { id: 'overcharge',   tier: 'RARE', name: 'OVERCHARGE',      desc: 'every 5th shot triples',       effect: { overcharge: 5 } },
   { id: 'kinetic_barrier', tier: 'RARE', name: 'KINETIC BARRIER', desc: 'a shield regrows every 20s', effect: { shieldRegen: 1200 } },
-  { id: 'tracer_rounds',tier: 'RARE', name: 'TRACER ROUNDS',   desc: 'draws a lead line to the nearest enemy', effect: { tracer: true } },
+  { id: 'tracer_rounds',tier: 'EPIC', name: 'TRACER ROUNDS',   desc: 'draws a lead line to the nearest enemy', effect: { tracer: true } },
   { id: 'incendiary',   tier: 'RARE', name: 'INCENDIARY',      desc: 'hits burn for 40% more over 2s', effect: { burn: 0.40 } },
   { id: 'cryo_rounds',  tier: 'RARE', name: 'CRYO ROUNDS',     desc: 'hits slow enemies by 35%',     effect: { chill: 0.35 } },
   { id: 'ricochet',     tier: 'RARE', name: 'RICOCHET',        desc: 'shots bounce off the walls twice', effect: { ricochet: 2 } },
@@ -1090,7 +1135,7 @@ RLCore.UPGRADES = [
   { id: 'war_chest',    tier: 'RARE', name: 'WAR CHEST',       desc: 'shop prices -12%',             effect: { priceDiscount: 0.12 } },
   { id: 'bounce_plate', tier: 'RARE', name: 'BOUNCE PLATE',    desc: 'shots bounce off a wall once', effect: { ricochet: 1 } },
   { id: 'ember_rounds', tier: 'RARE', name: 'EMBER ROUNDS',    desc: 'hits burn for 25% more over 2s', effect: { burn: 0.25 } },
-  { id: 'gyro_gimbal',  tier: 'RARE', name: 'GYRO GIMBAL',     desc: 'shots aim up to 29 degrees',   effect: { aimCone: 0.50 } },
+  { id: 'gyro_gimbal',  tier: 'EPIC', name: 'GYRO GIMBAL',     desc: 'shots aim up to 29 degrees',   effect: { aimCone: 0.50 } },
   { id: 'siege_sight',  tier: 'RARE', name: 'SIEGE SIGHT',     desc: '+22% boss damage, +5% crit',   effect: { bossDamageMul: 0.22, critChance: 0.05 } },
 
   // --- EPIC ---------------------------------------------------------------
@@ -1140,7 +1185,7 @@ RLCore.UPGRADES = [
   { id: 'twin_core',    tier: 'APEX', name: 'TWIN CORE',       desc: 'every weapon effect fires twice',    effect: { twinCore: true } },
   { id: 'singularity',  tier: 'APEX', name: 'SINGULARITY',     desc: 'a black hole orbits you',            effect: { singularity: true } },
   { id: 'immortal',     tier: 'APEX', name: 'IMMORTAL ENGINE', desc: 'your first death is survivable',     effect: { extraLife: 1 } },
-  { id: 'hunter_rounds',tier: 'APEX', name: 'HUNTER ROUNDS',   desc: 'shots steer toward enemies',         effect: { homing: 0.03 } },
+  { id: 'hunter_rounds',tier: 'OVERCLOCKED', name: 'HUNTER ROUNDS',   desc: 'shots steer toward enemies',         effect: { homing: 0.03 } },
   { id: 'reload_sing',  tier: 'APEX', name: 'RELOAD SINGULARITY', desc: '+110% fire rate',                 effect: { fireRateMul: 1.10 } },
   { id: 'annihilator',  tier: 'APEX', name: 'ANNIHILATOR',     desc: '+140% damage',                       effect: { damageMul: 1.40 } },
   { id: 'apex_verdict', tier: 'APEX', name: 'OPENING VERDICT', desc: 'first hit each level takes 3% of max HP', effect: { verdict: 0.03 } },
@@ -1213,7 +1258,7 @@ RLCore.UPGRADES = [
   { id: 'c_short_barrel',tier: 'COMMON', name: 'SHORT BARREL',   desc: '+6% fire rate, +4% spread',  effect: { fireRateMul: 0.06, spreadMul: 0.04 } },
   { id: 'c_cold_start',  tier: 'COMMON', name: 'COLD START',     desc: 'hits slow enemies by 12%',   effect: { chill: 0.12 } },
   { id: 'c_match_head',  tier: 'COMMON', name: 'MATCH HEAD',     desc: 'hits burn for 15% more',     effect: { burn: 0.15 } },
-  { id: 'c_dog_ear',     tier: 'COMMON', name: 'DOG-EARED CHART',desc: 'shots aim up to 9 degrees',  effect: { aimCone: 0.16 } },
+  { id: 'c_dog_ear',     tier: 'UNCOMMON', name: 'DOG-EARED CHART',desc: 'shots aim up to 9 degrees',  effect: { aimCone: 0.16 } },
   { id: 'c_salvage_net', tier: 'COMMON', name: 'SALVAGE NET',    desc: 'rocks drop one more thing',  effect: { dropBonus: 1 } },
   { id: 'c_shim_plate',  tier: 'COMMON', name: 'SHIM PLATE',     desc: '+1 shield, +3% hitbox',      effect: { shieldCharges: 1, hitScaleMul: 0.03 } },
   { id: 'c_two_stroke',  tier: 'COMMON', name: 'TWO-STROKE',     desc: '+5% fire rate, +5% speed',   effect: { fireRateMul: 0.05, speedMul: 0.05 } },
@@ -1245,7 +1290,7 @@ RLCore.UPGRADES = [
   { id: 'u_ice_bath',    tier: 'UNCOMMON', name: 'ICE BATH',      desc: 'hits slow enemies by 25%',   effect: { chill: 0.25 } },
   { id: 'u_bank_note',   tier: 'UNCOMMON', name: 'BANK NOTE',     desc: '+400 scrap each level',      effect: { scrapPerLevel: 400 } },
   { id: 'u_recoil_comp', tier: 'UNCOMMON', name: 'RECOIL COMP',   desc: '-10% spread, +7% fire rate', effect: { spreadMul: -0.10, fireRateMul: 0.07 } },
-  { id: 'u_lookout',     tier: 'UNCOMMON', name: 'LOOKOUT',       desc: 'draws a lead line to the nearest enemy', effect: { tracer: true } },
+  { id: 'u_lookout',     tier: 'RARE', name: 'LOOKOUT',       desc: 'draws a lead line to the nearest enemy', effect: { tracer: true } },
   { id: 'u_ricochet_lip',tier: 'UNCOMMON', name: 'RICOCHET LIP',  desc: 'shots bounce off a wall once',effect: { ricochet: 1 } },
   { id: 'u_siege_ladder',tier: 'UNCOMMON', name: 'SIEGE LADDER',  desc: '+16% damage to bosses',      effect: { bossDamageMul: 0.16 } },
   { id: 'u_tin_snips',   tier: 'UNCOMMON', name: 'TIN SNIPS',     desc: 'finishes enemies under 8% HP',effect: { execute: 0.08 } },
@@ -1254,7 +1299,7 @@ RLCore.UPGRADES = [
   { id: 'u_ghost_trim',  tier: 'UNCOMMON', name: 'GHOST TRIM',    desc: '-9% your hitbox',            effect: { hitScaleMul: -0.09 } },
   { id: 'u_tithe_box',   tier: 'UNCOMMON', name: 'TITHE BOX',     desc: '+20% scrap, -4% prices',     effect: { scrapMul: 0.20, priceDiscount: 0.04 } },
   { id: 'u_spitfire',    tier: 'UNCOMMON', name: 'SPITFIRE',      desc: '+1 shot, +5% spread',        effect: { extraShots: 1, spreadMul: 0.05 } },
-  { id: 'u_gunner_eye',  tier: 'UNCOMMON', name: "GUNNER'S EYE",  desc: 'shots aim up to 23 degrees', effect: { aimCone: 0.40 } },
+  { id: 'u_gunner_eye',  tier: 'RARE', name: "GUNNER'S EYE",  desc: 'shots aim up to 23 degrees', effect: { aimCone: 0.40 } },
   { id: 'u_field_medic', tier: 'UNCOMMON', name: 'FIELD MEDIC',   desc: 'a life back every 90 kills', effect: { lifePerKills: 90 } },
 
   // --- RARE -----------------------------------------------------------------
@@ -1264,7 +1309,7 @@ RLCore.UPGRADES = [
   { id: 'r_burr_field',  tier: 'RARE', name: 'BURR FIELD',      desc: 'enemies near you slow 35%',   effect: { slowField: 0.35 } },
   { id: 'r_spite',       tier: 'RARE', name: 'SPITE',           desc: 'taking a hit fires back hard', effect: { revengeShots: 18 } },
   { id: 'r_overkill',    tier: 'RARE', name: 'OVERKILL',        desc: 'excess damage splashes on',   effect: { overkill: 0.5 } },
-  { id: 'r_bloodhound',  tier: 'RARE', name: 'BLOODHOUND',      desc: 'shots steer toward enemies',  effect: { homing: 0.02 } },
+  { id: 'r_bloodhound',  tier: 'EPIC', name: 'BLOODHOUND',      desc: 'shots steer toward enemies',  effect: { homing: 0.02 } },
   { id: 'r_dragnet',     tier: 'RARE', name: 'DRAGNET',         desc: 'pickups come from anywhere',  effect: { magnetRange: 260 } },
   { id: 'r_core_sample', tier: 'RARE', name: 'CORE SAMPLE',     desc: 'rocks drop four more things', effect: { dropBonus: 4 } },
   { id: 'r_shipbreaker', tier: 'RARE', name: 'SHIPBREAKER',     desc: 'ramming is a weapon',         effect: { contactDamage: 45 } },
@@ -1311,7 +1356,7 @@ RLCore.UPGRADES = [
   { id: 'e_prize_court', tier: 'EPIC', name: 'PRIZE COURT',     desc: '+90% scrap, -10% prices',     effect: { scrapMul: 0.90, priceDiscount: 0.10 } },
   { id: 'e_headhunter',  tier: 'EPIC', name: 'HEADHUNTER',      desc: 'finishes enemies under 18% HP',effect: { execute: 0.18 } },
   { id: 'e_bank_shot',   tier: 'EPIC', name: 'CUSHION SHOT',    desc: 'shots bounce off the walls three times', effect: { ricochet: 3 } },
-  { id: 'e_dead_reckon', tier: 'EPIC', name: 'DEAD RECKONING',  desc: 'shots steer hard toward enemies', effect: { homing: 0.05 } },
+  { id: 'e_dead_reckon', tier: 'LEGENDARY', name: 'DEAD RECKONING',  desc: 'shots steer hard toward enemies', effect: { homing: 0.05 } },
   { id: 'e_start_line',  tier: 'EPIC', name: 'STARTING LINE',   desc: 'start each level shielded',   effect: { fortress: 1 } },
   { id: 'e_pit_crew',    tier: 'EPIC', name: 'PIT CREW',        desc: 'a shield regrows every 12s',  effect: { shieldRegen: 720 } },
   { id: 'e_gale',        tier: 'EPIC', name: 'GALE',            desc: '+28% speed, -12% hitbox',     effect: { speedMul: 0.28, hitScaleMul: -0.12 } },
@@ -1341,7 +1386,7 @@ RLCore.UPGRADES = [
   { id: 'l_redoubt',     tier: 'LEGENDARY', name: 'REDOUBT',       desc: '+3 shields, mercy after each break', effect: { shieldCharges: 3, shieldIframes: 75 } },
   { id: 'l_open_hand',   tier: 'LEGENDARY', name: 'OPEN HAND',     desc: 'first hit each level takes 2% of max HP', effect: { verdict: 0.02 } },
   { id: 'l_free_port',   tier: 'LEGENDARY', name: 'FREE PORT',     desc: '-35% prices, two free rerolls', effect: { priceDiscount: 0.35, freeRerolls: 2 } },
-  { id: 'l_north_star',  tier: 'LEGENDARY', name: 'NORTH STAR',    desc: 'shots home, and never miss the lead', effect: { homing: 0.08, tracer: true } },
+  { id: 'l_north_star',  tier: 'MYTHIC', name: 'NORTH STAR',    desc: 'shots home, and never miss the lead', effect: { homing: 0.08, tracer: true } },
   { id: 'l_second_life', tier: 'LEGENDARY', name: 'SECOND LIFE',   desc: 'a life back every 40 kills', effect: { lifePerKills: 40 } },
 
   // --- MYTHIC ---------------------------------------------------------------
@@ -1366,7 +1411,7 @@ RLCore.UPGRADES = [
   { id: 'm_free_city',   tier: 'MYTHIC', name: 'FREE CITY',      desc: '-45% prices, three free rerolls', effect: { priceDiscount: 0.45, freeRerolls: 3 } },
   { id: 'm_dead_hand',   tier: 'MYTHIC', name: 'DEAD HAND',      desc: 'death hands one life back',  effect: { reviveOnDeath: 1 } },
   { id: 'm_gravity',     tier: 'MYTHIC', name: 'GRAVITY WELL',   desc: 'a black hole orbits you',    effect: { singularity: true } },
-  { id: 'm_lodesun',     tier: 'MYTHIC', name: 'LODESUN',        desc: 'shots home hard, and pass through', effect: { homing: 0.12, pierce: 3 } },
+  { id: 'm_lodesun',     tier: 'APEX', name: 'LODESUN',        desc: 'shots home hard, and pass through', effect: { homing: 0.12, pierce: 3 } },
 
   // --- APEX -----------------------------------------------------------------
   // The brief: some APEX should be a MUCH better version of a basic card, so
@@ -1575,8 +1620,14 @@ RLCore.rollShop = function (level, vb, owned, rnd, slots, bumpFirst) {
 // ---------------------------------------------------------------------------
 
 RLCore.PHASE_DRIVE_FRAMES = 720;
-RLCore.REPAIR_KIT_MAX = 2;
-RLCore.MAX_SHIELD_CHARGES = 4;
+// Both tightened. A shield used to be the answer to every mistake and a
+// four-charge stack meant four free hits between shops.
+RLCore.REPAIR_KIT_MAX = 1;
+RLCore.MAX_SHIELD_CHARGES = 3;
+// Kill-count sources of shields and lives cost 80% more kills than the card
+// says, applied in one place so every card stays truthful about its own
+// relative strength.
+RLCore.UPKEEP_SCARCITY = 1.8;
 
 RLCore.resolveStats = function (ship, owned, vb, level) {
   const v = RLCore.clampVoidbirth(vb);
@@ -1637,12 +1688,12 @@ RLCore.resolveStats = function (ship, owned, vb, level) {
     execute: max('execute'),
     verdict: max('verdict'),
     shieldRegen: max('shieldRegen'),
-    shieldPerKills: max('shieldPerKills'),
+    shieldPerKills: max('shieldPerKills') * RLCore.UPKEEP_SCARCITY,
     shieldRefund: max('shieldRefund'),
     shieldIframes: max('shieldIframes'),
     graceSeconds: max('graceSeconds'),
     overcharge: max('overcharge'),
-    lifePerKills: max('lifePerKills'),
+    lifePerKills: max('lifePerKills') * RLCore.UPKEEP_SCARCITY,
     reviveOnDeath: max('reviveOnDeath'),
     drones: sum('drones'),
     chain: max('chain'),
@@ -4398,20 +4449,71 @@ function handlePointer(p) {
   return false;
 }
 
+// The on-screen charge pad. Sits bottom-right, well clear of the ship's
+// resting position, and is only live during play.
+// Clear of the in-play mute button at (W-40, H-42) — they were overlapping.
+const CHARGE_PAD = { x: W - 112, y: H - 158, w: 92, h: 92 };
+
+function inChargePad(p) {
+  const cx = CHARGE_PAD.x + CHARGE_PAD.w / 2, cy = CHARGE_PAD.y + CHARGE_PAD.h / 2;
+  const r = CHARGE_PAD.w / 2 + 14;          // generous: it is a thumb, not a mouse
+  return (p.x - cx) ** 2 + (p.y - cy) ** 2 <= r * r;
+}
+
+// identifier -> 'charge' | 'steer'
+const touchRoles = new Map();
+
+function refreshTouchState() {
+  let charging = false, steer = null;
+  touchRoles.forEach(v => { if (v.role === 'charge') charging = true; else steer = v.clientX; });
+  touchCharging = charging;
+  touchX = steer;
+}
+
 canvas.addEventListener('touchstart', e => {
   Sound.unlock();
-  const t = e.touches[0];
-  if (handlePointer(canvasPos(t.clientX, t.clientY))) return;
-  touchX = t.clientX;
+  touchSeen = true;
+  for (const t of e.changedTouches) {
+    const p = canvasPos(t.clientX, t.clientY);
+    if (state === 'play' && inChargePad(p)) {
+      touchRoles.set(t.identifier, { role: 'charge', clientX: t.clientX });
+      continue;
+    }
+    // Menus and the shop consume the tap; play uses it to steer.
+    if (handlePointer(p)) continue;
+    touchRoles.set(t.identifier, { role: 'steer', clientX: t.clientX });
+  }
+  refreshTouchState();
 }, {passive:true});
-canvas.addEventListener('touchmove', e => { touchX = e.touches[0].clientX; e.preventDefault(); }, {passive:false});
-canvas.addEventListener('touchend', () => { touchX = null; });
+
+canvas.addEventListener('touchmove', e => {
+  for (const t of e.changedTouches) {
+    const rec = touchRoles.get(t.identifier);
+    if (!rec) continue;
+    rec.clientX = t.clientX;
+    // Sliding off the pad releases the charge, which is the behaviour a thumb
+    // expects and also the only way to cancel one.
+    if (rec.role === 'charge' && !inChargePad(canvasPos(t.clientX, t.clientY))) rec.role = 'steer';
+  }
+  refreshTouchState();
+  e.preventDefault();
+}, {passive:false});
+
+function endTouches(e) {
+  for (const t of e.changedTouches) touchRoles.delete(t.identifier);
+  refreshTouchState();
+}
+canvas.addEventListener('touchend', endTouches);
+canvas.addEventListener('touchcancel', endTouches);
 
 // Mouse equivalent so every control is clickable on desktop too.
 canvas.addEventListener('mousedown', e => {
   Sound.unlock();
-  handlePointer(canvasPos(e.clientX, e.clientY));
+  const p = canvasPos(e.clientX, e.clientY);
+  if (state === 'play' && inChargePad(p)) { touchCharging = true; return; }
+  handlePointer(p);
 });
+window.addEventListener('mouseup', () => { touchCharging = false; });
 
 function currentShip() {
   return CFG.ships.find(s => s.id === Save.data.selectedShip) || CFG.ships[0];
@@ -4457,6 +4559,7 @@ function startGame() {
   vbInfo = null; vbCards = []; vbTick = 0;
   runUpgradesVersion++;
   overchargeCount = 0; killsSinceLife = 0; killsSinceShield = 0;
+  chargeShot = 0; touchCharging = false;
   verdictSpent = false; revivedThisRun = false; scrapDrip = 0;
   recomputeStats();
   // ASCENDANT begins the run already ascended, so the floor tier, the odds,
@@ -5256,218 +5359,297 @@ SHIP_ART.ascendant = function (c0, c1, c2, trim) {
 // the geometry with colour deliberately excluded, so a recolour cannot pass.
 
 // MAGPIE — a collector: long open cargo forks and a hunched cockpit.
+// MAGPIE — a long-nosed scout with two collector scoops slung under the wings.
+// Nothing like VANGUARD: narrow shoulders, a stretched nose, forward canards.
 SHIP_ART.magpie = function (c0, c1, c2, trim) {
-  ctx.strokeStyle = c1; ctx.lineWidth = 3;
-  ctx.beginPath(); ctx.moveTo(-6, -6); ctx.lineTo(-19, -20); ctx.lineTo(-24, -10); ctx.stroke();
-  ctx.beginPath(); ctx.moveTo(6, -6); ctx.lineTo(19, -20); ctx.lineTo(24, -10); ctx.stroke();
+  // Canards, ahead of the main wing — the silhouette cue that reads instantly.
+  ctx.fillStyle = c2;
+  ctx.beginPath(); ctx.moveTo(-5, -9); ctx.lineTo(-19, -14); ctx.lineTo(-17, -7); ctx.lineTo(-5, -4); ctx.closePath(); ctx.fill();
+  ctx.beginPath(); ctx.moveTo(5, -9); ctx.lineTo(19, -14); ctx.lineTo(17, -7); ctx.lineTo(5, -4); ctx.closePath(); ctx.fill();
+  ctx.strokeStyle = trim; ctx.lineWidth = 1; ctx.stroke();
 
+  // Main wings, low and swept back hard.
+  ctx.beginPath(); ctx.moveTo(-6, 0); ctx.lineTo(-21, 16); ctx.lineTo(-7, 15); ctx.closePath();
+  ctx.fillStyle = c1; ctx.fill(); ctx.strokeStyle = trim; ctx.stroke();
+  ctx.beginPath(); ctx.moveTo(6, 0); ctx.lineTo(21, 16); ctx.lineTo(7, 15); ctx.closePath();
+  ctx.fill(); ctx.stroke();
+
+  // Fuselage: a long spike of a nose on a slim body.
   ctx.beginPath();
-  ctx.moveTo(0, -14); ctx.lineTo(9, -2); ctx.lineTo(13, 12);
-  ctx.lineTo(5, 19); ctx.lineTo(-5, 19); ctx.lineTo(-13, 12); ctx.lineTo(-9, -2);
+  ctx.moveTo(0, -22); ctx.lineTo(4, -8); ctx.lineTo(7, 8);
+  ctx.lineTo(5, 18); ctx.lineTo(-5, 18); ctx.lineTo(-7, 8); ctx.lineTo(-4, -8);
   ctx.closePath();
-  const g = ctx.createLinearGradient(0, -14, 0, 19);
-  g.addColorStop(0, c0); g.addColorStop(0.55, c1); g.addColorStop(1, c2);
+  const g = ctx.createLinearGradient(-7, -22, 7, 18);
+  g.addColorStop(0, c0); g.addColorStop(0.5, c1); g.addColorStop(1, c2);
   ctx.fillStyle = g; ctx.fill();
   ctx.strokeStyle = trim; ctx.lineWidth = 1.5; ctx.stroke();
 
-  ctx.beginPath(); ctx.ellipse(0, -3, 5, 6, 0, 0, Math.PI * 2);
-  ctx.fillStyle = trim; ctx.globalAlpha = 0.85; ctx.fill(); ctx.globalAlpha = 1;
+  // Collector scoops — the reason it exists — under each wing root.
+  ctx.strokeStyle = trim; ctx.lineWidth = 1.6;
+  ctx.beginPath(); ctx.arc(-12, 10, 5, -0.4, Math.PI + 0.4); ctx.stroke();
+  ctx.beginPath(); ctx.arc(12, 10, 5, -0.4, Math.PI + 0.4); ctx.stroke();
 
-  // Collector ring — the magnet, drawn as the thing it is.
-  ctx.strokeStyle = trim; ctx.lineWidth = 1.2; ctx.globalAlpha = 0.55;
-  ctx.beginPath(); ctx.arc(0, 2, 21, 0, Math.PI * 2); ctx.stroke();
-  ctx.globalAlpha = 1;
-  ctx.fillStyle = c0; ctx.fillRect(-7, 15, 5, 5); ctx.fillRect(2, 15, 5, 5);
+  ctx.beginPath(); ctx.ellipse(0, -6, 3.4, 6, 0, 0, Math.PI * 2);
+  const cg = ctx.createRadialGradient(0, -8, 1, 0, -6, 6);
+  cg.addColorStop(0, '#ffffff'); cg.addColorStop(1, c2);
+  ctx.fillStyle = cg; ctx.fill();
+
+  ctx.fillStyle = c0; ctx.fillRect(-4, 15, 3, 5); ctx.fillRect(1, 15, 3, 5);
 };
 
 // RAMHEAD — everything is in front: a solid wedge prow, engines tucked behind.
+// RAMHEAD — an assault hull. Heavy armoured prow, shoulders wider than its
+// tail, two big engine bells.
 SHIP_ART.ramhead = function (c0, c1, c2, trim) {
+  ctx.beginPath(); ctx.moveTo(-9, -2); ctx.lineTo(-24, 10); ctx.lineTo(-10, 16); ctx.closePath();
+  ctx.fillStyle = c2; ctx.fill(); ctx.strokeStyle = trim; ctx.lineWidth = 1; ctx.stroke();
+  ctx.beginPath(); ctx.moveTo(9, -2); ctx.lineTo(24, 10); ctx.lineTo(10, 16); ctx.closePath();
+  ctx.fill(); ctx.stroke();
+
   ctx.beginPath();
-  ctx.moveTo(0, -20); ctx.lineTo(17, -2); ctx.lineTo(17, 8);
-  ctx.lineTo(8, 18); ctx.lineTo(-8, 18); ctx.lineTo(-17, 8); ctx.lineTo(-17, -2);
+  ctx.moveTo(0, -21); ctx.lineTo(10, -12); ctx.lineTo(13, 2);
+  ctx.lineTo(10, 18); ctx.lineTo(-10, 18); ctx.lineTo(-13, 2); ctx.lineTo(-10, -12);
   ctx.closePath();
-  const g = ctx.createLinearGradient(0, -20, 0, 18);
-  g.addColorStop(0, c0); g.addColorStop(0.4, c1); g.addColorStop(1, c2);
+  const g = ctx.createLinearGradient(0, -21, 0, 18);
+  g.addColorStop(0, c0); g.addColorStop(0.45, c1); g.addColorStop(1, c2);
   ctx.fillStyle = g; ctx.fill();
   ctx.strokeStyle = trim; ctx.lineWidth = 2; ctx.stroke();
 
-  // The ram itself, a separate plate bolted over the nose.
+  // The ram: a bright armoured cap bolted over the nose.
   ctx.beginPath();
-  ctx.moveTo(0, -22); ctx.lineTo(11, -6); ctx.lineTo(0, -10); ctx.lineTo(-11, -6);
+  ctx.moveTo(0, -23); ctx.lineTo(9, -11); ctx.lineTo(0, -14); ctx.lineTo(-9, -11);
   ctx.closePath();
   ctx.fillStyle = trim; ctx.fill();
   ctx.strokeStyle = c2; ctx.lineWidth = 1; ctx.stroke();
 
+  ctx.beginPath(); ctx.ellipse(0, -3, 4, 5.5, 0, 0, Math.PI * 2);
+  ctx.fillStyle = 'rgba(255,255,255,0.85)'; ctx.fill();
+
   ctx.fillStyle = c2;
-  ctx.fillRect(-14, 2, 5, 12); ctx.fillRect(9, 2, 5, 12);
+  ctx.fillRect(-9, 15, 6, 6); ctx.fillRect(3, 15, 6, 6);
   ctx.strokeStyle = trim; ctx.lineWidth = 1;
-  ctx.strokeRect(-14, 2, 5, 12); ctx.strokeRect(9, 2, 5, 12);
-  ctx.beginPath(); ctx.moveTo(-6, 4); ctx.lineTo(6, 4); ctx.stroke();
+  ctx.strokeRect(-9, 15, 6, 6); ctx.strokeRect(3, 15, 6, 6);
 };
 
 // LANTERN — a hollow frame around a lit core.
+// LANTERN — a survey ship. Broad delta wing, a big glowing sensor bulb set
+// into the nose rather than a hollow frame.
 SHIP_ART.lantern = function (c0, c1, c2, trim) {
-  ctx.strokeStyle = c1; ctx.lineWidth = 3.5;
   ctx.beginPath();
-  ctx.moveTo(0, -19); ctx.lineTo(15, -4); ctx.lineTo(11, 17);
-  ctx.lineTo(-11, 17); ctx.lineTo(-15, -4); ctx.closePath();
-  ctx.stroke();
-  ctx.fillStyle = c2; ctx.globalAlpha = 0.75; ctx.fill(); ctx.globalAlpha = 1;
+  ctx.moveTo(0, -12); ctx.lineTo(22, 16); ctx.lineTo(9, 13);
+  ctx.lineTo(0, 18); ctx.lineTo(-9, 13); ctx.lineTo(-22, 16);
+  ctx.closePath();
+  const wg = ctx.createLinearGradient(0, -12, 0, 18);
+  wg.addColorStop(0, c1); wg.addColorStop(1, c2);
+  ctx.fillStyle = wg; ctx.fill();
+  ctx.strokeStyle = trim; ctx.lineWidth = 1.5; ctx.stroke();
 
-  const cg = ctx.createRadialGradient(0, 0, 1, 0, 0, 13);
-  cg.addColorStop(0, '#ffffff'); cg.addColorStop(0.35, trim); cg.addColorStop(1, 'rgba(0,0,0,0)');
-  ctx.beginPath(); ctx.arc(0, 0, 13, 0, Math.PI * 2);
-  ctx.fillStyle = cg; ctx.fill();
+  ctx.beginPath();
+  ctx.moveTo(0, -21); ctx.lineTo(6, -6); ctx.lineTo(6, 14);
+  ctx.lineTo(-6, 14); ctx.lineTo(-6, -6);
+  ctx.closePath();
+  const g = ctx.createLinearGradient(-6, -21, 6, 14);
+  g.addColorStop(0, c0); g.addColorStop(1, c2);
+  ctx.fillStyle = g; ctx.fill();
+  ctx.strokeStyle = trim; ctx.stroke();
 
-  ctx.strokeStyle = trim; ctx.lineWidth = 1.4;
-  ctx.beginPath(); ctx.moveTo(-15, -4); ctx.lineTo(15, -4); ctx.stroke();
-  ctx.beginPath(); ctx.moveTo(-13, 7); ctx.lineTo(13, 7); ctx.stroke();
+  // The lamp, set into the nose.
+  const lg = ctx.createRadialGradient(0, -11, 1, 0, -11, 9);
+  lg.addColorStop(0, '#ffffff'); lg.addColorStop(0.4, trim); lg.addColorStop(1, 'rgba(0,0,0,0)');
+  ctx.beginPath(); ctx.arc(0, -11, 9, 0, Math.PI * 2);
+  ctx.fillStyle = lg; ctx.fill();
 
-  ctx.fillStyle = c0;
-  ctx.beginPath(); ctx.moveTo(-11, 17); ctx.lineTo(-6, 22); ctx.lineTo(-2, 17); ctx.closePath(); ctx.fill();
-  ctx.beginPath(); ctx.moveTo(11, 17); ctx.lineTo(6, 22); ctx.lineTo(2, 17); ctx.closePath(); ctx.fill();
+  ctx.strokeStyle = trim; ctx.lineWidth = 1;
+  ctx.beginPath(); ctx.moveTo(-16, 12); ctx.lineTo(-7, 4); ctx.stroke();
+  ctx.beginPath(); ctx.moveTo(16, 12); ctx.lineTo(7, 4); ctx.stroke();
+
+  ctx.fillStyle = c0; ctx.fillRect(-5, 12, 4, 6); ctx.fillRect(1, 12, 4, 6);
 };
 
 // GLACIER — a flat crystal shelf, wider than it is long, with shard fins.
+// GLACIER — a proper ship, not a floating shard: a broad-shouldered icebreaker
+// with a chisel prow, faceted wings and four engines.
 SHIP_ART.glacier = function (c0, c1, c2, trim) {
   ctx.beginPath();
-  ctx.moveTo(0, -16); ctx.lineTo(20, -6); ctx.lineTo(24, 6);
-  ctx.lineTo(10, 17); ctx.lineTo(-10, 17); ctx.lineTo(-24, 6); ctx.lineTo(-20, -6);
+  ctx.moveTo(-8, -6); ctx.lineTo(-23, 4); ctx.lineTo(-21, 13); ctx.lineTo(-8, 12);
   ctx.closePath();
-  const g = ctx.createLinearGradient(-24, 0, 24, 0);
-  g.addColorStop(0, c2); g.addColorStop(0.5, c0); g.addColorStop(1, c2);
-  ctx.fillStyle = g; ctx.fill();
-  ctx.strokeStyle = trim; ctx.lineWidth = 1.5; ctx.stroke();
+  ctx.fillStyle = c2; ctx.fill(); ctx.strokeStyle = trim; ctx.lineWidth = 1.2; ctx.stroke();
+  ctx.beginPath();
+  ctx.moveTo(8, -6); ctx.lineTo(23, 4); ctx.lineTo(21, 13); ctx.lineTo(8, 12);
+  ctx.closePath();
+  ctx.fill(); ctx.stroke();
 
-  // Fracture lines — the whole read of the hull is "cracked ice".
-  ctx.strokeStyle = trim; ctx.lineWidth = 1; ctx.globalAlpha = 0.7;
-  ctx.beginPath(); ctx.moveTo(0, -16); ctx.lineTo(-6, 4); ctx.lineTo(0, 17); ctx.stroke();
-  ctx.beginPath(); ctx.moveTo(0, -16); ctx.lineTo(8, 2); ctx.lineTo(2, 17); ctx.stroke();
-  ctx.beginPath(); ctx.moveTo(-20, -6); ctx.lineTo(-6, 4); ctx.stroke();
-  ctx.beginPath(); ctx.moveTo(20, -6); ctx.lineTo(8, 2); ctx.stroke();
+  ctx.beginPath();
+  ctx.moveTo(0, -22); ctx.lineTo(8, -10); ctx.lineTo(11, 4);
+  ctx.lineTo(8, 17); ctx.lineTo(-8, 17); ctx.lineTo(-11, 4); ctx.lineTo(-8, -10);
+  ctx.closePath();
+  const g = ctx.createLinearGradient(-11, -22, 11, 17);
+  g.addColorStop(0, '#ffffff'); g.addColorStop(0.35, c0); g.addColorStop(0.7, c1); g.addColorStop(1, c2);
+  ctx.fillStyle = g; ctx.fill();
+  ctx.strokeStyle = trim; ctx.lineWidth = 1.6; ctx.stroke();
+
+  // Faceting: the ice read, kept as surface detail on a real hull.
+  ctx.strokeStyle = trim; ctx.lineWidth = 0.9; ctx.globalAlpha = 0.6;
+  ctx.beginPath(); ctx.moveTo(0, -22); ctx.lineTo(-5, 2); ctx.lineTo(0, 17); ctx.stroke();
+  ctx.beginPath(); ctx.moveTo(0, -22); ctx.lineTo(6, 0); ctx.lineTo(2, 17); ctx.stroke();
   ctx.globalAlpha = 1;
 
-  ctx.fillStyle = c1;
-  ctx.beginPath(); ctx.moveTo(-24, 6); ctx.lineTo(-30, 14); ctx.lineTo(-16, 12); ctx.closePath(); ctx.fill();
-  ctx.beginPath(); ctx.moveTo(24, 6); ctx.lineTo(30, 14); ctx.lineTo(16, 12); ctx.closePath(); ctx.fill();
+  ctx.beginPath(); ctx.ellipse(0, -8, 3.6, 5.5, 0, 0, Math.PI * 2);
+  ctx.fillStyle = 'rgba(255,255,255,0.9)'; ctx.fill();
+
+  ctx.fillStyle = c2;
+  [-9, -3, 3, 9].forEach(x => { ctx.fillRect(x - 1.6, 15, 3.2, 6); });
+  ctx.strokeStyle = trim; ctx.lineWidth = 0.8;
+  [-9, -3, 3, 9].forEach(x => { ctx.strokeRect(x - 1.6, 15, 3.2, 6); });
 };
 
 // CARTWHEEL — a spinning rotor of four spokes around a small core.
+// CARTWHEEL — a rotor ship, but built around a real fuselage: the spinning
+// ring is a housing bolted to a hull rather than the whole vehicle.
 SHIP_ART.cartwheel = function (c0, c1, c2, trim) {
-  ctx.strokeStyle = c1; ctx.lineWidth = 4;
-  for (let i = 0; i < 4; i++) {
-    const a = i * Math.PI / 2 + Math.PI / 4;
+  ctx.strokeStyle = c2; ctx.lineWidth = 3;
+  ctx.beginPath(); ctx.arc(0, 1, 17, 0, Math.PI * 2); ctx.stroke();
+  ctx.strokeStyle = trim; ctx.lineWidth = 1.2;
+  ctx.beginPath(); ctx.arc(0, 1, 17, 0, Math.PI * 2); ctx.stroke();
+  for (let i = 0; i < 6; i++) {
+    const a = i * Math.PI / 3;
     ctx.beginPath();
-    ctx.moveTo(Math.cos(a) * 5, Math.sin(a) * 5);
-    ctx.lineTo(Math.cos(a) * 20, Math.sin(a) * 20);
+    ctx.moveTo(Math.cos(a) * 9, Math.sin(a) * 9 + 1);
+    ctx.lineTo(Math.cos(a) * 17, Math.sin(a) * 17 + 1);
     ctx.stroke();
   }
-  ctx.strokeStyle = trim; ctx.lineWidth = 2;
-  ctx.beginPath(); ctx.arc(0, 0, 20, 0, Math.PI * 2); ctx.stroke();
 
-  for (let i = 0; i < 4; i++) {
-    const a = i * Math.PI / 2 + Math.PI / 4;
-    ctx.beginPath(); ctx.arc(Math.cos(a) * 20, Math.sin(a) * 20, 4, 0, Math.PI * 2);
-    ctx.fillStyle = c0; ctx.fill();
-  }
-
-  ctx.beginPath(); ctx.arc(0, 0, 8, 0, Math.PI * 2);
-  const g = ctx.createRadialGradient(0, -3, 1, 0, 0, 8);
-  g.addColorStop(0, '#ffffff'); g.addColorStop(0.5, c0); g.addColorStop(1, c2);
+  ctx.beginPath();
+  ctx.moveTo(0, -21); ctx.lineTo(6, -9); ctx.lineTo(8, 6);
+  ctx.lineTo(5, 18); ctx.lineTo(-5, 18); ctx.lineTo(-8, 6); ctx.lineTo(-6, -9);
+  ctx.closePath();
+  const g = ctx.createLinearGradient(0, -21, 0, 18);
+  g.addColorStop(0, c0); g.addColorStop(0.5, c1); g.addColorStop(1, c2);
   ctx.fillStyle = g; ctx.fill();
   ctx.strokeStyle = trim; ctx.lineWidth = 1.5; ctx.stroke();
 
-  ctx.beginPath(); ctx.moveTo(0, -20); ctx.lineTo(4, -12); ctx.lineTo(-4, -12); ctx.closePath();
-  ctx.fillStyle = trim; ctx.fill();
-};
-
-// HOWITZER — one enormous barrel with a ship built behind it as an afterthought.
-SHIP_ART.howitzer = function (c0, c1, c2, trim) {
-  ctx.fillStyle = c2;
-  ctx.fillRect(-7, -24, 14, 22);
-  ctx.strokeStyle = trim; ctx.lineWidth = 1.5;
-  ctx.strokeRect(-7, -24, 14, 22);
-  ctx.fillStyle = c0;
-  ctx.fillRect(-9, -26, 18, 5);
-  ctx.strokeRect(-9, -26, 18, 5);
-
-  ctx.beginPath();
-  ctx.moveTo(-13, -2); ctx.lineTo(13, -2); ctx.lineTo(18, 10);
-  ctx.lineTo(9, 19); ctx.lineTo(-9, 19); ctx.lineTo(-18, 10);
-  ctx.closePath();
-  const g = ctx.createLinearGradient(0, -2, 0, 19);
-  g.addColorStop(0, c1); g.addColorStop(1, c2);
-  ctx.fillStyle = g; ctx.fill();
-  ctx.strokeStyle = trim; ctx.lineWidth = 2; ctx.stroke();
-
-  // Recoil struts, because a gun that size needs bracing.
-  ctx.strokeStyle = c0; ctx.lineWidth = 2;
-  ctx.beginPath(); ctx.moveTo(-7, -6); ctx.lineTo(-15, 8); ctx.stroke();
-  ctx.beginPath(); ctx.moveTo(7, -6); ctx.lineTo(15, 8); ctx.stroke();
-
-  ctx.fillStyle = trim;
-  ctx.fillRect(-11, 16, 6, 5); ctx.fillRect(5, 16, 6, 5);
-};
-
-// DOMINO — two stacked slabs joined by a narrow waist, pips on the upper.
-SHIP_ART.domino = function (c0, c1, c2, trim) {
-  ctx.fillStyle = c1;
-  ctx.fillRect(-14, -20, 28, 15);
-  ctx.strokeStyle = trim; ctx.lineWidth = 1.5;
-  ctx.strokeRect(-14, -20, 28, 15);
-
-  ctx.fillStyle = c2;
-  ctx.fillRect(-6, -6, 12, 6);
-
-  ctx.fillStyle = c0;
-  ctx.fillRect(-16, 0, 32, 14);
-  ctx.strokeStyle = trim;
-  ctx.strokeRect(-16, 0, 32, 14);
-
-  ctx.fillStyle = trim;
-  [[-8, -15], [0, -15], [8, -15], [-8, -9], [8, -9]].forEach(p => {
-    ctx.beginPath(); ctx.arc(p[0], p[1], 2, 0, Math.PI * 2); ctx.fill();
-  });
-
-  ctx.strokeStyle = c2; ctx.lineWidth = 1;
-  ctx.beginPath(); ctx.moveTo(-16, 7); ctx.lineTo(16, 7); ctx.stroke();
-
-  ctx.fillStyle = c1;
-  ctx.beginPath(); ctx.moveTo(-16, 14); ctx.lineTo(-10, 21); ctx.lineTo(-4, 14); ctx.closePath(); ctx.fill();
-  ctx.beginPath(); ctx.moveTo(16, 14); ctx.lineTo(10, 21); ctx.lineTo(4, 14); ctx.closePath(); ctx.fill();
-};
-
-// LOTTERY — a scratch card with a ship attached: asymmetric, gaudy, lucky.
-SHIP_ART.lottery = function (c0, c1, c2, trim) {
-  ctx.beginPath();
-  ctx.moveTo(0, -21); ctx.lineTo(12, -8); ctx.lineTo(19, 6);
-  ctx.lineTo(6, 18); ctx.lineTo(-9, 18); ctx.lineTo(-16, 3); ctx.lineTo(-10, -9);
-  ctx.closePath();
-  const g = ctx.createLinearGradient(-16, -21, 19, 18);
-  g.addColorStop(0, c0); g.addColorStop(0.45, c1); g.addColorStop(1, c2);
-  ctx.fillStyle = g; ctx.fill();
-  ctx.strokeStyle = trim; ctx.lineWidth = 1.5; ctx.stroke();
-
-  // Seven pips in a wedge — the only ship in the hangar with an odd number
-  // of anything, on purpose.
-  ctx.fillStyle = trim;
-  for (let i = 0; i < 7; i++) {
-    const a = -Math.PI / 2 + (i - 3) * 0.34;
-    ctx.beginPath();
-    ctx.arc(Math.cos(a) * 11, Math.sin(a) * 11 + 2, 1.8, 0, Math.PI * 2);
-    ctx.fill();
-  }
-
-  ctx.beginPath(); ctx.ellipse(-2, -4, 5, 7, -0.25, 0, Math.PI * 2);
-  const cg = ctx.createRadialGradient(-2, -6, 1, -2, -4, 7);
+  ctx.beginPath(); ctx.ellipse(0, -7, 3.4, 5.5, 0, 0, Math.PI * 2);
+  const cg = ctx.createRadialGradient(0, -9, 1, 0, -7, 6);
   cg.addColorStop(0, '#ffffff'); cg.addColorStop(1, c2);
   ctx.fillStyle = cg; ctx.fill();
 
+  ctx.fillStyle = c0; ctx.fillRect(-4, 16, 3, 5); ctx.fillRect(1, 16, 3, 5);
+};
+
+// HOWITZER — one enormous barrel with a ship built behind it as an afterthought.
+// HOWITZER — a gunship. The barrel is now a chin-mounted cannon under a real
+// cockpit, instead of a rectangle with a ship stuck behind it.
+SHIP_ART.howitzer = function (c0, c1, c2, trim) {
+  ctx.beginPath(); ctx.moveTo(-10, -2); ctx.lineTo(-25, 8); ctx.lineTo(-24, 15); ctx.lineTo(-10, 16); ctx.closePath();
+  ctx.fillStyle = c2; ctx.fill(); ctx.strokeStyle = trim; ctx.lineWidth = 1.2; ctx.stroke();
+  ctx.beginPath(); ctx.moveTo(10, -2); ctx.lineTo(25, 8); ctx.lineTo(24, 15); ctx.lineTo(10, 16); ctx.closePath();
+  ctx.fill(); ctx.stroke();
+
+  ctx.beginPath();
+  ctx.moveTo(0, -18); ctx.lineTo(10, -8); ctx.lineTo(12, 6);
+  ctx.lineTo(9, 18); ctx.lineTo(-9, 18); ctx.lineTo(-12, 6); ctx.lineTo(-10, -8);
+  ctx.closePath();
+  const g = ctx.createLinearGradient(0, -18, 0, 18);
+  g.addColorStop(0, c0); g.addColorStop(0.5, c1); g.addColorStop(1, c2);
+  ctx.fillStyle = g; ctx.fill();
+  ctx.strokeStyle = trim; ctx.lineWidth = 1.8; ctx.stroke();
+
+  // The gun, slung under the nose.
+  ctx.fillStyle = c2;
+  ctx.fillRect(-4.5, -27, 9, 14);
+  ctx.strokeStyle = trim; ctx.lineWidth = 1.4;
+  ctx.strokeRect(-4.5, -27, 9, 14);
+  ctx.fillStyle = trim;
+  ctx.fillRect(-6, -29, 12, 3.5);
+  // Recoil sleeves.
   ctx.fillStyle = c0;
-  ctx.beginPath(); ctx.moveTo(-9, 18); ctx.lineTo(-13, 24); ctx.lineTo(-3, 20); ctx.closePath(); ctx.fill();
-  ctx.beginPath(); ctx.moveTo(6, 18); ctx.lineTo(11, 24); ctx.lineTo(1, 20); ctx.closePath(); ctx.fill();
-  ctx.strokeStyle = c2; ctx.lineWidth = 1;
-  ctx.beginPath(); ctx.moveTo(-10, -9); ctx.lineTo(12, -8); ctx.stroke();
+  ctx.fillRect(-6.5, -20, 2.5, 6); ctx.fillRect(4, -20, 2.5, 6);
+
+  ctx.beginPath(); ctx.ellipse(0, -3, 4, 5, 0, 0, Math.PI * 2);
+  ctx.fillStyle = 'rgba(255,255,255,0.85)'; ctx.fill();
+
+  ctx.fillStyle = c2;
+  ctx.fillRect(-8, 16, 6, 6); ctx.fillRect(2, 16, 6, 6);
+  ctx.strokeStyle = trim; ctx.lineWidth = 1;
+  ctx.strokeRect(-8, 16, 6, 6); ctx.strokeRect(2, 16, 6, 6);
+};
+
+// DOMINO — two stacked slabs joined by a narrow waist, pips on the upper.
+// DOMINO — a twin-boom ship. The two hulls that gave it its name are now
+// engine booms either side of a central nacelle, joined by a wing.
+SHIP_ART.domino = function (c0, c1, c2, trim) {
+  // Booms.
+  ctx.fillStyle = c2;
+  ctx.beginPath(); ctx.roundRect(-19, -12, 8, 30, 3); ctx.fill();
+  ctx.beginPath(); ctx.roundRect(11, -12, 8, 30, 3); ctx.fill();
+  ctx.strokeStyle = trim; ctx.lineWidth = 1.2;
+  ctx.beginPath(); ctx.roundRect(-19, -12, 8, 30, 3); ctx.stroke();
+  ctx.beginPath(); ctx.roundRect(11, -12, 8, 30, 3); ctx.stroke();
+  // Boom noses.
+  ctx.fillStyle = c1;
+  ctx.beginPath(); ctx.moveTo(-19, -12); ctx.lineTo(-15, -20); ctx.lineTo(-11, -12); ctx.closePath(); ctx.fill();
+  ctx.beginPath(); ctx.moveTo(11, -12); ctx.lineTo(15, -20); ctx.lineTo(19, -12); ctx.closePath(); ctx.fill();
+
+  // Joining wing.
+  ctx.fillStyle = c1;
+  ctx.fillRect(-15, 2, 30, 7);
+  ctx.strokeStyle = trim; ctx.strokeRect(-15, 2, 30, 7);
+
+  // Central nacelle.
+  ctx.beginPath();
+  ctx.moveTo(0, -20); ctx.lineTo(7, -8); ctx.lineTo(7, 12);
+  ctx.lineTo(0, 19); ctx.lineTo(-7, 12); ctx.lineTo(-7, -8);
+  ctx.closePath();
+  const g = ctx.createLinearGradient(0, -20, 0, 19);
+  g.addColorStop(0, c0); g.addColorStop(0.5, c1); g.addColorStop(1, c2);
+  ctx.fillStyle = g; ctx.fill();
+  ctx.strokeStyle = trim; ctx.lineWidth = 1.6; ctx.stroke();
+
+  // Three pips on the nacelle — the last trace of the name.
+  ctx.fillStyle = trim;
+  [-5, 0, 5].forEach(y => { ctx.beginPath(); ctx.arc(0, y, 1.5, 0, Math.PI * 2); ctx.fill(); });
+
+  ctx.beginPath(); ctx.ellipse(0, -12, 3, 4.5, 0, 0, Math.PI * 2);
+  ctx.fillStyle = 'rgba(255,255,255,0.85)'; ctx.fill();
+
+  ctx.fillStyle = c0;
+  ctx.fillRect(-18, 18, 6, 4); ctx.fillRect(12, 18, 6, 4);
+};
+
+// LOTTERY — a scratch card with a ship attached: asymmetric, gaudy, lucky.
+// LOTTERY — a lucky ship: asymmetric by design, one oversized intake to port,
+// a bank of seven lights along the spine.
+SHIP_ART.lottery = function (c0, c1, c2, trim) {
+  ctx.beginPath(); ctx.moveTo(-7, -4); ctx.lineTo(-24, 6); ctx.lineTo(-20, 16); ctx.lineTo(-7, 14); ctx.closePath();
+  ctx.fillStyle = c2; ctx.fill(); ctx.strokeStyle = trim; ctx.lineWidth = 1.2; ctx.stroke();
+  ctx.beginPath(); ctx.moveTo(7, -1); ctx.lineTo(18, 8); ctx.lineTo(16, 15); ctx.lineTo(7, 14); ctx.closePath();
+  ctx.fill(); ctx.stroke();
+
+  // The oversized port intake — the asymmetry that makes it read as itself.
+  ctx.strokeStyle = trim; ctx.lineWidth = 2;
+  ctx.beginPath(); ctx.arc(-13, 8, 6, -0.5, Math.PI + 0.5); ctx.stroke();
+
+  ctx.beginPath();
+  ctx.moveTo(0, -22); ctx.lineTo(7, -9); ctx.lineTo(8, 8);
+  ctx.lineTo(5, 18); ctx.lineTo(-5, 18); ctx.lineTo(-8, 8); ctx.lineTo(-7, -9);
+  ctx.closePath();
+  const g = ctx.createLinearGradient(-8, -22, 8, 18);
+  g.addColorStop(0, c0); g.addColorStop(0.5, c1); g.addColorStop(1, c2);
+  ctx.fillStyle = g; ctx.fill();
+  ctx.strokeStyle = trim; ctx.lineWidth = 1.5; ctx.stroke();
+
+  // Seven lights down the spine — the only odd-numbered detail in the hangar.
+  ctx.fillStyle = trim;
+  for (let i = 0; i < 7; i++) {
+    ctx.beginPath(); ctx.arc(0, -14 + i * 4.4, 1.3, 0, Math.PI * 2); ctx.fill();
+  }
+
+  ctx.beginPath(); ctx.ellipse(0, -12, 3, 4.5, 0, 0, Math.PI * 2);
+  const cg = ctx.createRadialGradient(0, -13, 1, 0, -12, 5);
+  cg.addColorStop(0, '#ffffff'); cg.addColorStop(1, c2);
+  ctx.fillStyle = cg; ctx.fill();
+
+  ctx.fillStyle = c0; ctx.fillRect(-4, 16, 3, 6); ctx.fillRect(1, 16, 3, 6);
 };
 
 function drawShip(x, y, invincible, shield, t, muzzle, shipDef) {
@@ -6169,16 +6351,22 @@ function spawnPickup(x, y, kind, value) {
   });
 }
 
-// The magnet. Range comes from LODESTONE and friends, or from MAGPIE's hull.
-function pickupRange() {
+// Scrap is ALWAYS collected — it is income, not a skill check, and making it
+// depend on an upgrade meant an ascension (which burns every upgrade) silently
+// broke your ability to pick your own money up. Everything else still needs a
+// magnet, so LODESTONE and MAGPIE's hull keep a job.
+const SCRAP_AUTO_RANGE = 2000;
+
+function pickupRange(kind) {
+  if (kind === 'scrap') return SCRAP_AUTO_RANGE;
   const ship = currentShip();
   return Math.max(stats ? stats.magnetRange : 0, ship.magnetStart || 0) + 26;
 }
 
 function updatePickups() {
-  const range = pickupRange();
   pickups.forEach(p => {
     if (p.taken) return;
+    const range = pickupRange(p.kind);
     const dx = player.x - p.x, dy = player.y - p.y;
     const d2 = dx*dx + dy*dy;
     if (d2 < range * range) {
@@ -6810,10 +6998,74 @@ BOSS.halowarden = {
 // faster and angrier — so the order and timing are the puzzle, and burning
 // one down early is a real (punishable) choice.
 // ---------------------------------------------------------------------------
+// TRIAD's three ships. Nose-down like every other enemy hull, and genuinely
+// different from one another: a needle-nosed interceptor, a broad gunship with
+// outboard cannons, and a blunt carrier with an open drone bay.
+function triadShip(kind, col, trim) {
+  const [c0, c1, c2] = col;
+  ctx.rotate(Math.PI);   // face the player, like the roster hulls
+  if (kind === 'lance') {
+    ctx.beginPath();
+    ctx.moveTo(0, -26); ctx.lineTo(6, -6); ctx.lineTo(9, 10);
+    ctx.lineTo(4, 18); ctx.lineTo(-4, 18); ctx.lineTo(-9, 10); ctx.lineTo(-6, -6);
+    ctx.closePath();
+  } else if (kind === 'maul') {
+    ctx.beginPath();
+    ctx.moveTo(0, -16); ctx.lineTo(14, -6); ctx.lineTo(17, 8);
+    ctx.lineTo(9, 18); ctx.lineTo(-9, 18); ctx.lineTo(-17, 8); ctx.lineTo(-14, -6);
+    ctx.closePath();
+  } else {
+    ctx.beginPath();
+    ctx.moveTo(-13, -13); ctx.lineTo(13, -13); ctx.lineTo(17, 4);
+    ctx.lineTo(11, 18); ctx.lineTo(-11, 18); ctx.lineTo(-17, 4);
+    ctx.closePath();
+  }
+  const g = ctx.createLinearGradient(0, -24, 0, 18);
+  g.addColorStop(0, c0); g.addColorStop(0.5, c1); g.addColorStop(1, c2);
+  ctx.fillStyle = g; ctx.fill();
+  ctx.strokeStyle = trim; ctx.lineWidth = 2; ctx.stroke();
+
+  if (kind === 'lance') {
+    // Long forward canards and a single spine gun.
+    ctx.strokeStyle = trim; ctx.lineWidth = 2;
+    ctx.beginPath(); ctx.moveTo(-6, -4); ctx.lineTo(-18, -14); ctx.stroke();
+    ctx.beginPath(); ctx.moveTo(6, -4); ctx.lineTo(18, -14); ctx.stroke();
+    ctx.fillStyle = c0; ctx.fillRect(-1.6, -24, 3.2, 12);
+  } else if (kind === 'maul') {
+    // Outboard cannon pods.
+    ctx.fillStyle = c2;
+    ctx.fillRect(-19, -4, 6, 16); ctx.fillRect(13, -4, 6, 16);
+    ctx.strokeStyle = trim; ctx.lineWidth = 1.2;
+    ctx.strokeRect(-19, -4, 6, 16); ctx.strokeRect(13, -4, 6, 16);
+    ctx.fillStyle = trim;
+    ctx.fillRect(-18, -9, 4, 6); ctx.fillRect(14, -9, 4, 6);
+  } else {
+    // Open drone bay across the belly.
+    ctx.fillStyle = '#0b1410';
+    ctx.fillRect(-10, -8, 20, 9);
+    ctx.strokeStyle = trim; ctx.lineWidth = 1.2;
+    ctx.strokeRect(-10, -8, 20, 9);
+    ctx.fillStyle = trim;
+    [-6, 0, 6].forEach(x => ctx.fillRect(x - 1.5, -6, 3, 5));
+  }
+
+  // Canopy and engines, shared anatomy so they read as one formation.
+  ctx.beginPath(); ctx.ellipse(0, 2, 4, 5.5, 0, 0, Math.PI*2);
+  ctx.fillStyle = 'rgba(255,255,255,0.85)'; ctx.fill();
+  ctx.fillStyle = c2;
+  ctx.fillRect(-7, 16, 5, 6); ctx.fillRect(2, 16, 5, 6);
+}
+
 BOSS.choir = {
   w: 150, h: 70,
   init(b) {
-    b.heads = [-52, 0, 52].map((x, i) => ({ ox: x, x: b.x + x, y: b.y, dead: false, t: i * 2.1, sing: 0 }));
+    // Three distinct ships, not three heads: LANCE flies point, MAUL sits
+    // heavy on the left, KEEL carries the drones on the right.
+    b.heads = [
+      { ox: -52, ship: 'maul',  name: 'MAUL',  col: ['#ffd0a0', '#c2560f', '#3d1200'] },
+      { ox:   0, ship: 'lance', name: 'LANCE', col: ['#d8e8ff', '#4f7fd0', '#0d2246'] },
+      { ox:  52, ship: 'keel',  name: 'KEEL',  col: ['#d8ffe4', '#3aa564', '#08301b'] }
+    ].map((d, i) => Object.assign(d, { x: b.x + d.ox, y: b.y, dead: false, t: i * 2.1, sing: 0 }));
     b.silenced = 0;
   },
   damage(b, bl, dmg) {
@@ -6829,7 +7081,7 @@ BOSS.choir = {
       spawnParticles(h.x, h.y, '#aa88ff', 26);
       FX.addShake(16);
       Sound.play('explode');
-      addFlashText('SILENCED', h.x, h.y, '#cc99ff');
+      addFlashText(h.name + ' DOWN', h.x, h.y, h.col[0]);
     }
     return dmg;
   },
@@ -6875,32 +7127,33 @@ BOSS.choir = {
     }
     b.heads.forEach(h => {
       if (h.dead) {
-        ctx.strokeStyle = 'rgba(90,70,120,0.5)'; ctx.lineWidth = 2;
-        ctx.beginPath(); ctx.arc(h.x, h.y, 14, 0, Math.PI*2); ctx.stroke();
+        // A wreck, still flying in formation. Drawn as a broken outline of
+        // the same hull so you can see WHICH one you killed.
+        ctx.save();
+        ctx.translate(h.x, h.y);
+        ctx.globalAlpha = 0.32;
+        triadShip(h.ship, ['#4a4a52', '#2a2a30', '#141418'], '#5a5a66');
+        ctx.restore();
         return;
       }
-      ctx.beginPath(); ctx.arc(h.x, h.y, 24, 0, Math.PI*2);
-      const g = ctx.createRadialGradient(h.x - 6, h.y - 8, 2, h.x, h.y, 26);
-      g.addColorStop(0, '#e9d8ff'); g.addColorStop(1, '#3a1170');
-      ctx.fillStyle = g; ctx.fill();
-      ctx.strokeStyle = h.sing > 0 ? '#ffffff' : '#aa77ff';
-      ctx.lineWidth = 2.5; ctx.stroke();
-      // an open mouth when it sings
-      ctx.beginPath();
-      ctx.ellipse(h.x, h.y + 8, 7, h.sing > 0 ? 9 : 3, 0, 0, Math.PI*2);
-      ctx.fillStyle = '#180030'; ctx.fill();
-      ctx.beginPath(); ctx.arc(h.x - 8, h.y - 5, 3, 0, Math.PI*2);
-      ctx.arc(h.x + 8, h.y - 5, 3, 0, Math.PI*2);
-      ctx.fillStyle = bossTint(b, '#88ddff', '#ffcc66', '#ff6655'); ctx.fill();
+      ctx.save();
+      ctx.translate(h.x, h.y);
       if (h.sing > 0) {
-        ctx.strokeStyle = 'rgba(255,255,255,0.35)'; ctx.lineWidth = 1.5;
-        ctx.beginPath(); ctx.arc(h.x, h.y, 30 + (10 - h.sing) * 2, 0, Math.PI*2); ctx.stroke();
+        ctx.globalAlpha = 0.30;
+        ctx.strokeStyle = '#ffffff'; ctx.lineWidth = 2;
+        ctx.beginPath(); ctx.arc(0, 0, 30 + (10 - h.sing) * 2, 0, Math.PI*2); ctx.stroke();
+        ctx.globalAlpha = 1;
       }
+      triadShip(h.ship, h.col, bossTint(b, h.col[0], '#ffcc66', '#ff6655'));
+      ctx.restore();
     });
     ctx.restore();
     if (b.flash > 0) { /* per-head flash is drawn above */ }
   },
-  title(b) { return 'HEADS ' + b.heads.filter(h => !h.dead).length + ' / 3'; }
+  title(b) {
+    const live = b.heads.filter(h => !h.dead).map(h => h.name);
+    return live.length ? live.join(' · ') : 'BROKEN';
+  }
 };
 
 // ---- boss pack: boss_c ----
@@ -12668,6 +12921,100 @@ function fireWeapon() {
   Sound.play('laser');
 }
 
+// ---- THE CHARGE SHOT ------------------------------------------------------
+// 90 frames to full. It scales off your real damage stat, so it grows with the
+// build instead of becoming a relic — and it pierces everything, which is what
+// makes holding through a wave worth the lost seconds of ordinary fire.
+const CHARGE_FULL = 90;
+const CHARGE_MIN = 22;      // below this, letting go simply resumes fire
+let chargeShot = 0;
+let touchCharging = false;
+
+function chargeDamage(t) {
+  // 3x at the minimum useful charge, 14x at full.
+  return stats.damage * (3 + 11 * t) * (boostRage > 0 ? 2.2 : 1);
+}
+
+function fireCharged(t) {
+  const power = Math.max(0, Math.min(1, t));
+  const w = 14 + 30 * power;
+  bullets.push({
+    x: player.x, y: player.y - 18,
+    vx: 0, vy: -(BULLET_SPEED + 4) * stats.bulletSpeedMul,
+    w: w * stats.bulletSize, h: 46 + 44 * power,
+    pierce: 9999,
+    damage: chargeDamage(power),
+    homing: 0,
+    splash: Math.max(stats.splash, 40 + 60 * power),
+    split: false, crit: true,
+    burn: stats.burn, chill: stats.chill,
+    bounces: 0, needle: false, charged: true,
+    dead: false
+  });
+  FX.addShake(8 + 14 * power);
+  spawnParticles(player.x, player.y - 16, '#ffffff', 14 + Math.round(18 * power));
+  addFlashText(power >= 0.99 ? 'FULL CHARGE' : 'CHARGE', player.x, player.y - 46, '#9fe8ff');
+  Sound.play(power >= 0.99 ? 'apex' : 'bigExplode');
+  player.muzzle = 6;
+}
+
+// Shown only after a real touch, so a desktop player never sees a thumb pad.
+let touchSeen = false;
+
+function drawChargePad() {
+  if (!touchSeen) return;
+  const cx = CHARGE_PAD.x + CHARGE_PAD.w / 2, cy = CHARGE_PAD.y + CHARGE_PAD.h / 2;
+  const t = Math.min(1, chargeShot / CHARGE_FULL);
+  ctx.save();
+  ctx.globalAlpha = touchCharging ? 0.55 : 0.26;
+  ctx.fillStyle = '#0b2a3a';
+  ctx.beginPath(); ctx.arc(cx, cy, CHARGE_PAD.w / 2, 0, Math.PI * 2); ctx.fill();
+  ctx.globalAlpha = touchCharging ? 0.95 : 0.5;
+  ctx.strokeStyle = '#66d8ff'; ctx.lineWidth = 2;
+  ctx.beginPath(); ctx.arc(cx, cy, CHARGE_PAD.w / 2, 0, Math.PI * 2); ctx.stroke();
+  if (t > 0) {
+    ctx.strokeStyle = chargeShot >= CHARGE_MIN ? '#bfefff' : '#3d6a80';
+    ctx.lineWidth = 4;
+    ctx.beginPath();
+    ctx.arc(cx, cy, CHARGE_PAD.w / 2 - 6, -Math.PI / 2, -Math.PI / 2 + Math.PI * 2 * t);
+    ctx.stroke();
+  }
+  ctx.globalAlpha = 1;
+  ctx.fillStyle = '#9fe8ff'; ctx.font = 'bold 11px monospace'; ctx.textAlign = 'center';
+  ctx.fillText('HOLD', cx, cy - 2);
+  ctx.font = '9px monospace'; ctx.fillStyle = '#4d7f96';
+  ctx.fillText('CHARGE', cx, cy + 12);
+  ctx.restore();
+  ctx.textAlign = 'left';
+}
+
+// The wind-up, drawn on the ship. The ring closing is the read: when it is a
+// full circle the shot is at maximum.
+function drawCharge() {
+  if (chargeShot <= 0) return;
+  const t = Math.min(1, chargeShot / CHARGE_FULL);
+  const ready = chargeShot >= CHARGE_MIN;
+  ctx.save();
+  ctx.translate(player.x, player.y);
+  ctx.globalAlpha = 0.35 + 0.5 * t;
+  ctx.strokeStyle = ready ? '#9fe8ff' : '#4a6a80';
+  ctx.lineWidth = 2 + 2 * t;
+  ctx.beginPath();
+  ctx.arc(0, 0, 26 + 8 * t, -Math.PI / 2, -Math.PI / 2 + Math.PI * 2 * t);
+  ctx.stroke();
+  if (t >= 1) {
+    ctx.globalAlpha = 0.5 + 0.4 * Math.sin(frame * 0.4);
+    ctx.beginPath(); ctx.arc(0, 0, 36, 0, Math.PI * 2); ctx.stroke();
+  }
+  ctx.globalAlpha = 1;
+  const g = ctx.createRadialGradient(0, -18, 1, 0, -18, 10 + 14 * t);
+  g.addColorStop(0, 'rgba(255,255,255,' + (0.5 + 0.4 * t) + ')');
+  g.addColorStop(1, 'rgba(120,220,255,0)');
+  ctx.fillStyle = g;
+  ctx.beginPath(); ctx.arc(0, -18, 10 + 14 * t, 0, Math.PI * 2); ctx.fill();
+  ctx.restore();
+}
+
 function spawnParticles(x, y, color, count) {
   for (let i = 0; i < count; i++) {
     let angle = Math.random()*Math.PI*2;
@@ -13248,12 +13595,26 @@ function update() {
     }
   }
 
-  // Shooting (auto-fire). The interval is entirely upgrade-driven now.
+  // ---- SHOOTING ----------------------------------------------------------
+  // Auto-fire still runs the whole time, so the game is still playable
+  // hands-off and on a phone. FIRE (space by default, or the on-screen button)
+  // is the CHARGE: hold it and the ordinary gun goes quiet while a lance winds
+  // up; let go and it fires. Holding is therefore a real trade — you give up
+  // your damage-per-second for a few seconds to get a burst back.
+  const holdingFire = held('fire') || touchCharging;
+  if (holdingFire && chargeShot < CHARGE_FULL) chargeShot++;
+  if (!holdingFire && chargeShot > 0) {
+    if (chargeShot >= CHARGE_MIN) fireCharged(chargeShot / CHARGE_FULL);
+    chargeShot = 0;
+  }
+
   shootTimer++;
   const fireRate = Math.max(RLCore.MIN_FIRE_RATE, Math.round(stats.fireRate));
   if (shootTimer >= fireRate) {
     shootTimer = 0;
-    fireWeapon();
+    // The ordinary gun is suppressed once the charge is past its minimum, so
+    // holding is a commitment rather than a strictly-better button.
+    if (chargeShot < CHARGE_MIN) fireWeapon();
   }
 
   // Orbital Drone / Singularity: pushed here (same as fireWeapon above) so any
@@ -13800,25 +14161,6 @@ function update() {
   enemyBullets = enemyBullets.filter(b => !b.dead && b.y < H+20 && b.x > -20 && b.x < W+20);
   asteroids = asteroids.filter(a => a.y < H + 60 && a.hp > 0);
   // Turrets retreat off the top, so cull in both directions.
-  // ---- THE BREACH ---------------------------------------------------------
-  // Anything that gets past you is a ship you failed to stop, and it now costs
-  // a life. That is the whole reason enemies bother to be dangerous from
-  // behind: letting the screen wash over you used to be free.
-  //
-  // Its partner rule is that almost nothing LEAVES on purpose any more (see
-  // the movement switch: orbiters, snipers, shielders and bombers all hold
-  // station). What crosses the line has genuinely run the gauntlet.
-  enemies.forEach(e => {
-    if (e.dead || e.breached) return;
-    if (e.y <= H + 10) return;
-    e.breached = true;
-    e.dead = true;
-    if (state === 'play' && player.invincible <= 0) {
-      addFlashText('BREACH', W/2, H - 150, '#ff3355');
-      FX.addShake(16);
-      hitPlayer();
-    }
-  });
   enemies = enemies.filter(e => !e.dead && e.y < H+50 && e.y > -120);
   capAll();
 
@@ -13914,9 +14256,18 @@ function draw() {
       ctx.rotate(Math.atan2(b.vy, b.vx) + Math.PI/2);   // point along travel
       const bg2 = ctx.createLinearGradient(0, 0, 0, b.h);
       bg2.addColorStop(0, '#ffffff');
-      bg2.addColorStop(0.3, b.crit ? '#ffdd33' : b.isSplit ? '#88ddff' : b.pierce > 0 ? '#ffbbff' : '#88ffff');
+      bg2.addColorStop(0.3, b.charged ? '#bfefff' : b.crit ? '#ffdd33' : b.isSplit ? '#88ddff' : b.pierce > 0 ? '#ffbbff' : '#88ffff');
       bg2.addColorStop(1, 'rgba(0,200,255,0)');
-      ctx.fillStyle = bg2;
+      // The lance gets a glow around it, so a charged shot reads as an event
+      // rather than as a slightly wider bullet.
+      if (b.charged) {
+        const halo = ctx.createRadialGradient(0, -b.h/2, 2, 0, -b.h/2, b.w * 1.6);
+        halo.addColorStop(0, 'rgba(180,240,255,0.55)');
+        halo.addColorStop(1, 'rgba(120,220,255,0)');
+        ctx.fillStyle = halo;
+        ctx.beginPath(); ctx.ellipse(0, -b.h/2, b.w * 1.6, b.h * 0.7, 0, 0, Math.PI*2); ctx.fill();
+        ctx.fillStyle = bg2;
+      }
       ctx.beginPath(); ctx.roundRect(-b.w/2, -b.h, b.w, b.h, 2); ctx.fill();
       ctx.restore();
     });
@@ -13932,6 +14283,8 @@ function draw() {
     });
 
     if (state === 'play') {
+      drawChargePad();
+      drawCharge();
       drawShip(player.x, player.y, player.invincible, player.shieldCharges, frame, player.muzzle);
       drawDrones();
       drawSingularity();
@@ -14371,7 +14724,7 @@ function drawStart() {
   ctx.textAlign = 'center';
   ctx.fillStyle = '#5b6b80';
   ctx.font = '11px monospace';
-  ctx.fillText('← → move    auto-fire is always on', W/2, 512);
+  ctx.fillText('← → move    auto-fire is on    HOLD SPACE to charge a lance', W/2, 512);
   ctx.fillText('kills earn SCRAP — spend it when cargo docks', W/2, 530);
 
   if (owned) {
@@ -14456,17 +14809,6 @@ let shopApexFlash = 0, shopDockTick = 0, shopFreeRerolls = 0, shopName = '';
 const HAULER_NAMES = ['MERIDIAN', 'BLACKFOOT', 'CALLOWAY', 'DUST ROSE', 'OLD SEPTEMBER',
   'HANNIBAL GREY', 'TIN WIDOW', 'LONG MARCH', 'SALT & IRON', 'PATIENT MULE'];
 
-// LOTTERY's hull multiplies the one-in-a-million draw and nothing else. It
-// works by compressing the very bottom of the random range -- the SECRET test
-// is `rnd() < 1e-6`, so making small numbers likelier makes secrets likelier
-// without touching any other roll's distribution.
-function secretAwareRandom() {
-  const odds = currentShip().secretOdds || 1;
-  const r = Math.random();
-  if (odds <= 1) return r;
-  return r < RLCore.SECRET_CHANCE * odds ? r / odds : r;
-}
-
 function openShop() {
   flushLedger();
   // AUTO-SKIP (settings, or the SKIP key held): at depth you are usually
@@ -14474,8 +14816,8 @@ function openShop() {
   // want is friction rather than a decision. The cards are still ROLLED, so
   // the bestiary still records what you sailed past.
   if (Save.data.settings && Save.data.settings.autoSkip) {
-    const bump = (currentShip().shopBump || 0) + stats.luck;
-    RLCore.rollShop(level, voidbirths, runUpgrades, secretAwareRandom, stats.shopSlots, bump)
+    const bump = (currentShip().shopBump || 0) + (currentShip().luckStart || 0) + stats.luck;
+    RLCore.rollShop(level, voidbirths, runUpgrades, Math.random, stats.shopSlots, bump)
       .forEach(c => noteUpgradeSeen(c.id, c.tier));
     enemyBullets = [];
     closeShop();
@@ -14489,8 +14831,8 @@ function openShop() {
   enemyBullets = [];
   // ORACLE's hull bump and the A GOOD HUNCH line stack: both nudge the first
   // card up the ladder after the roll, so the published odds never move.
-  const bump = (currentShip().shopBump || 0) + stats.luck;
-  shopSlots = RLCore.rollShop(level, voidbirths, runUpgrades, secretAwareRandom, stats.shopSlots, bump);
+  const bump = (currentShip().shopBump || 0) + (currentShip().luckStart || 0) + stats.luck;
+  shopSlots = RLCore.rollShop(level, voidbirths, runUpgrades, Math.random, stats.shopSlots, bump);
   shopRerolls = 0;
   shopFreeRerolls = stats.freeRerolls + (currentShip().freeRerolls || 0);
   shopSlots.forEach(c => noteUpgradeSeen(c.id, c.tier));

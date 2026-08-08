@@ -694,3 +694,81 @@ nothing else.
   or so" at level 50; the heaviest band-5 hull is ~65 bare shots, and a real
   build brings that to 15–20. That is a number to check with a controller in
   hand, not a spreadsheet.
+
+---
+
+# ADDENDUM II — "still too easy" (2026-08-08, third pass)
+
+## 0. Why it was easy, and the actual fix
+
+Addendum I made player damage and enemy health share one exponent (0.95). That
+kept the fight length constant from level 1 to 2,500 — which is exactly the
+problem. **Constant is easy**, because your build keeps growing on top of it.
+
+The exponents are now deliberately unequal:
+
+```
+enemy health  = base × level^1.00 × pressure(level)
+damage floor  =   10 × level^0.92
+```
+
+Enemy health outruns the damage floor by `level^0.08`, so the deeper you go the
+more your build has to be carrying. On top of that, `pressureAt` multiplies
+enemy health by a ramp that is **exactly 1.0 at or below level 7** — the brief
+said "harder, but only after level 7 or so" — then climbs 2% a level to 2.5×
+and creeps very slowly after that so the deep game never settles.
+
+Bare hits to kill, lightest and heaviest hull in the band:
+
+| level | 3 | 7 | 10 | 15 | 25 | 50 | 95 | 300 | 2500 |
+|---|---|---|---|---|---|---|---|---|---|
+| lightest | 2 | 2 | 2 | 6 | 16 | 76 | 506 | 591 | 1161 |
+| heaviest | 7 | 7 | 8 | 20 | 46 | 203 | 1301 | 1548 | 2985 |
+
+Levels 1–7 are untouched to the number. Level 10 onwards is where "the ships
+feel too weak" gets answered.
+
+**The wrap bug this exposed.** The roster cycles back to band 4 past level 100,
+and band 4's hulls weigh a fifth of band 9's — so level 101 was *easier* than
+level 100. `RLCore.deepBase` now takes only a ship's **relative weight inside
+its own band** past the cliff and pins the absolute number to where band 9 left
+off. A test walks every level from 8 to 3,000 and fails if difficulty ever dips.
+
+## 1. Bosses
+
+`hp = 6000 × (level/10)^2.377` — 6,000 at level 10, **3,000,000,000** at 2,500.
+The first boss went up from 1,000 because 1,000 died in about a second to a bare
+ship and a third of a second to any real build.
+
+## 2. The charge shot
+
+Auto-fire still runs, so the game is still playable hands-off and on a phone.
+**Holding FIRE is the charge**: the ordinary gun goes quiet, a lance winds up
+over 90 frames, and releasing fires it. 3× damage at the minimum useful charge,
+**14× at full**, infinite pierce. Holding is a real trade — you give up DPS for
+a few seconds to get a burst back — rather than a strictly better button.
+
+## 3. Mobile
+
+The old handler tracked one finger for everything, so you could steer *or* press
+a button, never both. Touches are tracked by identifier now: a finger on the
+CHARGE pad charges, any other finger steers, and sliding off the pad cancels.
+
+## 4. Everything else
+
+- **Breaches removed.** Enemies leaving the bottom is free again.
+- **Scrap always autocollects** (range 2,000). It is income, not a skill check —
+  and tying it to an upgrade meant an ascension, which burns every upgrade,
+  silently broke your ability to pick your own money up. That was the
+  "voidbirth collecting debuff".
+- **Shields and lives are scarcer**: cap 4→3, repair kits 2→1, and kill-count
+  sources cost 80% more kills.
+- **Every auto-targeting card moved up one rung**; HUNTER ROUNDS is OVERCLOCKED.
+- **LOTTERY** gives a general two-rung shop bump instead of secret-only odds.
+  `secretOdds` and `secretAwareRandom` were deleted with it.
+- **ASCENDANT** fires much faster (fireMul 0.88 → 0.62).
+- **Seven hulls redrawn** — magpie, ramhead, lantern, glacier, cartwheel,
+  howitzer, domino, lottery — as actual ships with a nose, a canopy, wing roots
+  and engine bells. MAGPIE is no longer a Vanguard with a hoop on it.
+- **TRIAD is three different ships** — LANCE, MAUL, KEEL — each drawn as itself,
+  each named in the boss bar, and each leaving its own wreck in formation.

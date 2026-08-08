@@ -78,7 +78,8 @@ const fn = new Function(...keys, `${src}\n; return { get state(){return state}, 
   get pickups(){return pickups}, get asteroids(){return asteroids}, get settings(){return Save.data.settings},
   get seenEnemies(){return Save.data.seenEnemies}, get seenUpgrades(){return Save.data.seenUpgrades},
   makeEnemy, ENEMY, drawSettings, drawBestiary, openSettings, openBestiary, bestiaryEntries, bestiaryColumns,
-  settingsRows, hitPlayer, Save, player, set scrap(v){scrap=v}, set enemies(v){enemies=v}, set lives(v){lives=v},
+  settingsRows, hitPlayer, Save, player,
+  clearBoard: () => { asteroids = []; enemyBullets = []; bullets = []; pickups = []; }, set scrap(v){scrap=v}, set enemies(v){enemies=v}, set lives(v){lives=v},
   set voidbirths(v){voidbirths=v} };`);
 
 let api, bootError = null;
@@ -94,6 +95,8 @@ test('the game boots in a DOM-free sandbox', () => {
 });
 
 // The real loop calls requestAnimationFrame; we drive draw/update by hand.
+function H_OF() { return 720; }
+
 function tick(n, label) {
   for (let i = 0; i < n; i++) {
     try { api.update(); } catch (e) { throw new Error(`update() threw during ${label} @frame ${i}: ${e.message}\n${e.stack.split('\n')[1]}`); }
@@ -151,7 +154,7 @@ check('a boss level spawns the right named boss', () => {
   // and SCRAPJAW) were moved past level 100 so nothing in the first hundred
   // levels asks you to break a shield before you can build one.
   if (api.boss.name !== 'TRIAD') throw new Error('boss is ' + api.boss.name);
-  if (api.boss.maxHp !== 1000) throw new Error('boss hp ' + api.boss.maxHp);
+  if (api.boss.maxHp !== 6000) throw new Error('boss hp ' + api.boss.maxHp);
 });
 
 check('900 frames of a boss fight without throwing', () => tick(900, 'boss'));
@@ -247,23 +250,35 @@ check('meteors break open and drop something you can pick up', () => {
   if (api.pickups.length === before) throw new Error('no pickup ever dropped from a meteor');
 });
 
-check('an enemy that gets past you costs a life', () => {
+check('an enemy that gets past you is free — breaches were removed', () => {
   api.state = 'play';
   api.level = 5;
-  api.enemies = [];
+  // Clear the WHOLE board, not just the enemies: setting invincible to 0
+  // strips the mercy frames that were quietly absorbing whatever asteroids
+  // and bullets an earlier check left in the air, and any one of them landing
+  // would look exactly like a breach.
+  api.enemies = []; api.clearBoard();
   api.lives = 5;
-  // A shield would eat the breach instead of a life, which is correct
-  // behaviour but not what this test is about.
   api.player.shieldCharges = 0;
   api.player.invincible = 0;
   api.player.phaseReady = false;
   const before = api.lives;
-  const e = api.makeEnemy('skiff');
+  // A charger, not a drifter: drifters brake and hold station in the lower
+  // third by design, so they are the wrong ship to test the offscreen cull.
+  const e = api.makeEnemy('dart');
   e.y = 719; e.vy = 40;
   api.enemies.push(e);
-  tick(6, 'breach');
-  if (api.lives >= before) throw new Error('an enemy flew off the bottom for free');
-  if (api.enemies.indexOf(e) !== -1) throw new Error('the breaching enemy is still on the board');
+  tick(6, 'no breach');
+  if (api.lives !== before) throw new Error('leaving the screen still cost a life');
+  if (api.enemies.indexOf(e) !== -1) throw new Error('it should still be culled offscreen');
+
+  // And the station-keeping half of the same rule: a drifter does not leave.
+  api.enemies = [];
+  const d = api.makeEnemy('skiff');
+  d.y = H_OF(api) * 0.75;
+  api.enemies.push(d);
+  tick(120, 'station keeping');
+  if (api.enemies.indexOf(d) === -1) throw new Error('a drifter sailed off the bottom');
 });
 
 check('killing something records it in the bestiary', () => {

@@ -813,7 +813,55 @@ const SPEC_ENEMY_HP = {
 test('the anchors of the HP economy are the spec numbers', () => {
   assert.equal(core.BASE_DAMAGE, 10, 'a base shot deals 10');
   assert.equal(core.enemyHp('grunt', 1), 20, 'a level-1 grunt is exactly two shots');
-  assert.equal(core.HP_EXPONENT, 0.95);
+  assert.equal(core.HP_EXPONENT, 1.00);
+  assert.equal(core.DAMAGE_EXPONENT, 0.92);
+});
+
+// The exponents are deliberately unequal: enemy health outruns the floor of
+// your damage by level^0.08, so the deeper you go the more your build has to
+// be carrying. When they were equal, relative difficulty was flat forever —
+// which is exactly why the game stopped being hard.
+test('enemy health outgrows the damage floor with depth', () => {
+  assert.ok(core.HP_EXPONENT > core.DAMAGE_EXPONENT, 'the gap is the difficulty curve');
+  let prev = 0;
+  for (const lv of [10, 50, 100, 500, 2500]) {
+    const hits = core.enemyHp('grunt', lv) / core.baseDamageAt(lv);
+    assert.ok(hits > prev, `a grunt got relatively easier at level ${lv}`);
+    prev = hits;
+  }
+});
+
+// "make the game harder; but only after level 7 or so."
+test('nothing below the pressure knee changes at all', () => {
+  assert.equal(core.PRESSURE_KNEE, 7);
+  for (let lv = 1; lv <= core.PRESSURE_KNEE; lv++) {
+    assert.equal(core.pressureAt(lv), 1, `level ${lv} must be untouched`);
+  }
+  assert.ok(core.pressureAt(8) > 1, 'and it must start immediately after');
+});
+
+test('pressure rises for ever but never runs away', () => {
+  let prev = 0;
+  for (let lv = 1; lv <= 3000; lv += 7) {
+    const p = core.pressureAt(lv);
+    assert.ok(p >= prev, `pressure dropped at level ${lv}`);
+    prev = p;
+  }
+  assert.ok(core.pressureAt(2500) < 6, 'the creep past the cap must stay gentle');
+  assert.ok(core.pressureAt(2500) > core.PRESSURE_CAP, 'but it must not be flat either');
+});
+
+// The roster cycles past band 9, so a ship's own base HP would make level 101
+// EASIER than level 100. It must not.
+test('difficulty never dips where the roster wraps', () => {
+  let prev = 0;
+  for (let lv = 8; lv <= 3000; lv += 1) {
+    const roster = core.rosterFor(lv);
+    const lightest = roster.reduce((a, b) => (a.hp < b.hp ? a : b));
+    const hits = core.enemyHp(lightest.id, lv) / core.baseDamageAt(lv);
+    assert.ok(hits >= prev - 1e-9, `the lightest hull got easier at level ${lv}`);
+    prev = hits;
+  }
 });
 
 // This is the load-bearing fact of the whole expansion. A 1,000 HP first boss
@@ -821,15 +869,14 @@ test('the anchors of the HP economy are the spec numbers', () => {
 // player's damage rides the same curve enemy health does -- otherwise the
 // final fight is a five-hour footrace. Your build is a multiple of the
 // baseline, not a race against it.
-test('a bare shot scales on the same exponent as enemy health', () => {
+test('the damage floor follows its own exponent', () => {
   assert.equal(core.baseDamageAt(1), core.BASE_DAMAGE);
   [1, 10, 100, 500, 2500].forEach(level => {
-    close(core.baseDamageAt(level), 10 * Math.pow(level, core.HP_EXPONENT), `level ${level}`);
-    // Two bare shots kill a level-N grunt at EVERY N. That invariant is what
-    // keeps the early game and the deep game the same game.
-    const shots = core.enemyHp('grunt', level) / core.baseDamageAt(level);
-    assert.ok(shots > 1.9 && shots < 2.1, `a grunt took ${shots} bare shots at level ${level}`);
+    close(core.baseDamageAt(level), 10 * Math.pow(level, core.DAMAGE_EXPONENT), `level ${level}`);
   });
+  // The opening is still the opening: two bare shots kill a level-1 grunt.
+  const shots = core.enemyHp('grunt', 1) / core.baseDamageAt(1);
+  assert.ok(shots > 1.9 && shots < 2.1, `a grunt took ${shots} bare shots at level 1`);
 });
 
 test('baseDamageAt never returns less than the base shot', () => {
@@ -987,18 +1034,19 @@ test('heavy hulls crowd in towards the end of a band', () => {
   assert.ok(at30 > at21, 'the heaviest hull should be commoner late in its band');
 });
 
-test('enemyHp follows base * level^0.95 at levels 1/10/100/500/2500', () => {
+test('enemyHp follows base * level * pressure at every depth', () => {
   ['grunt', 'elite', 'swarmling', 'harbinger'].forEach(kind => {
     [1, 10, 100, 500, 2500].forEach(level => {
-      const want = Math.max(1, Math.round(SPEC_ENEMY_HP[kind] * Math.pow(level, 0.95)));
+      const want = Math.max(1, Math.round(
+        SPEC_ENEMY_HP[kind] * Math.pow(level, core.HP_EXPONENT) * core.pressureAt(level)));
       assert.equal(core.enemyHp(kind, level), want, `${kind} at level ${level}`);
     });
   });
 });
 
 test('the level-2500 grunt is far past the level-1 one but not absurd', () => {
-  assert.ok(core.enemyHp('grunt', 2500) > 25000);
-  assert.ok(core.enemyHp('grunt', 2500) < 60000);
+  assert.ok(core.enemyHp('grunt', 2500) > 100000);
+  assert.ok(core.enemyHp('grunt', 2500) < 500000);
 });
 
 test('enemyHp is monotonically increasing in level for every kind', () => {
@@ -1136,15 +1184,15 @@ test('meteorsFor only ever offers classes the level has reached', () => {
 // Mothership. The ORDER is also load-bearing -- both shield-mechanic fights
 // sit past level 100.
 const SPEC_BOSSES = [
-  [10, 'TRIAD', 1000, 3], [20, 'MAGNETAR', 5600, 3], [30, 'RUSTFALL', 15000, 3],
-  [40, 'THE LONG SILENCE', 32000, 4], [50, 'MIRRORGATE', 56000, 4],
-  [75, 'THE WIDOW', 154000, 4], [100, 'SEVEN ANGLES', 316000, 5],
-  [150, 'HALO WARDEN', 870000, 3], [200, 'SCRAPJAW TITAN', 1790000, 2],
-  [250, 'HIVE EMPRESS', 3125000, 4], [300, 'THE CARTOGRAPHER', 4930000, 4],
-  [350, 'NULLPOINT', 7240000, 4], [400, 'ASHEN CHOIRMASTER', 10100000, 5],
-  [500, 'THE THRESHOLD', 17700000, 5], [750, 'PALE HERALD', 48700000, 5],
-  [1000, 'IRON LITANY', 100000000, 6],
-  [2500, 'THE DREADED SCOURGE OF HUMANITY — WARR MOTHERSHIP', 1000000000, 7]
+  [10, 'TRIAD', 6000, 3], [20, 'MAGNETAR', 31000, 3], [30, 'RUSTFALL', 82000, 3],
+  [40, 'THE LONG SILENCE', 162000, 4], [50, 'MIRRORGATE', 275000, 4],
+  [75, 'THE WIDOW', 721000, 4], [100, 'SEVEN ANGLES', 1400000, 5],
+  [150, 'HALO WARDEN', 3700000, 3], [200, 'SCRAPJAW TITAN', 7400000, 2],
+  [250, 'HIVE EMPRESS', 12600000, 4], [300, 'THE CARTOGRAPHER', 19500000, 4],
+  [350, 'NULLPOINT', 28100000, 4], [400, 'ASHEN CHOIRMASTER', 38600000, 5],
+  [500, 'THE THRESHOLD', 65600000, 5], [750, 'PALE HERALD', 171900000, 5],
+  [1000, 'IRON LITANY', 340500000, 6],
+  [2500, 'THE DREADED SCOURGE OF HUMANITY — WARR MOTHERSHIP', 3000000000, 7]
 ];
 
 // The two shield fights are HALO WARDEN's rotating ring and SCRAPJAW's
@@ -1181,17 +1229,20 @@ test('boss HP is strictly increasing up the table', () => {
   }
 });
 
-test('the level-2500 Mothership is exactly 1,000,000,000 HP — the anchor of the curve', () => {
+test('the level-2500 Mothership is exactly 3,000,000,000 HP — the anchor of the curve', () => {
   const m = core.BOSS_TABLE.find(b => b.level === 2500);
-  assert.equal(m.hp, 1000000000);
+  assert.equal(m.hp, 3000000000);
   assert.equal(m.key, 'mothership');
   assert.equal(m.phases, 7);
 });
 
-test('the first boss is exactly 1,000 HP — the other anchor', () => {
+// Raised from 1,000: a bare ship killed that in about a second and any real
+// build in a third of one, which is a speed bump rather than a boss.
+test('the first boss is exactly 6,000 HP — the other anchor', () => {
   const first = core.BOSS_TABLE[0];
   assert.equal(first.level, 10);
-  assert.equal(first.hp, 1000);
+  assert.equal(first.hp, 6000);
+  assert.equal(core.BOSS_HP_BASE, 6000);
 });
 
 test('boss health is strictly increasing down the table', () => {
@@ -1330,7 +1381,7 @@ test('ARMADA HP sits between IRON LITANY and the Mothership', () => {
   for (let level = 1100; level <= 2400; level += 100) {
     const hp = core.bossFor(level).hp;
     assert.ok(hp > litany, `level ${level} is easier than IRON LITANY`);
-    assert.ok(hp < 1000000000, `level ${level} outguns the Mothership`);
+    assert.ok(hp < 3000000000, `level ${level} outguns the Mothership`);
   }
 });
 
@@ -1385,9 +1436,9 @@ test('fittedBossHp is monotonically non-decreasing', () => {
 });
 
 test('fittedBossHp lands near the hand-set numbers it was fitted from', () => {
-  assert.equal(core.BOSS_HP_BASE, 1000);
-  assert.equal(core.BOSS_HP_EXPONENT, 2.5);
-  [[100, 316000], [500, 17700000], [1000, 100000000], [2500, 1000000000]].forEach(([level, actual]) => {
+  assert.equal(core.BOSS_HP_BASE, 6000);
+  assert.equal(core.BOSS_HP_EXPONENT, 2.377);
+  [[100, 1400000], [500, 65600000], [1000, 340500000], [2500, 3000000000]].forEach(([level, actual]) => {
     const fit = core.fittedBossHp(level);
     assert.ok(Math.abs(fit - actual) / actual < 0.35,
       `fitted ${fit} is nowhere near the hand-set ${actual} at level ${level}`);
@@ -1886,17 +1937,21 @@ test('resolve produces the full shop-card shape at every depth', () => {
   });
 });
 
-test('HUNTER ROUNDS is an APEX with the nerfed homing strength the spec demands', () => {
+test('HUNTER ROUNDS is an OVERCLOCKED with its homing strength unchanged', () => {
   const u = core.byId('hunter_rounds');
-  assert.equal(u.tier, 'APEX', 'homing removes the most important skill in the game');
+  // Moved up from APEX: homing removes the most important skill in the game,
+  // and at APEX it turned up often enough to define most deep builds.
+  assert.equal(u.tier, 'OVERCLOCKED');
   assert.equal(u.effect.homing, 0.03);
 });
 
-test('TRACER ROUNDS took the vacated RARE slot and gives information, not aim', () => {
+test('TRACER ROUNDS gives information, not aim, and moved up with the family', () => {
   const u = core.byId('tracer_rounds');
-  assert.equal(u.tier, 'RARE');
+  // EPIC now. It does not steer a shot, but knowing exactly where the lead is
+  // is most of what aim assist buys you, so it moved with the rest of them.
+  assert.equal(u.tier, 'EPIC');
   assert.equal(u.effect.tracer, true);
-  assert.equal(u.effect.homing, undefined, 'a tracer must not quietly ship auto-aim');
+  assert.equal(u.effect.homing, undefined, 'a tracer must never actually steer');
 });
 
 test('the nerf pass numbers from the spec are in the catalogue', () => {
@@ -2199,28 +2254,60 @@ test('stat resolution scales with voidbirth depth', () => {
 });
 
 test('shield charges are capped at MAX_SHIELD_CHARGES', () => {
-  assert.equal(core.MAX_SHIELD_CHARGES, 4, 'the spec caps shields at 4');
+  // Tightened from 4. A four-charge stack was four free mistakes between
+  // shops, which is most of why the mid-game stopped being dangerous.
+  assert.equal(core.MAX_SHIELD_CHARGES, 3);
   assert.equal(core.resolveStats(SHIP, [{ id: 'plating', stacks: 2 }], 0, 1).shieldCharges, 2);
-  assert.equal(core.resolveStats(SHIP, [{ id: 'plating', stacks: 5 }], 0, 1).shieldCharges, 4);
-  assert.equal(core.resolveStats(SHIP, [{ id: 'uc_phalanx', stacks: 1 }], 0, 1).shieldCharges, 4);
+  assert.equal(core.resolveStats(SHIP, [{ id: 'plating', stacks: 5 }], 0, 1).shieldCharges, 3);
+  assert.equal(core.resolveStats(SHIP, [{ id: 'uc_phalanx', stacks: 1 }], 0, 1).shieldCharges, 3);
   assert.equal(core.resolveStats(SHIP,
-    [{ id: 'plating', stacks: 5 }, { id: 'aegis_lattice', stacks: 1 }], 0, 1).shieldCharges, 4);
+    [{ id: 'plating', stacks: 5 }, { id: 'aegis_lattice', stacks: 1 }], 0, 1).shieldCharges, 3);
 });
 
-test('REPAIR KIT cannot contribute more than the spec cap of +2 lives', () => {
-  assert.equal(core.REPAIR_KIT_MAX, 2);
+test('repair kits stack once, not twice', () => {
+  assert.equal(core.REPAIR_KIT_MAX, 1);
+  assert.equal(core.resolveStats(SHIP, [{ id: 'repair_kit', stacks: 5 }], 0, 1).extraLives, 1);
+});
+
+// Kill-count shields and lives cost 80% more kills than the card face says.
+test('upkeep from kills is scarcer than the card reads', () => {
+  assert.equal(core.UPKEEP_SCARCITY, 1.8);
+  const s = core.resolveStats(SHIP, [{ id: 'field_kit', stacks: 1 }], 0, 1);
+  assert.equal(s.shieldPerKills, 60 * 1.8);
+  const l = core.resolveStats(SHIP, [{ id: 'vampiric', stacks: 1 }], 0, 1);
+  assert.equal(l.lifePerKills, 60 * 1.8);
+});
+
+// Aim assist turns "can you hit it" into "is it on screen", so every card that
+// grants it sits one rung higher than it used to.
+test('every auto-targeting card is at least RARE', () => {
+  const assist = core.UPGRADES.filter(u =>
+    u.effect.homing !== undefined || u.effect.aimCone !== undefined || u.effect.tracer === true);
+  assert.ok(assist.length >= 10, 'expected the whole aim-assist family');
+  assist.forEach(u => {
+    // Each moved up exactly one rung from where it was, so the weakest one
+    // (a 9-degree nudge) sits at UNCOMMON and nothing grants it at COMMON.
+    assert.ok(core.tierIndexOf(u.tier) >= core.tierIndexOf('UNCOMMON'),
+      `${u.id} grants aim assist at ${u.tier}`);
+  });
+  assert.equal(core.byId('hunter_rounds').tier, 'OVERCLOCKED');
+});
+
+test('REPAIR KIT cannot contribute more than the spec cap of +1 life', () => {
+  // Tightened from +2. Lives are supposed to be scarce now.
+  assert.equal(core.REPAIR_KIT_MAX, 1);
   assert.equal(core.resolveStats(SHIP, [{ id: 'repair_kit', stacks: 1 }], 0, 1).extraLives, 1);
-  assert.equal(core.resolveStats(SHIP, [{ id: 'repair_kit', stacks: 2 }], 0, 1).extraLives, 2);
-  assert.equal(core.resolveStats(SHIP, [{ id: 'repair_kit', stacks: 5 }], 0, 1).extraLives, 2);
+  assert.equal(core.resolveStats(SHIP, [{ id: 'repair_kit', stacks: 2 }], 0, 1).extraLives, 1);
+  assert.equal(core.resolveStats(SHIP, [{ id: 'repair_kit', stacks: 5 }], 0, 1).extraLives, 1);
 });
 
 test('IMMORTAL ENGINE stacks on top of the REPAIR KIT cap, not inside it', () => {
   const s = core.resolveStats(SHIP,
     [{ id: 'repair_kit', stacks: 5 }, { id: 'immortal', stacks: 1 }], 0, 1);
-  assert.equal(s.extraLives, 3);
+  assert.equal(s.extraLives, 2);
   const u = core.resolveStats(SHIP,
     [{ id: 'repair_kit', stacks: 5 }, { id: 'dc_undying', stacks: 1 }], 0, 1);
-  assert.equal(u.extraLives, 5, 'UNDYING grants three on top of the repair-kit ceiling');
+  assert.equal(u.extraLives, 4, 'UNDYING grants three on top of the repair-kit ceiling');
 });
 
 test('APOTHEOSIS doubles summed numeric stats', () => {
