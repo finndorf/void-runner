@@ -5135,6 +5135,1770 @@ BOSS.rustfall = {
 };
 // ---- end boss pack: boss_a ----
 
+// ---- boss pack: boss_d ----
+// ===========================================================================
+// ENDGAME BOSSES
+//   L750   PALE HERALD    — destructible hangar bays guard the core
+//   L1000  IRON LITANY    — a hull so long the fight scrolls along its flank
+//   L2500  WARR MOTHERSHIP — the Devouring: it eats the arena, permanently
+//   L1100-2400 WARR ARMADA — composites two earlier bosses behind an escort screen
+//
+// Everything here is self-contained: only BOSS.<key> assignments plus helpers
+// prefixed with one of those four keys.
+// ===========================================================================
+
+// ---- tiny shared utilities (prefixed `litany` so nothing collides) ---------
+function litanyRnd(i) {
+  const s = Math.sin(i * 127.1 + 311.7) * 43758.5453;
+  return s - Math.floor(s);
+}
+function litanyClamp(v, lo, hi) { return v < lo ? lo : (v > hi ? hi : v); }
+
+
+// ===========================================================================
+// L750 — PALE HERALD
+// ---------------------------------------------------------------------------
+// The first true mothership: a wide capital hull whose ventral face carries
+// four lit hangar mouths. While a bay lives it eats EVERY shot that lands on
+// it, so the only way in is the narrow core slot at the centreline — or the
+// ragged holes you tear where a bay used to be. Kill all four and the core
+// opens permanently and takes extra damage everywhere.
+//
+// Killability: the core slot (|local x| < 18) ALWAYS takes full damage, and
+// the armour belt still takes 30%, so the fight cannot stall even if the
+// player never breaks a single bay.
+// ===========================================================================
+
+function heraldBayKind(ph, i) {
+  if (ph >= 5) return i % 2 === 0 ? 'harbinger' : 'lancer';
+  if (ph >= 4) return i % 2 === 0 ? 'bulwark' : 'weaver';
+  if (ph >= 3) return i % 2 === 0 ? 'turret' : 'kamikaze';
+  if (ph >= 2) return i % 2 === 0 ? 'elite' : 'kamikaze';
+  return 'grunt';
+}
+
+function heraldHullPath() {
+  // A long, low capital silhouette: bevelled dorsal, stepped ventral, prow
+  // wedge down the centreline.
+  ctx.beginPath();
+  ctx.moveTo(-130, 2);
+  ctx.lineTo(-112, -30);
+  ctx.lineTo(-58, -44);
+  ctx.lineTo(58, -44);
+  ctx.lineTo(112, -30);
+  ctx.lineTo(130, 2);
+  ctx.lineTo(118, 24);
+  ctx.lineTo(46, 30);
+  ctx.lineTo(22, 44);
+  ctx.lineTo(-22, 44);
+  ctx.lineTo(-46, 30);
+  ctx.lineTo(-118, 24);
+  ctx.closePath();
+}
+
+BOSS.paleherald = {
+  w: 260, h: 96,
+  init(b) {
+    b.bays = [-96, -40, 40, 96].map(function (x, i) {
+      const hp = b.maxHp * 0.055;
+      return {
+        x: x, hw: 22, hp: hp, max: hp, gone: false,
+        launch: 90 + i * 55, glow: i * 1.7, smoke: 0
+      };
+    });
+    b.coreOpen = false;
+    b.lance = null;          // { t, state:'charge'|'fire', x }
+    b.spiral = 0;
+    b.spiralA = 0;
+    b.curtain = 0;
+    b.cycle = 0;
+    b.bob = 0;
+    b.hurtCd = 0;
+    b.coreGlow = 0;
+  },
+
+  damage(b, bl, dmg) {
+    const local = bl.x - b.x;
+    if (b.coreOpen) return dmg * 1.25;
+
+    let bay = null;
+    for (let i = 0; i < b.bays.length; i++) {
+      const p = b.bays[i];
+      if (Math.abs(local - p.x) < p.hw) { bay = p; break; }
+    }
+
+    if (bay && !bay.gone) {
+      bay.hp -= dmg;
+      spawnParticles(bl.x, bl.y, '#ffcc77', 2);
+      if (bay.hp <= 0) {
+        bay.gone = true;
+        bay.smoke = 1;
+        spawnParticles(b.x + bay.x, b.y + 26, '#ffaa44', 26);
+        FX.explode(b.x + bay.x, b.y + 26, 34, '#ffbb55');
+        FX.addShake(15);
+        Sound.play('shieldBreak');
+        addFlashText('BAY DOWN', b.x + bay.x, b.y + 8, '#ffcc66');
+        let allGone = true;
+        for (let j = 0; j < b.bays.length; j++) if (!b.bays[j].gone) allGone = false;
+        if (allGone) {
+          b.coreOpen = true;
+          b.coreGlow = 40;
+          FX.addShake(28);
+          FX.hitStop(6);
+          Sound.play('bigExplode');
+          addFlashText('CORE EXPOSED', b.x, b.y - 34, '#ffffff');
+        }
+      }
+      return 0;
+    }
+    if (bay && bay.gone) return dmg;            // a hole you tore yourself
+    if (Math.abs(local) < 18) return dmg;       // the core slot — always open
+    return dmg * 0.3;                           // armour belt
+  },
+
+  onPhase(b, ph) {
+    b.lance = null;
+    b.curtain = 0;
+    b.spiral = 0;
+    if (ph >= 3) {
+      // The Herald vents its decks when it escalates.
+      for (let i = 0; i < b.bays.length; i++) {
+        if (!b.bays[i].gone) spawnParticles(b.x + b.bays[i].x, b.y + 26, '#88ccff', 10);
+      }
+    }
+  },
+
+  move(b) {
+    // Heavy: it does not chase, it leans.
+    const want = litanyClamp(player.x, 132, W - 132);
+    b.x += (want - b.x) * 0.012;
+    b.x = litanyClamp(b.x, 132, W - 132);
+    b.y = b.targetY + Math.sin(b.bob) * 5;
+  },
+
+  think(b, ph) {
+    b.bob += 0.018;
+    if (b.hurtCd > 0) b.hurtCd--;
+    if (b.coreGlow > 0) b.coreGlow--;
+
+    // ---- hangar bays launch fighters ------------------------------------
+    for (let i = 0; i < b.bays.length; i++) {
+      const bay = b.bays[i];
+      if (bay.gone) { if (bay.smoke < 1) bay.smoke = 1; continue; }
+      bay.glow += 0.05;
+      bay.launch--;
+      if (bay.launch <= 0) {
+        bay.launch = Math.max(110, 300 - ph * 30) + Math.floor(litanyRnd(frame + i) * 70);
+        if (enemies.length < 20) {
+          bossMinion(heraldBayKind(ph, i), b.x + bay.x, b.y + 34);
+          spawnParticles(b.x + bay.x, b.y + 32, '#ffdd99', 6);
+          Sound.play('hit');
+        }
+      }
+    }
+
+    // ---- prow lance: long telegraph, then a column of ruin ---------------
+    if (b.lance) {
+      const L = b.lance;
+      L.t--;
+      if (L.state === 'charge') {
+        L.x += (player.x - L.x) * 0.035;         // tracks, slowly, while charging
+        if (L.t <= 0) {
+          L.state = 'fire';
+          L.t = 46;
+          FX.addShake(16);
+          Sound.play('laser');
+        }
+      } else {
+        if (b.hurtCd <= 0 && Math.abs(player.x - L.x) < 17 && player.y > b.y) {
+          hitPlayer();
+          b.hurtCd = 50;
+        }
+        if (frame % 4 === 0) spawnParticles(L.x, b.y + 60 + litanyRnd(frame) * 400, '#cfe8ff', 2);
+        if (L.t <= 0) b.lance = null;
+      }
+      return;                                    // the lance owns the boss
+    }
+
+    // ---- multi-frame bursts ---------------------------------------------
+    if (b.spiral > 0) {
+      b.spiral--;
+      if (b.spiral % 3 === 0) {
+        b.spiralA += 0.41;
+        for (let a = 0; a < 3; a++) {
+          bossShot(b.x, b.y + 30, b.spiralA + a * (Math.PI * 2 / 3), 0.78, 5);
+        }
+      }
+      return;
+    }
+    if (b.curtain > 0) {
+      b.curtain--;
+      if (b.curtain % 6 === 0) {
+        const step = (b.curtain / 6) | 0;
+        const sx = b.x - 120 + step * 26;
+        if (Math.abs(sx - player.x) > 34) bossShot(sx, b.y + 34, Math.PI / 2, 0.72, 6);
+      }
+      return;
+    }
+
+    // ---- attack rotation --------------------------------------------------
+    const iv = Math.max(48, 112 - ph * 12);
+    if (b.attackTimer >= iv) {
+      b.attackTimer = 0;
+      b.cycle++;
+      const options = 2 + Math.min(4, ph - 1);
+      const pick = b.cycle % options;
+
+      if (pick === 0) {
+        // BROADSIDE — every live bay barks; a dead ship fires from the core.
+        let fired = 0;
+        for (let i = 0; i < b.bays.length; i++) {
+          const bay = b.bays[i];
+          if (bay.gone) continue;
+          bossAimed(b.x + bay.x, b.y + 30, [-0.16, 0, 0.16], 0.95, 5);
+          fired++;
+        }
+        if (!fired) bossAimed(b.x, b.y + 40, [-0.34, -0.17, 0, 0.17, 0.34], 1.05, 6);
+        Sound.play('hit');
+
+      } else if (pick === 1) {
+        // THE TOLL — a ring with one wide gap, so there is always an out.
+        const n = 16 + ph * 2;
+        const gap = Math.atan2(player.y - b.y, player.x - b.x) + Math.PI;
+        for (let i = 0; i < n; i++) {
+          const a = (i / n) * Math.PI * 2;
+          let d = a - gap;
+          while (d > Math.PI) d -= Math.PI * 2;
+          while (d < -Math.PI) d += Math.PI * 2;
+          if (Math.abs(d) < 0.5) continue;
+          bossShot(b.x, b.y, a, 0.66, 5);
+        }
+        Sound.play('warning');
+
+      } else if (pick === 2) {
+        // PROW LANCE — 54 frames of charge before anything happens.
+        b.lance = { t: 54, state: 'charge', x: player.x };
+        Sound.play('warning');
+
+      } else if (pick === 3) {
+        b.curtain = 60;                        // FLAK CURTAIN, swept left→right
+        Sound.play('hit');
+
+      } else if (pick === 4) {
+        b.spiral = 54;                         // three-armed spiral
+        b.spiralA = frame * 0.02;
+        Sound.play('warning');
+
+      } else {
+        // FULL DECK — everything at once, plus a scramble.
+        bossRing(b.x, b.y, 12, 0.6, frame * 0.01, 5);
+        bossAimed(b.x, b.y + 40, [-0.5, -0.25, 0, 0.25, 0.5], 1.15, 6);
+        if (enemies.length < 18) {
+          bossMinion('kamikaze', b.x - 70, b.y + 34);
+          bossMinion('kamikaze', b.x + 70, b.y + 34);
+        }
+        FX.addShake(8);
+        Sound.play('explode');
+      }
+    }
+  },
+
+  paint(b) {
+    const live = b.bays.filter(function (p) { return !p.gone; }).length;
+    const accent = bossTint(b, '#9fd8ff', '#ffcc77', '#ff7755');
+
+    // ---- engine wash behind the dorsal -----------------------------------
+    ctx.save();
+    ctx.globalAlpha = 0.5;
+    for (let i = -2; i <= 2; i++) {
+      ctx.beginPath();
+      ctx.ellipse(i * 44, -50, 9, 14 + Math.sin(frame * 0.09 + i) * 4, 0, 0, Math.PI * 2);
+      ctx.fillStyle = accent;
+      ctx.fill();
+    }
+    ctx.restore();
+
+    // ---- main hull --------------------------------------------------------
+    heraldHullPath();
+    const g = ctx.createLinearGradient(0, -44, 0, 44);
+    g.addColorStop(0, '#8d97a8');
+    g.addColorStop(0.45, '#4a5464');
+    g.addColorStop(1, '#161b23');
+    ctx.fillStyle = g;
+    ctx.fill();
+    ctx.strokeStyle = accent;
+    ctx.lineWidth = 2.5;
+    ctx.stroke();
+    bossFlash(b);
+
+    // panel seams
+    ctx.save();
+    ctx.beginPath();
+    ctx.rect(-130, -44, 260, 88);
+    ctx.clip();
+    ctx.strokeStyle = 'rgba(10,14,20,0.55)';
+    ctx.lineWidth = 1;
+    for (let x = -112; x <= 112; x += 28) {
+      ctx.beginPath(); ctx.moveTo(x, -42); ctx.lineTo(x - 6, 26); ctx.stroke();
+    }
+    ctx.strokeStyle = 'rgba(200,230,255,0.10)';
+    ctx.beginPath(); ctx.moveTo(-124, -14); ctx.lineTo(124, -14); ctx.stroke();
+    ctx.beginPath(); ctx.moveTo(-120, 8); ctx.lineTo(120, 8); ctx.stroke();
+    ctx.restore();
+
+    // ---- dorsal spine + bridge tower --------------------------------------
+    ctx.fillStyle = '#39424f';
+    ctx.fillRect(-40, -56, 80, 16);
+    ctx.strokeStyle = 'rgba(190,220,255,0.5)';
+    ctx.lineWidth = 1.5;
+    ctx.strokeRect(-40, -56, 80, 16);
+    ctx.fillStyle = b.coreOpen ? '#ffdd88' : '#66aaff';
+    for (let i = -2; i <= 2; i++) ctx.fillRect(i * 13 - 3, -52, 6, 4);
+    // sensor mast
+    ctx.strokeStyle = accent;
+    ctx.lineWidth = 2;
+    ctx.beginPath(); ctx.moveTo(0, -56); ctx.lineTo(0, -74); ctx.stroke();
+    ctx.beginPath(); ctx.arc(0, -78, 4 + Math.sin(frame * 0.1) * 1.2, 0, Math.PI * 2);
+    ctx.fillStyle = accent; ctx.fill();
+
+    // ---- running lights ---------------------------------------------------
+    for (let i = 0; i < 14; i++) {
+      const x = -122 + i * 18.8;
+      const on = ((frame * 0.06 + i * 0.5) % 6.283) < 2.2;
+      ctx.fillStyle = on ? 'rgba(255,240,200,0.9)' : 'rgba(120,140,170,0.25)';
+      ctx.fillRect(x, -38, 3, 3);
+    }
+
+    // ---- the core slot ----------------------------------------------------
+    const pulse = 0.55 + 0.45 * Math.sin(frame * 0.12);
+    ctx.save();
+    ctx.beginPath();
+    ctx.rect(-18, -30, 36, 74);
+    ctx.fillStyle = '#0a0d14';
+    ctx.fill();
+    const cg = ctx.createLinearGradient(0, -30, 0, 44);
+    cg.addColorStop(0, b.coreOpen ? 'rgba(255,200,120,' + pulse + ')' : 'rgba(120,220,255,' + (pulse * 0.8) + ')');
+    cg.addColorStop(1, 'rgba(255,255,255,0.05)');
+    ctx.fillStyle = cg;
+    ctx.fill();
+    ctx.strokeStyle = b.coreOpen ? '#ffcc66' : '#7fd6ff';
+    ctx.lineWidth = 2;
+    ctx.stroke();
+    ctx.restore();
+    // the core itself
+    ctx.beginPath();
+    ctx.arc(0, 6, (b.coreOpen ? 13 : 9) + (b.coreGlow > 0 ? b.coreGlow * 0.3 : 0), 0, Math.PI * 2);
+    ctx.fillStyle = b.coreOpen ? 'rgba(255,220,150,0.95)' : 'rgba(150,235,255,0.8)';
+    ctx.fill();
+    if (b.coreOpen) {
+      ctx.strokeStyle = 'rgba(255,180,90,' + (0.35 + 0.35 * Math.sin(frame * 0.17)) + ')';
+      ctx.lineWidth = 2.5;
+      ctx.beginPath(); ctx.arc(0, 6, 22 + Math.sin(frame * 0.1) * 4, 0, Math.PI * 2); ctx.stroke();
+    }
+
+    // ---- the four hangar bays --------------------------------------------
+    for (let i = 0; i < b.bays.length; i++) {
+      const bay = b.bays[i];
+      const x = bay.x;
+      if (bay.gone) {
+        // a torn, smoking hole
+        ctx.beginPath();
+        ctx.moveTo(x - 20, 6);
+        ctx.lineTo(x - 12, 30);
+        ctx.lineTo(x - 2, 18);
+        ctx.lineTo(x + 8, 32);
+        ctx.lineTo(x + 19, 8);
+        ctx.closePath();
+        ctx.fillStyle = '#07090d';
+        ctx.fill();
+        ctx.strokeStyle = 'rgba(255,110,60,' + (0.3 + 0.3 * Math.sin(frame * 0.2 + i)) + ')';
+        ctx.lineWidth = 2;
+        ctx.stroke();
+        ctx.save();
+        ctx.globalAlpha = 0.28;
+        for (let s = 0; s < 3; s++) {
+          const t = (frame * 0.5 + s * 40 + i * 17) % 120;
+          ctx.beginPath();
+          ctx.arc(x + Math.sin((frame + s * 30) * 0.03 + i) * 8, 20 - t * 0.35, 4 + t * 0.09, 0, Math.PI * 2);
+          ctx.fillStyle = '#5a6472';
+          ctx.fill();
+        }
+        ctx.restore();
+        continue;
+      }
+      const frac = bay.hp / bay.max;
+      // bay housing
+      ctx.fillStyle = '#2c3542';
+      ctx.fillRect(x - 22, 2, 44, 30);
+      ctx.strokeStyle = '#93a6bd';
+      ctx.lineWidth = 2;
+      ctx.strokeRect(x - 22, 2, 44, 30);
+      // the lit mouth
+      const lit = 0.45 + 0.35 * Math.sin(bay.glow);
+      ctx.fillStyle = 'rgba(255,190,90,' + lit + ')';
+      ctx.fillRect(x - 17, 10, 34, 18);
+      ctx.fillStyle = 'rgba(20,14,8,0.85)';
+      for (let k = -1; k <= 1; k++) ctx.fillRect(x + k * 11 - 1.5, 10, 3, 18);
+      // damage: the housing darkens and cracks
+      if (frac < 1) {
+        ctx.fillStyle = 'rgba(20,10,6,' + (0.55 * (1 - frac)) + ')';
+        ctx.fillRect(x - 22, 2, 44, 30);
+      }
+      if (frac < 0.6) {
+        ctx.strokeStyle = 'rgba(255,120,60,0.85)';
+        ctx.lineWidth = 1.6;
+        ctx.beginPath(); ctx.moveTo(x - 15, 4); ctx.lineTo(x - 2, 20); ctx.stroke();
+      }
+      if (frac < 0.28) {
+        ctx.beginPath(); ctx.moveTo(x + 16, 5); ctx.lineTo(x + 1, 26); ctx.stroke();
+      }
+      // integrity pip
+      ctx.fillStyle = 'rgba(0,0,0,0.5)';
+      ctx.fillRect(x - 18, -4, 36, 3);
+      ctx.fillStyle = frac > 0.5 ? '#8fe6a0' : (frac > 0.22 ? '#ffcc55' : '#ff5544');
+      ctx.fillRect(x - 18, -4, 36 * frac, 3);
+    }
+
+    // prow chin
+    ctx.beginPath();
+    ctx.moveTo(-22, 44); ctx.lineTo(0, 60); ctx.lineTo(22, 44);
+    ctx.closePath();
+    ctx.fillStyle = b.lance ? '#ffeebb' : '#39424f';
+    ctx.fill();
+    ctx.strokeStyle = accent;
+    ctx.lineWidth = 2;
+    ctx.stroke();
+
+    if (live === 0 && !b.coreOpen) { /* unreachable, kept honest */ }
+  },
+
+  paintWorld(b) {
+    if (!b.lance) return;
+    const L = b.lance;
+    ctx.save();
+    if (L.state === 'charge') {
+      const t = 1 - L.t / 54;
+      // targeting line + gathering light at the prow
+      ctx.strokeStyle = 'rgba(255,210,120,' + (0.15 + 0.4 * t) + ')';
+      ctx.lineWidth = 1 + 3 * t;
+      ctx.setLineDash([10, 8]);
+      ctx.beginPath(); ctx.moveTo(L.x, b.y + 56); ctx.lineTo(L.x, H); ctx.stroke();
+      ctx.setLineDash([]);
+      ctx.beginPath();
+      ctx.arc(L.x, b.y + 58, 4 + 14 * t, 0, Math.PI * 2);
+      ctx.fillStyle = 'rgba(255,235,180,' + (0.25 + 0.5 * t) + ')';
+      ctx.fill();
+    } else {
+      const a = litanyClamp(L.t / 12, 0, 1);
+      const gg = ctx.createLinearGradient(L.x - 18, 0, L.x + 18, 0);
+      gg.addColorStop(0, 'rgba(255,190,90,0)');
+      gg.addColorStop(0.5, 'rgba(255,240,200,' + (0.75 * a + 0.25) + ')');
+      gg.addColorStop(1, 'rgba(255,190,90,0)');
+      ctx.fillStyle = gg;
+      ctx.fillRect(L.x - 18, b.y + 40, 36, H);
+      ctx.fillStyle = 'rgba(255,255,255,0.9)';
+      ctx.fillRect(L.x - 3.5, b.y + 40, 7, H);
+    }
+    ctx.restore();
+  },
+
+  title(b) {
+    if (b.coreOpen) return 'CORE EXPOSED — HIT ANYTHING';
+    const live = b.bays.filter(function (p) { return !p.gone; }).length;
+    return 'HANGAR BAYS ' + live + ' / 4 — CORE SLOT AT CENTRE';
+  }
+};
+
+
+// ===========================================================================
+// L1000 — IRON LITANY
+// ---------------------------------------------------------------------------
+// Twelve hundred pixels of armoured flank on a four-hundred-and-eighty pixel
+// screen. It never fits; it slides, and the fight is whichever part of it is
+// currently overhead. Seven named sections, each with its own weapon and its
+// own armour value — the bridge is soft, the spine is not — so "where am I
+// standing" is the entire fight.
+// ===========================================================================
+
+const LITANY_SECTIONS = [
+  { c: -520, hw: 80, key: 'prow',   name: 'RAM PROW',       armour: 0.35 },
+  { c: -360, hw: 80, key: 'gunA',   name: 'BATTERY ALEPH',  armour: 0.75 },
+  { c: -190, hw: 90, key: 'missile',name: 'MISSILE RACK',   armour: 0.85 },
+  { c:    0, hw:100, key: 'spine',  name: 'DORSAL SPINE',   armour: 0.5  },
+  { c:  190, hw: 90, key: 'emitter',name: 'SHIELD EMITTER', armour: 0.9  },
+  { c:  360, hw: 80, key: 'gunB',   name: 'BATTERY BETH',   armour: 0.75 },
+  { c:  520, hw: 80, key: 'bridge', name: 'COMMAND BRIDGE', armour: 2.2  }
+];
+
+function litanySectionAt(local) {
+  for (let i = 0; i < LITANY_SECTIONS.length; i++) {
+    const s = LITANY_SECTIONS[i];
+    if (local >= s.c - s.hw && local < s.c + s.hw) return s;
+  }
+  return null;
+}
+
+function litanyOnScreen(b, s) {
+  const wx = b.x + s.c;
+  return wx + s.hw > -10 && wx - s.hw < W + 10;
+}
+
+BOSS.ironlitany = {
+  w: 1200, h: 150,
+  init(b) {
+    b.slideT = 0;
+    b.slideDir = 1;
+    b.vx = 0;
+    b.shield = { state: 'off', t: 240 };     // off -> charge -> up -> off
+    b.fireIdx = 0;
+    b.volley = null;                          // { key, n, t }
+    b.beam = null;                            // prow lance
+    b.silo = 0;
+    b.hurtCd = 0;
+    b.litanyCall = 0;
+  },
+
+  move(b) {
+    // Real weight: a long sinusoid with an eased turnaround, quicker each phase.
+    const speed = 0.0042 + b.phase * 0.0011;
+    b.slideT += speed;
+    const prev = b.x;
+    const amp = 400;
+    b.x = W / 2 + Math.sin(b.slideT) * amp;
+    b.vx = b.x - prev;
+    b.y = b.targetY;
+  },
+
+  damage(b, bl, dmg) {
+    const s = litanySectionAt(bl.x - b.x);
+    if (!s) return dmg * 0.4;                 // stray hit on the belt armour
+    if (s.key === 'emitter' && b.shield.state === 'up') {
+      spawnParticles(bl.x, bl.y, '#88ffee', 3);
+      return 0;
+    }
+    if (b.shield.state === 'up' && (s.key === 'missile' || s.key === 'gunB')) {
+      return dmg * s.armour * 0.5;            // the bubble spills onto neighbours
+    }
+    if (s.key === 'bridge') spawnParticles(bl.x, bl.y, '#ffee88', 3);
+    return dmg * s.armour;
+  },
+
+  onPhase(b, ph) {
+    b.volley = null;
+    b.beam = null;
+    b.litanyCall = 0;
+    if (ph >= 3 && b.shield.state === 'off') b.shield = { state: 'charge', t: 90 };
+    FX.addShake(10);
+  },
+
+  think(b, ph) {
+    if (b.hurtCd > 0) b.hurtCd--;
+
+    // ---- shield emitter cycle (only while the emitter can be seen) --------
+    const emitterVisible = litanyOnScreen(b, LITANY_SECTIONS[4]);
+    b.shield.t--;
+    if (b.shield.t <= 0) {
+      if (b.shield.state === 'off') {
+        b.shield = { state: emitterVisible && ph >= 2 ? 'charge' : 'off', t: emitterVisible && ph >= 2 ? 90 : 120 };
+        if (b.shield.state === 'charge') Sound.play('warning');
+      } else if (b.shield.state === 'charge') {
+        b.shield = { state: 'up', t: 150 + ph * 12 };
+        Sound.play('shieldBreak');
+      } else {
+        b.shield = { state: 'off', t: 200 };
+      }
+    }
+
+    // ---- prow lance (multi-frame) ----------------------------------------
+    if (b.beam) {
+      b.beam.t--;
+      if (b.beam.state === 'charge') {
+        if (b.beam.t <= 0) { b.beam.state = 'fire'; b.beam.t = 40; FX.addShake(14); Sound.play('laser'); }
+      } else {
+        const bx = b.x + LITANY_SECTIONS[0].c;
+        if (b.hurtCd <= 0 && Math.abs(player.x - bx) < 26 && player.y > b.y) { hitPlayer(); b.hurtCd = 50; }
+        if (b.beam.t <= 0) b.beam = null;
+      }
+    }
+
+    // ---- staggered volleys (multi-frame) ---------------------------------
+    if (b.volley) {
+      const v = b.volley;
+      v.t--;
+      if (v.t <= 0) {
+        v.t = v.gap;
+        v.n--;
+        const wx = b.x + v.c;
+        if (v.key === 'gun') {
+          const bx = wx + (v.n % 5 - 2) * 26;
+          bossAimed(bx, b.y + 62, [0], 1.15, 6);
+        } else if (v.key === 'missile') {
+          const bx = wx + (litanyRnd(frame + v.n) - 0.5) * 150;
+          bossShot(bx, b.y + 62, Math.PI / 2 + (litanyRnd(frame * 3 + v.n) - 0.5) * 0.5, 0.6, 7);
+          if (v.n % 3 === 0 && enemies.length < 20) bossMinion('kamikaze', bx, b.y + 70);
+        } else if (v.key === 'flak') {
+          const bx = wx - 90 + (7 - v.n) * 26;
+          if (Math.abs(bx - player.x) > 30) bossShot(bx, b.y + 66, Math.PI / 2, 0.7, 6);
+        } else if (v.key === 'bridge') {
+          bossAimed(wx, b.y + 60, [-0.4, -0.2, 0, 0.2, 0.4], 1.0, 5);
+        }
+        if (v.n <= 0) b.volley = null;
+      }
+      return;
+    }
+
+    // ---- pick a section to fire from -------------------------------------
+    const iv = Math.max(42, 104 - ph * 10);
+    if (b.attackTimer < iv) return;
+    b.attackTimer = 0;
+
+    const visible = [];
+    for (let i = 0; i < LITANY_SECTIONS.length; i++) {
+      if (litanyOnScreen(b, LITANY_SECTIONS[i])) visible.push(LITANY_SECTIONS[i]);
+    }
+    if (!visible.length) return;
+    const s = visible[(b.fireIdx++) % visible.length];
+    const wx = b.x + s.c;
+
+    if (s.key === 'prow') {
+      if (!b.beam) { b.beam = { state: 'charge', t: 52 }; Sound.play('warning'); }
+      else bossAimed(wx, b.y + 60, [-0.25, 0.25], 0.95, 5);
+
+    } else if (s.key === 'gunA' || s.key === 'gunB') {
+      b.volley = { key: 'gun', c: s.c, n: 5 + ph, t: 6, gap: 9 };
+      Sound.play('hit');
+
+    } else if (s.key === 'missile') {
+      b.volley = { key: 'missile', c: s.c, n: 6 + ph, t: 8, gap: 11 };
+      Sound.play('warning');
+
+    } else if (s.key === 'spine') {
+      if (ph >= 4 && b.fireIdx % 2 === 0) {
+        // The spine opens its ribs and vents a slow ring wall.
+        bossRing(wx, b.y + 40, 14 + ph, 0.55, frame * 0.01, 6);
+        Sound.play('warning');
+      } else {
+        b.volley = { key: 'flak', c: s.c, n: 8, t: 6, gap: 8 };
+        Sound.play('hit');
+      }
+
+    } else if (s.key === 'emitter') {
+      if (enemies.length < 20) {
+        bossMinion(ph >= 4 ? 'weaver' : 'lancer', wx - 40, b.y + 70);
+        bossMinion(ph >= 5 ? 'bulwark' : 'lancer', wx + 40, b.y + 70);
+      }
+      bossAimed(wx, b.y + 60, [-0.5, 0, 0.5], 0.85, 5);
+      Sound.play('hit');
+
+    } else {
+      // BRIDGE — it calls the litany and every visible gun answers.
+      if (ph >= 3) {
+        b.litanyCall = 40;
+        for (let i = 0; i < visible.length; i++) {
+          const v = visible[i];
+          if (v.key === 'gunA' || v.key === 'gunB' || v.key === 'spine') {
+            bossAimed(b.x + v.c, b.y + 60, [-0.18, 0.18], 1.0, 5);
+          }
+        }
+        Sound.play('explode');
+      }
+      b.volley = { key: 'bridge', c: s.c, n: 3 + ph, t: 10, gap: 14 };
+    }
+  },
+
+  paint(b) {
+    const accent = bossTint(b, '#7fb6ff', '#ffc266', '#ff6a4a');
+    const lo = -b.x - 120, hi = -b.x + W + 120;    // visible local-x window
+
+    // ---- hull slab --------------------------------------------------------
+    ctx.save();
+    ctx.beginPath();
+    ctx.moveTo(-600, -20);
+    ctx.lineTo(-560, -62);
+    ctx.lineTo(520, -70);
+    ctx.lineTo(600, -30);
+    ctx.lineTo(600, 40);
+    ctx.lineTo(520, 72);
+    ctx.lineTo(-540, 66);
+    ctx.lineTo(-600, 20);
+    ctx.closePath();
+    const g = ctx.createLinearGradient(0, -70, 0, 72);
+    g.addColorStop(0, '#7a8496');
+    g.addColorStop(0.4, '#3d4652');
+    g.addColorStop(0.75, '#232a34');
+    g.addColorStop(1, '#0e1218');
+    ctx.fillStyle = g;
+    ctx.fill();
+    ctx.strokeStyle = accent;
+    ctx.lineWidth = 3;
+    ctx.stroke();
+    bossFlash(b);
+
+    // panel lines — only the ones on screen
+    ctx.save();
+    ctx.beginPath();
+    ctx.rect(-600, -70, 1200, 142);
+    ctx.clip();
+    ctx.strokeStyle = 'rgba(8,11,16,0.55)';
+    ctx.lineWidth = 1.2;
+    const startX = Math.floor(lo / 40) * 40;
+    for (let x = startX; x < hi; x += 40) {
+      if (x < -600 || x > 600) continue;
+      ctx.beginPath(); ctx.moveTo(x, -66); ctx.lineTo(x - 8, 68); ctx.stroke();
+    }
+    ctx.strokeStyle = 'rgba(190,220,255,0.10)';
+    ctx.lineWidth = 1.5;
+    ctx.beginPath(); ctx.moveTo(-590, -34); ctx.lineTo(590, -40); ctx.stroke();
+    ctx.beginPath(); ctx.moveTo(-580, 12); ctx.lineTo(580, 6); ctx.stroke();
+    ctx.restore();
+    ctx.restore();
+
+    // ---- running lights: a marching litany along the flank -----------------
+    const li0 = Math.floor((lo + 600) / 34);
+    const li1 = Math.ceil((hi + 600) / 34);
+    for (let i = Math.max(0, li0); i < Math.min(35, li1); i++) {
+      const x = -590 + i * 34;
+      const on = ((frame * 0.05 - i * 0.35) % 6.283 + 6.283) % 6.283 < 1.6;
+      ctx.fillStyle = on ? 'rgba(255,246,214,0.95)' : 'rgba(110,130,160,0.22)';
+      ctx.fillRect(x, -52, 4, 4);
+      ctx.fillStyle = on ? 'rgba(255,150,90,0.5)' : 'rgba(90,105,130,0.18)';
+      ctx.fillRect(x, 52, 4, 3);
+    }
+
+    // ---- per-section superstructure (culled) -------------------------------
+    for (let i = 0; i < LITANY_SECTIONS.length; i++) {
+      const s = LITANY_SECTIONS[i];
+      if (s.c + s.hw < lo || s.c - s.hw > hi) continue;
+      litanyPaintSection(b, s, accent);
+    }
+  },
+
+  paintWorld(b) {
+    ctx.save();
+    // prow lance
+    if (b.beam) {
+      const bx = b.x + LITANY_SECTIONS[0].c;
+      if (b.beam.state === 'charge') {
+        const t = 1 - b.beam.t / 52;
+        ctx.strokeStyle = 'rgba(255,120,90,' + (0.15 + 0.45 * t) + ')';
+        ctx.lineWidth = 2 + 5 * t;
+        ctx.setLineDash([14, 10]);
+        ctx.beginPath(); ctx.moveTo(bx, b.y + 70); ctx.lineTo(bx, H); ctx.stroke();
+        ctx.setLineDash([]);
+      } else {
+        const gg = ctx.createLinearGradient(bx - 28, 0, bx + 28, 0);
+        gg.addColorStop(0, 'rgba(255,90,50,0)');
+        gg.addColorStop(0.5, 'rgba(255,235,200,0.9)');
+        gg.addColorStop(1, 'rgba(255,90,50,0)');
+        ctx.fillStyle = gg;
+        ctx.fillRect(bx - 28, b.y + 60, 56, H);
+      }
+    }
+    // shield bubble over the emitter
+    if (b.shield.state !== 'off') {
+      const ex = b.x + LITANY_SECTIONS[4].c;
+      const up = b.shield.state === 'up';
+      const r = up ? 120 : 40 + (90 - b.shield.t) * 0.85;
+      ctx.globalAlpha = up ? 0.35 + 0.12 * Math.sin(frame * 0.16) : 0.22;
+      ctx.beginPath();
+      ctx.arc(ex, b.y + 10, Math.max(10, r), 0, Math.PI * 2);
+      ctx.fillStyle = up ? 'rgba(90,255,225,0.35)' : 'rgba(90,255,225,0.18)';
+      ctx.fill();
+      ctx.globalAlpha = 1;
+      ctx.strokeStyle = up ? 'rgba(160,255,240,0.85)' : 'rgba(160,255,240,0.5)';
+      ctx.lineWidth = 2;
+      ctx.stroke();
+    }
+    ctx.restore();
+  },
+
+  title(b) {
+    // Whatever is currently overhead is what the player must deal with.
+    let best = null, bd = 1e9;
+    for (let i = 0; i < LITANY_SECTIONS.length; i++) {
+      const s = LITANY_SECTIONS[i];
+      const d = Math.abs(b.x + s.c - W / 2);
+      if (d < bd) { bd = d; best = s; }
+    }
+    const dir = b.vx > 0.05 ? '»' : (b.vx < -0.05 ? '«' : '=');
+    let tag = best ? best.name : 'HULL';
+    if (best && best.key === 'bridge') tag += ' — SOFT';
+    if (best && best.key === 'emitter' && b.shield.state === 'up') tag += ' — SHIELDED';
+    return dir + ' OVERHEAD: ' + tag + ' ' + dir;
+  }
+};
+
+function litanyPaintSection(b, s, accent) {
+  const x = s.c;
+  ctx.save();
+  ctx.translate(x, 0);
+
+  if (s.key === 'prow') {
+    ctx.beginPath();
+    ctx.moveTo(-80, -20); ctx.lineTo(-98, 20); ctx.lineTo(-40, 66); ctx.lineTo(-30, 10);
+    ctx.closePath();
+    ctx.fillStyle = '#4b5462'; ctx.fill();
+    ctx.strokeStyle = accent; ctx.lineWidth = 2; ctx.stroke();
+    ctx.beginPath(); ctx.arc(0, 60, b.beam ? 12 : 7, 0, Math.PI * 2);
+    ctx.fillStyle = b.beam ? '#ffddaa' : '#5b2a20'; ctx.fill();
+
+  } else if (s.key === 'gunA' || s.key === 'gunB') {
+    ctx.fillStyle = '#333c48';
+    ctx.fillRect(-70, 30, 140, 22);
+    ctx.strokeStyle = 'rgba(200,225,255,0.4)'; ctx.lineWidth = 1.5;
+    ctx.strokeRect(-70, 30, 140, 22);
+    for (let i = -2; i <= 2; i++) {
+      ctx.fillStyle = '#1d2530';
+      ctx.fillRect(i * 26 - 5, 50, 10, 22);
+      ctx.fillStyle = 'rgba(255,180,90,' + (0.2 + 0.5 * Math.abs(Math.sin(frame * 0.09 + i))) + ')';
+      ctx.fillRect(i * 26 - 3, 68, 6, 4);
+    }
+    ctx.fillStyle = accent;
+    ctx.fillRect(-70, 26, 140, 2);
+
+  } else if (s.key === 'missile') {
+    ctx.fillStyle = '#2b3340';
+    ctx.fillRect(-84, 18, 168, 40);
+    ctx.strokeStyle = 'rgba(255,190,120,0.55)'; ctx.lineWidth = 1.5;
+    ctx.strokeRect(-84, 18, 168, 40);
+    for (let i = 0; i < 6; i++) {
+      const hx = -70 + i * 28;
+      const open = b.volley && b.volley.key === 'missile';
+      ctx.fillStyle = open ? 'rgba(255,120,60,0.85)' : '#111820';
+      ctx.fillRect(hx - 9, 24, 18, 28);
+      ctx.strokeStyle = 'rgba(190,215,245,0.35)';
+      ctx.strokeRect(hx - 9, 24, 18, 28);
+    }
+
+  } else if (s.key === 'spine') {
+    for (let i = -4; i <= 4; i++) {
+      ctx.fillStyle = i % 2 ? '#4d576a' : '#3b4454';
+      ctx.fillRect(i * 22 - 9, -68, 18, 30);
+    }
+    ctx.strokeStyle = accent; ctx.lineWidth = 2;
+    ctx.beginPath(); ctx.moveTo(-96, -40); ctx.lineTo(96, -40); ctx.stroke();
+    ctx.fillStyle = 'rgba(255,255,255,0.12)';
+    ctx.fillRect(-96, 44, 192, 10);
+    // vent glow when it is about to blow a ring
+    const vent = b.volley && b.volley.key === 'flak';
+    ctx.fillStyle = vent ? 'rgba(255,170,80,0.8)' : 'rgba(120,180,255,0.25)';
+    for (let i = -3; i <= 3; i++) ctx.fillRect(i * 26 - 6, 56, 12, 8);
+
+  } else if (s.key === 'emitter') {
+    const up = b.shield.state === 'up';
+    ctx.fillStyle = '#2e3a46';
+    ctx.fillRect(-52, -46, 104, 26);
+    ctx.strokeStyle = up ? '#8effe4' : 'rgba(140,220,255,0.5)';
+    ctx.lineWidth = 2;
+    ctx.strokeRect(-52, -46, 104, 26);
+    ctx.beginPath();
+    ctx.arc(0, -50, 20, Math.PI, Math.PI * 2);
+    ctx.fillStyle = up ? 'rgba(140,255,230,0.9)' : 'rgba(70,120,140,0.9)';
+    ctx.fill();
+    ctx.strokeStyle = up ? '#dffff7' : '#6ea0b4';
+    ctx.stroke();
+    // launch cradles
+    ctx.fillStyle = '#222b36';
+    ctx.fillRect(-70, 40, 44, 20);
+    ctx.fillRect(26, 40, 44, 20);
+
+  } else if (s.key === 'bridge') {
+    ctx.fillStyle = '#455063';
+    ctx.beginPath();
+    ctx.moveTo(-56, -34); ctx.lineTo(-40, -74); ctx.lineTo(44, -74); ctx.lineTo(60, -34);
+    ctx.closePath();
+    ctx.fill();
+    ctx.strokeStyle = b.litanyCall > 0 ? '#ffffff' : '#ffd27a';
+    ctx.lineWidth = 2.5;
+    ctx.stroke();
+    for (let i = 0; i < 6; i++) {
+      const on = ((frame * 0.07 + i) % 6.283) < 3.6;
+      ctx.fillStyle = on ? 'rgba(255,235,170,0.95)' : 'rgba(120,110,80,0.4)';
+      ctx.fillRect(-44 + i * 16, -62, 11, 7);
+    }
+    // it is the soft spot and it is marked as one
+    ctx.strokeStyle = 'rgba(255,120,90,' + (0.3 + 0.35 * Math.sin(frame * 0.13)) + ')';
+    ctx.lineWidth = 2;
+    ctx.beginPath(); ctx.arc(0, -50, 40 + Math.sin(frame * 0.09) * 4, 0, Math.PI * 2); ctx.stroke();
+  }
+
+  if (b.litanyCall > 0) b.litanyCall--;
+  ctx.restore();
+}
+
+
+// ===========================================================================
+// L2500 — THE DREADED SCOURGE OF HUMANITY — WARR MOTHERSHIP
+// ---------------------------------------------------------------------------
+// The Devouring. Every phase it eats a band of the arena and the space does
+// not come back: it is drawn as void and static, and standing in it kills.
+// By phase seven the war is being fought in a corridor.
+//
+// Hard floor: it will never eat more than 100px from either side (280px of
+// playable width, 58% of the canvas) or 96px from the bottom, so there is
+// always somewhere to dodge to.
+// ===========================================================================
+
+function mothershipPlayable(b) {
+  return { l: b.eatL, r: W - b.eatR, bot: H - b.eatB };
+}
+
+function mothershipDevour(b, ph) {
+  const order = ['left', 'right', 'bottom'];
+  const side = order[(ph - 2 + 3) % 3];
+  if (side === 'left') b.eatL = Math.min(100, b.eatL + (b.eatL < 60 ? 55 : 45));
+  else if (side === 'right') b.eatR = Math.min(100, b.eatR + (b.eatR < 60 ? 55 : 45));
+  else b.eatB = Math.min(96, b.eatB + 48);
+}
+
+function mothershipVoidEdge(x, y, seed) {
+  // A jagged, animated tear-line offset.
+  return Math.sin(y * 0.05 + frame * 0.03 + seed) * 5 + Math.sin(y * 0.19 + seed * 2) * 3;
+}
+
+BOSS.mothership = {
+  w: 460, h: 200,
+  init(b) {
+    b.eatL = 0; b.eatR = 0; b.eatB = 0;
+    b.devour = 0;            // frames of the consumption sequence remaining
+    b.devourMax = 200;
+    b.voidCd = 0;
+    b.hurtCd = 0;
+    b.cast = null;           // { kind, t, max, data }
+    b.beams = null;          // { t, xs }
+    b.wall = null;           // { r, gap, t }
+    b.suiteIdx = 0;
+    b.mawOpen = 0;
+    b.plateScroll = 0;
+    b.sway = 0;
+    b.pull = 0;
+    b.agg = 1 + Math.min(0.55, (b.ascendant || 0) * 0.08);
+    b.consumed = 0;
+    // It opens mid-meal. The first Devouring lands before phase two, so the
+    // rule is taught by being used on you rather than explained.
+    b.devour = 140;
+    b.devourIntro = true;
+  },
+
+  onPhase(b, ph) {
+    b.cast = null; b.beams = null; b.wall = null;
+    mothershipDevour(b, ph);
+    b.devour = b.devourMax;
+    b.devourIntro = false;
+    b.consumed = Math.round(((b.eatL + b.eatR) / W + b.eatB / H) * 50);
+    FX.addShake(26);
+    FX.hitStop(5);
+    Sound.play('bigExplode');
+    addFlashText('THE DEVOURING', W / 2, 300, '#cc88ff');
+  },
+
+  damage(b, bl, dmg) {
+    // While it is consuming, the void field over the hull all but seals it.
+    if (b.devour > 0) {
+      if (frame % 3 === 0) spawnParticles(bl.x, bl.y, '#aa77ff', 2);
+      return dmg * 0.10;
+    }
+    const local = bl.x - b.x;
+    const ly = bl.y - b.y;
+    if (Math.abs(local) < 68 && ly > -20) return dmg;   // straight down the maw
+    return dmg * 0.5;                                   // armour plating
+  },
+
+  move(b) {
+    // It centres itself over whatever arena is left, and sways like weather.
+    b.sway += 0.006;
+    const pl = mothershipPlayable(b);
+    const cx = (pl.l + pl.r) / 2;
+    b.x += (cx + Math.sin(b.sway) * 16 - b.x) * 0.01;
+    b.y = b.targetY + Math.sin(b.sway * 1.7) * 4;
+  },
+
+  think(b, ph) {
+    b.plateScroll = (b.plateScroll + 0.35) % 44;
+    if (b.hurtCd > 0) b.hurtCd--;
+    if (b.voidCd > 0) b.voidCd--;
+    if (b.mawOpen > 0) b.mawOpen--;
+
+    // ---- standing in what it has eaten ------------------------------------
+    const pl = mothershipPlayable(b);
+    const inVoid = player.x < pl.l || player.x > pl.r || player.y > pl.bot;
+    if (inVoid) {
+      if (frame % 3 === 0) spawnParticles(player.x, player.y, '#9955ff', 3);
+      // shove them back toward the living arena rather than trapping them
+      if (player.x < pl.l) player.x += 1.6;
+      if (player.x > pl.r) player.x -= 1.6;
+      if (player.y > pl.bot) player.y -= 1.6;
+      if (b.voidCd <= 0) { hitPlayer(); b.voidCd = 45; addFlashText('THE VOID', player.x, player.y - 30, '#cc88ff'); }
+    }
+
+    // ---- the Devouring sequence -------------------------------------------
+    if (b.devour > 0) {
+      b.devour--;
+      if (b.devour % 18 === 0) {
+        FX.addShake(6);
+        spawnParticles(b.x + (litanyRnd(frame) - 0.5) * 300, b.y + 70, '#aa66ff', 5);
+      }
+      // It is not defenceless while it feeds — a slow, readable ring.
+      if (b.devour % 46 === 0) bossRing(b.x, b.y + 60, 10, 0.5, frame * 0.01, 6);
+      if (b.devour === 0) {
+        Sound.play('bossPhase');
+        FX.addShake(18);
+        if (b.devourIntro) {
+          b.devourIntro = false;
+          b.eatB = 40;                       // the floor goes first
+          addFlashText('THE DEVOURING', W / 2, 300, '#cc88ff');
+          addFlashText('THE FLOOR IS GONE', W / 2, 330, '#cc88ff');
+          FX.addShake(24);
+        }
+      }
+      return;
+    }
+
+    // ---- active beams -----------------------------------------------------
+    if (b.beams) {
+      b.beams.t--;
+      if (b.hurtCd <= 0) {
+        for (let i = 0; i < b.beams.xs.length; i++) {
+          if (Math.abs(player.x - b.beams.xs[i]) < 22) { hitPlayer(); b.hurtCd = 50; break; }
+        }
+      }
+      if (b.beams.t <= 0) b.beams = null;
+    }
+
+    // ---- the gapped wall --------------------------------------------------
+    if (b.wall) {
+      b.wall.t--;
+      if (b.wall.t % 5 === 0) {
+        const n = 26;
+        for (let i = 0; i < n; i++) {
+          const a = (i / n) * Math.PI * 2 + b.wall.rot;
+          let d = a - b.wall.gap;
+          while (d > Math.PI) d -= Math.PI * 2;
+          while (d < -Math.PI) d += Math.PI * 2;
+          if (Math.abs(d) < 0.55) continue;
+          bossShot(b.x, b.y + 50, a, 0.5, 5);
+        }
+        b.wall.gap += 0.7;
+      }
+      if (b.wall.t <= 0) b.wall = null;
+      return;
+    }
+
+    // ---- the pull ---------------------------------------------------------
+    if (b.pull > 0) {
+      b.pull--;
+      const dx = b.x - player.x, dy = (b.y + 70) - player.y;
+      const d = Math.max(40, Math.sqrt(dx * dx + dy * dy));
+      player.x += (dx / d) * 1.25;
+      player.y += (dy / d) * 0.95;
+      if (b.pull % 9 === 0) bossAimed(b.x, b.y + 70, [-0.6, 0.6], 0.9, 5);
+      if (frame % 2 === 0) spawnParticles(player.x, player.y, '#7744cc', 1);
+      if (b.pull <= 0) b.mawOpen = 40;
+    }
+
+    // ---- casting (every attack has a 30+ frame tell) -----------------------
+    if (b.cast) {
+      b.cast.t--;
+      if (b.cast.t <= 0) { mothershipFire(b, ph, b.cast); b.cast = null; }
+      return;
+    }
+
+    const iv = Math.max(46, (128 - ph * 11) / b.agg);
+    if (b.attackTimer >= iv) {
+      b.attackTimer = 0;
+      const suite = mothershipSuite(ph);
+      const kind = suite[(b.suiteIdx++) % suite.length];
+      b.cast = { kind: kind, t: kind === 'stareater' ? 66 : 36, max: kind === 'stareater' ? 66 : 36, x: player.x, xs: null };
+      if (kind === 'harvest') {
+        const pl2 = mothershipPlayable(b);
+        b.cast.xs = [];
+        const span = pl2.r - pl2.l;
+        for (let i = 0; i < 3; i++) b.cast.xs.push(pl2.l + span * (0.2 + 0.3 * i) + (litanyRnd(frame + i) - 0.5) * 30);
+      }
+      Sound.play(kind === 'stareater' ? 'warning' : 'hit');
+    }
+  },
+
+  paint(b) {
+    const t = (b.phase - 1) / Math.max(1, b.maxPhases - 1);
+    const hot = bossTint(b, '#7f9fff', '#c07dff', '#ff5f8f');
+
+    // ---- engine wash, drawn behind everything ------------------------------
+    ctx.save();
+    ctx.globalAlpha = 0.55;
+    for (let side = -1; side <= 1; side += 2) {
+      for (let i = 0; i < 5; i++) {
+        const ex = side * (150 + i * 14);
+        const h = 26 + Math.sin(frame * 0.11 + i + side) * 9;
+        const gg = ctx.createLinearGradient(ex, -100, ex, -100 - h);
+        gg.addColorStop(0, hot);
+        gg.addColorStop(1, 'rgba(0,0,0,0)');
+        ctx.fillStyle = gg;
+        ctx.fillRect(ex - 6, -100 - h, 12, h);
+      }
+    }
+    ctx.restore();
+
+    // ---- back plate: the structure behind the structure ---------------------
+    ctx.save();
+    ctx.beginPath();
+    ctx.moveTo(-230, -60); ctx.lineTo(-180, -100); ctx.lineTo(180, -100);
+    ctx.lineTo(230, -60); ctx.lineTo(210, 40); ctx.lineTo(-210, 40);
+    ctx.closePath();
+    const bg = ctx.createLinearGradient(0, -100, 0, 40);
+    bg.addColorStop(0, '#2a2440');
+    bg.addColorStop(1, '#0a0912');
+    ctx.fillStyle = bg;
+    ctx.fill();
+    // scrolling plating
+    ctx.save();
+    ctx.clip();
+    for (let y = -100; y < 40; y += 22) {
+      const yy = y + (b.plateScroll % 22);
+      ctx.fillStyle = 'rgba(255,255,255,0.035)';
+      ctx.fillRect(-230, yy, 460, 9);
+      ctx.strokeStyle = 'rgba(0,0,0,0.4)';
+      ctx.lineWidth = 1;
+      ctx.beginPath(); ctx.moveTo(-230, yy); ctx.lineTo(230, yy); ctx.stroke();
+    }
+    for (let x = -216; x <= 216; x += 36) {
+      ctx.strokeStyle = 'rgba(0,0,0,0.35)';
+      ctx.beginPath(); ctx.moveTo(x, -100); ctx.lineTo(x, 40); ctx.stroke();
+    }
+    ctx.restore();
+    ctx.strokeStyle = hot;
+    ctx.lineWidth = 2.5;
+    ctx.stroke();
+    ctx.restore();
+
+    // ---- main hull ----------------------------------------------------------
+    ctx.beginPath();
+    ctx.moveTo(-208, -40);
+    ctx.lineTo(-140, -78);
+    ctx.lineTo(140, -78);
+    ctx.lineTo(208, -40);
+    ctx.lineTo(176, 52);
+    ctx.lineTo(86, 82);
+    ctx.lineTo(-86, 82);
+    ctx.lineTo(-176, 52);
+    ctx.closePath();
+    const hg = ctx.createLinearGradient(0, -78, 0, 82);
+    hg.addColorStop(0, '#6a6f8c');
+    hg.addColorStop(0.5, '#333850');
+    hg.addColorStop(1, '#100f1c');
+    ctx.fillStyle = hg;
+    ctx.fill();
+    ctx.strokeStyle = hot;
+    ctx.lineWidth = 3;
+    ctx.stroke();
+    bossFlash(b);
+
+    // hull ribs
+    ctx.save();
+    ctx.beginPath(); ctx.rect(-208, -78, 416, 160); ctx.clip();
+    for (let i = -5; i <= 5; i++) {
+      ctx.strokeStyle = 'rgba(0,0,0,0.4)';
+      ctx.lineWidth = 2;
+      ctx.beginPath(); ctx.moveTo(i * 38, -76); ctx.lineTo(i * 30, 80); ctx.stroke();
+      ctx.strokeStyle = 'rgba(255,255,255,0.06)';
+      ctx.lineWidth = 1;
+      ctx.beginPath(); ctx.moveTo(i * 38 + 3, -76); ctx.lineTo(i * 30 + 3, 80); ctx.stroke();
+    }
+    ctx.restore();
+
+    // ---- engine banks --------------------------------------------------------
+    for (let side = -1; side <= 1; side += 2) {
+      ctx.save();
+      ctx.translate(side * 168, -20);
+      ctx.fillStyle = '#252a3c';
+      ctx.fillRect(-26, -58, 52, 100);
+      ctx.strokeStyle = 'rgba(200,215,255,0.4)';
+      ctx.lineWidth = 2;
+      ctx.strokeRect(-26, -58, 52, 100);
+      for (let i = 0; i < 5; i++) {
+        const p = 0.35 + 0.65 * Math.abs(Math.sin(frame * 0.07 + i * 0.8 + side));
+        ctx.fillStyle = 'rgba(255,255,255,' + (0.12 + 0.2 * p) + ')';
+        ctx.fillRect(-20, -50 + i * 19, 40, 12);
+        ctx.fillStyle = hot;
+        ctx.globalAlpha = 0.35 + 0.5 * p;
+        ctx.fillRect(-20, -50 + i * 19, 40, 4);
+        ctx.globalAlpha = 1;
+      }
+      ctx.restore();
+    }
+
+    // ---- spires -------------------------------------------------------------
+    ctx.strokeStyle = hot;
+    ctx.lineWidth = 2;
+    for (let i = -2; i <= 2; i++) {
+      const hgt = 26 + Math.abs(i) * -6 + 18;
+      ctx.beginPath();
+      ctx.moveTo(i * 52, -78);
+      ctx.lineTo(i * 52 + i * 4, -78 - hgt);
+      ctx.stroke();
+      ctx.beginPath();
+      ctx.arc(i * 52 + i * 4, -80 - hgt, 3 + Math.sin(frame * 0.1 + i) * 1.2, 0, Math.PI * 2);
+      ctx.fillStyle = hot;
+      ctx.fill();
+    }
+
+    // ---- THE MAW -------------------------------------------------------------
+    const open = b.mawOpen > 0 || b.pull > 0 || (b.cast && b.cast.kind === 'stareater');
+    const gape = open ? 22 : 8;
+    ctx.save();
+    ctx.beginPath();
+    ctx.ellipse(0, 46, 74, 34 + gape, 0, 0, Math.PI * 2);
+    ctx.fillStyle = '#04040a';
+    ctx.fill();
+    ctx.strokeStyle = hot;
+    ctx.lineWidth = 3;
+    ctx.stroke();
+    // the swirl inside
+    ctx.save();
+    ctx.beginPath();
+    ctx.ellipse(0, 46, 72, 32 + gape, 0, 0, Math.PI * 2);
+    ctx.clip();
+    for (let i = 0; i < 5; i++) {
+      const a = frame * 0.03 + i * 1.25;
+      const rr = 12 + i * 11;
+      ctx.strokeStyle = 'rgba(' + (140 + i * 20) + ',80,255,' + (0.42 - i * 0.06) + ')';
+      ctx.lineWidth = 3;
+      ctx.beginPath();
+      ctx.ellipse(Math.cos(a) * 8, 46 + Math.sin(a) * 5, rr, rr * 0.55, a, 0, Math.PI * 2);
+      ctx.stroke();
+    }
+    ctx.fillStyle = 'rgba(255,240,255,' + (0.12 + 0.3 * t + (open ? 0.3 : 0)) + ')';
+    ctx.beginPath();
+    ctx.ellipse(0, 46, 20 + (open ? 12 : 0), 12 + (open ? 8 : 0), 0, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.restore();
+    // intake vanes
+    ctx.strokeStyle = 'rgba(190,200,235,0.75)';
+    ctx.lineWidth = 3;
+    for (let i = -3; i <= 3; i++) {
+      const x = i * 20;
+      ctx.beginPath();
+      ctx.moveTo(x, 46 - 34 - gape * 0.2);
+      ctx.lineTo(x + (open ? i * 4 : 0), 46 - 14 + (open ? -6 : 0));
+      ctx.stroke();
+    }
+    ctx.restore();
+
+    // ---- the void shield while it feeds --------------------------------------
+    if (b.devour > 0) {
+      const a = 0.25 + 0.2 * Math.sin(frame * 0.2);
+      ctx.save();
+      ctx.strokeStyle = 'rgba(190,120,255,' + (a + 0.35) + ')';
+      ctx.lineWidth = 3;
+      ctx.fillStyle = 'rgba(120,60,220,' + a * 0.5 + ')';
+      ctx.beginPath();
+      for (let i = 0; i <= 6; i++) {
+        const ang = (i / 6) * Math.PI * 2 + frame * 0.01;
+        const px = Math.cos(ang) * 240, py = Math.sin(ang) * 118;
+        if (i === 0) ctx.moveTo(px, py); else ctx.lineTo(px, py);
+      }
+      ctx.closePath();
+      ctx.fill();
+      ctx.stroke();
+      ctx.restore();
+    }
+
+    // ---- star-eater charge ----------------------------------------------------
+    if (b.cast && b.cast.kind === 'stareater') {
+      const p = 1 - b.cast.t / b.cast.max;
+      ctx.save();
+      ctx.beginPath();
+      ctx.arc(0, 52, 6 + 40 * p, 0, Math.PI * 2);
+      ctx.fillStyle = 'rgba(255,235,255,' + (0.2 + 0.6 * p) + ')';
+      ctx.fill();
+      ctx.strokeStyle = 'rgba(255,120,220,0.9)';
+      ctx.lineWidth = 2;
+      ctx.beginPath();
+      ctx.arc(0, 52, 60 - 50 * p, 0, Math.PI * 2);
+      ctx.stroke();
+      ctx.restore();
+    }
+  },
+
+  paintWorld(b) {
+    ctx.save();
+
+    // ---- the consumed arena ----------------------------------------------
+    mothershipPaintVoid(b, 0, 0, b.eatL, H, 1);
+    mothershipPaintVoid(b, W - b.eatR, 0, b.eatR, H, 2);
+    mothershipPaintVoid(b, 0, H - b.eatB, W, b.eatB, 3);
+
+    // ---- harvest beam telegraph / fire -------------------------------------
+    if (b.cast && b.cast.kind === 'harvest' && b.cast.xs) {
+      const p = 1 - b.cast.t / b.cast.max;
+      for (let i = 0; i < b.cast.xs.length; i++) {
+        const x = b.cast.xs[i];
+        ctx.strokeStyle = 'rgba(255,120,220,' + (0.12 + 0.4 * p) + ')';
+        ctx.lineWidth = 2 + 10 * p;
+        ctx.setLineDash([12, 9]);
+        ctx.beginPath(); ctx.moveTo(x, b.y + 80); ctx.lineTo(x, H); ctx.stroke();
+        ctx.setLineDash([]);
+      }
+    }
+    if (b.beams) {
+      for (let i = 0; i < b.beams.xs.length; i++) {
+        const x = b.beams.xs[i];
+        const gg = ctx.createLinearGradient(x - 24, 0, x + 24, 0);
+        gg.addColorStop(0, 'rgba(200,60,255,0)');
+        gg.addColorStop(0.5, 'rgba(255,225,255,0.9)');
+        gg.addColorStop(1, 'rgba(200,60,255,0)');
+        ctx.fillStyle = gg;
+        ctx.fillRect(x - 24, b.y + 70, 48, H);
+      }
+    }
+
+    // ---- the pull ----------------------------------------------------------
+    if (b.pull > 0) {
+      ctx.strokeStyle = 'rgba(170,110,255,0.35)';
+      ctx.lineWidth = 1.5;
+      for (let i = 0; i < 8; i++) {
+        const a = frame * 0.02 + i * 0.785;
+        const r0 = 90 + ((frame * 3 + i * 40) % 260);
+        ctx.beginPath();
+        ctx.arc(b.x, b.y + 70, r0, a, a + 0.5);
+        ctx.stroke();
+      }
+    }
+    ctx.restore();
+  },
+
+  title(b) {
+    if (b.devour > 0) return 'THE DEVOURING — SHIELDED';
+    const pct = Math.round(((b.eatL + b.eatR) / W) * 100);
+    return 'ARENA CONSUMED ' + pct + '% — MAW IS THE WEAK POINT';
+  }
+};
+
+function mothershipSuite(ph) {
+  if (ph <= 1) return ['lance', 'ring'];
+  if (ph === 2) return ['lance', 'swarm', 'crossfire'];
+  if (ph === 3) return ['ring', 'harvest', 'crossfire'];
+  if (ph === 4) return ['wall', 'swarm', 'lance', 'harvest'];
+  if (ph === 5) return ['harvest', 'crossfire', 'ring', 'pull'];
+  if (ph === 6) return ['stareater', 'wall', 'swarm', 'lance'];
+  return ['stareater', 'harvest', 'wall', 'pull', 'crossfire', 'ring', 'swarm'];
+}
+
+function mothershipFire(b, ph, cast) {
+  const k = cast.kind;
+  if (k === 'lance') {
+    bossAimed(b.x, b.y + 80, [-0.42, -0.21, 0, 0.21, 0.42], 1.15, 7);
+    b.mawOpen = 26;
+    Sound.play('laser');
+
+  } else if (k === 'ring') {
+    bossRing(b.x, b.y + 60, 18 + ph * 2, 0.62, frame * 0.01, 6);
+    bossRing(b.x, b.y + 60, 12, 0.9, frame * 0.02 + 0.3, 5);
+    Sound.play('warning');
+
+  } else if (k === 'crossfire') {
+    // two sweeping fans from the outer nacelles
+    for (let side = -1; side <= 1; side += 2) {
+      const ox = b.x + side * 168;
+      for (let i = 0; i < 7; i++) {
+        bossShot(ox, b.y - 10, Math.PI / 2 + side * (i - 3) * 0.16, 0.85, 5);
+      }
+    }
+    Sound.play('hit');
+
+  } else if (k === 'harvest') {
+    b.beams = { t: 72, xs: cast.xs || [b.x] };
+    FX.addShake(16);
+    Sound.play('laser');
+
+  } else if (k === 'swarm') {
+    const kinds = ph >= 6 ? ['harbinger', 'bulwark', 'weaver'] : (ph >= 4 ? ['bulwark', 'lancer', 'weaver'] : ['elite', 'lancer']);
+    for (let i = 0; i < 3; i++) {
+      if (enemies.length >= 22) break;
+      bossMinion(kinds[i % kinds.length], b.x + (i - 1) * 130, b.y + 60);
+    }
+    b.mawOpen = 34;
+    Sound.play('explode');
+
+  } else if (k === 'wall') {
+    b.wall = { t: 70, gap: Math.atan2(player.y - b.y, player.x - b.x), rot: 0 };
+    Sound.play('warning');
+
+  } else if (k === 'pull') {
+    b.pull = 110;
+    Sound.play('warning');
+
+  } else if (k === 'stareater') {
+    // The big one: a wide column plus a shockwave ring.
+    const pl = mothershipPlayable(b);
+    b.beams = { t: 90, xs: [b.x - 90, b.x, b.x + 90].filter(function (x) { return x > pl.l - 40 && x < pl.r + 40; }) };
+    if (!b.beams.xs.length) b.beams.xs = [b.x];
+    bossRing(b.x, b.y + 60, 24, 0.55, frame * 0.01, 7);
+    FX.addShake(30);
+    FX.hitStop(6);
+    b.mawOpen = 90;
+    Sound.play('bigExplode');
+  }
+}
+
+function mothershipPaintVoid(b, x, y, w, h, seed) {
+  if (w <= 0 || h <= 0) return;
+  ctx.save();
+  ctx.fillStyle = 'rgba(2,0,6,0.96)';
+  ctx.fillRect(x, y, w, h);
+  // static
+  ctx.beginPath();
+  ctx.rect(x, y, w, h);
+  ctx.clip();
+  const n = Math.min(70, Math.floor(w * h / 900));
+  for (let i = 0; i < n; i++) {
+    const r1 = litanyRnd(i * 3.7 + seed * 91 + Math.floor(frame / 3) * 0.37);
+    const r2 = litanyRnd(i * 7.1 + seed * 17 + Math.floor(frame / 3) * 0.61);
+    ctx.fillStyle = 'rgba(190,140,255,' + (0.1 + r1 * 0.35) + ')';
+    ctx.fillRect(x + r1 * w, y + r2 * h, 2, 2);
+  }
+  // torn edge
+  ctx.strokeStyle = 'rgba(200,120,255,0.8)';
+  ctx.lineWidth = 2;
+  ctx.beginPath();
+  if (seed === 3) {
+    for (let px = x; px <= x + w; px += 12) {
+      const py = y + mothershipVoidEdge(px, px, seed);
+      if (px === x) ctx.moveTo(px, py); else ctx.lineTo(px, py);
+    }
+  } else {
+    const ex = seed === 1 ? x + w : x;
+    for (let py = y; py <= y + h; py += 12) {
+      const px = ex + mothershipVoidEdge(ex, py, seed);
+      if (py === y) ctx.moveTo(px, py); else ctx.lineTo(px, py);
+    }
+  }
+  ctx.stroke();
+  ctx.restore();
+}
+
+
+// ===========================================================================
+// L1100-2400 — WARR ARMADA
+// ---------------------------------------------------------------------------
+// A command ship running two captured doctrines. It alternates between the
+// behaviours of the two bosses in b.composite, driven by real delegation:
+// each source gets its own private boss-record (so their state cannot collide
+// with each other's or with mine) and its own init/onPhase, and its think()
+// is called with that record. Anything that throws is retired for the rest of
+// the fight and the escort fleet covers for it.
+//
+// Escorts are the ARMADA's own mechanic: four (later six) frigates fly cover
+// and physically intercept shots that pass through them.
+// ===========================================================================
+
+function armadaSourcePhases(key) {
+  try {
+    const t = RLCore.BOSS_TABLE;
+    for (let i = 0; i < t.length; i++) if (t[i].key === key) return t[i].phases;
+  } catch (e) { /* ignore */ }
+  return 3;
+}
+
+function armadaMakeSub(b, key) {
+  const sub = {
+    x: b.x, y: b.y, targetY: b.targetY,
+    hp: b.hp, maxHp: b.maxHp,
+    key: key, name: key.toUpperCase(),
+    maxPhases: armadaSourcePhases(key),
+    phase: 1, entering: false, dying: 0, deathTick: 0,
+    flash: 0, attackTimer: 0, minionTimer: 0,
+    laser: null, beamCooldown: 0,
+    tier: b.tier, composite: null, ascendant: 0,
+    broken: false, lastPhase: 0
+  };
+  const def = BOSS[key];
+  if (!def || typeof def.think !== 'function') { sub.broken = true; return sub; }
+  try { if (def.init) def.init(sub); }
+  catch (e) { sub.broken = true; }
+  return sub;
+}
+
+function armadaRunSub(b, sub, ph) {
+  if (!sub || sub.broken) return false;
+  const def = BOSS[sub.key];
+  if (!def || typeof def.think !== 'function') { sub.broken = true; return false; }
+  // keep the source's world-view honest
+  sub.x = b.x; sub.y = b.y;
+  sub.hp = b.hp; sub.maxHp = b.maxHp;
+  sub.flash = b.flash;
+  const mapped = Math.max(1, Math.min(sub.maxPhases, Math.round(ph / b.maxPhases * sub.maxPhases) || 1));
+  try {
+    if (mapped !== sub.lastPhase) {
+      sub.lastPhase = mapped;
+      sub.phase = mapped;
+      sub.attackTimer = 0;
+      if (def.onPhase) def.onPhase(sub, mapped);
+    }
+    sub.phase = mapped;
+    sub.attackTimer++;
+    def.think(sub, mapped);
+    return true;
+  } catch (e) {
+    sub.broken = true;
+    addFlashText('DOCTRINE LOST', b.x, b.y - 40, '#ff8866');
+    return false;
+  }
+}
+
+BOSS.armada = {
+  w: 200, h: 90,
+  init(b) {
+    const pair = b.composite && b.composite.length === 2 ? b.composite : ['generic', 'generic'];
+    b.srcKeys = pair;
+    b.subs = [armadaMakeSub(b, pair[0]), armadaMakeSub(b, pair[1])];
+    b.lead = 0;
+    b.swap = 0;
+    b.escorts = [];
+    for (let i = 0; i < 4; i++) {
+      b.escorts.push({
+        a: (i / 4) * Math.PI * 2, r: 86 + (i % 2) * 22, sp: 0.011 * (i % 2 ? -1 : 1),
+        hp: b.maxHp * 0.05, max: b.maxHp * 0.05, dead: false, fire: 40 + i * 33,
+        ox: 0, oy: 0
+      });
+    }
+    b.reinforced = false;
+    b.bob = 0;
+    b.salvo = 0;
+  },
+
+  onPhase(b, ph) {
+    // Doctrine swap: odd phases run source A, even phases run source B.
+    b.lead = (ph - 1) % 2;
+    b.swap = 40;
+    addFlashText('DOCTRINE ' + (b.lead ? 'BETH' : 'ALEPH'), b.x, b.y - 46, '#88ddff');
+    Sound.play('bossPhase');
+    if (ph >= 3 && !b.reinforced) {
+      b.reinforced = true;
+      for (let i = 0; i < 2; i++) {
+        b.escorts.push({
+          a: Math.PI * i, r: 120, sp: 0.014, hp: b.maxHp * 0.04, max: b.maxHp * 0.04,
+          dead: false, fire: 60 + i * 40, ox: 0, oy: 0
+        });
+      }
+      addFlashText('RESERVE WING', b.x, b.y + 40, '#ffcc66');
+    }
+  },
+
+  damage(b, bl, dmg) {
+    // Escorts physically screen the command ship.
+    for (let i = 0; i < b.escorts.length; i++) {
+      const e = b.escorts[i];
+      if (e.dead) continue;
+      const dx = bl.x - (b.x + e.ox), dy = bl.y - (b.y + e.oy);
+      if (dx * dx + dy * dy < 22 * 22) {
+        e.hp -= dmg;
+        spawnParticles(bl.x, bl.y, '#88ccff', 3);
+        if (e.hp <= 0) {
+          e.dead = true;
+          FX.explode(b.x + e.ox, b.y + e.oy, 30, '#99ddff');
+          FX.addShake(10);
+          Sound.play('explode');
+          addFlashText('ESCORT DOWN', b.x + e.ox, b.y + e.oy, '#aaddff');
+        }
+        return 0;
+      }
+    }
+    return dmg;
+  },
+
+  move(b) {
+    b.bob += 0.024;
+    b.x += Math.sign(player.x - b.x) * Math.min(1.05, Math.abs(player.x - b.x));
+    b.x = litanyClamp(b.x, 104, W - 104);
+    b.y = b.targetY + Math.sin(b.bob) * 7;
+  },
+
+  think(b, ph) {
+    if (b.swap > 0) b.swap--;
+
+    // ---- escorts fly cover and shoot ---------------------------------------
+    let alive = 0;
+    for (let i = 0; i < b.escorts.length; i++) {
+      const e = b.escorts[i];
+      if (e.dead) continue;
+      alive++;
+      e.a += e.sp * (1 + ph * 0.16);
+      e.ox = Math.cos(e.a) * e.r;
+      e.oy = Math.sin(e.a) * e.r * 0.42;
+      e.fire--;
+      if (e.fire <= 0) {
+        e.fire = Math.max(70, 190 - ph * 24) + Math.floor(litanyRnd(frame + i) * 50);
+        bossAimed(b.x + e.ox, b.y + e.oy, [0], 1.0, 4);
+      }
+    }
+
+    // ---- delegate to the captured doctrine ----------------------------------
+    const sub = b.subs[b.lead];
+    const ran = armadaRunSub(b, sub, ph);
+    if (!ran) {
+      // Fallback: the ARMADA fights as itself — massed escort barrages.
+      if (b.salvo > 0) {
+        b.salvo--;
+        if (b.salvo % 7 === 0) {
+          for (let i = 0; i < b.escorts.length; i++) {
+            const e = b.escorts[i];
+            if (e.dead) continue;
+            bossShot(b.x + e.ox, b.y + e.oy, Math.PI / 2 + (litanyRnd(frame + i) - 0.5) * 0.7, 0.9, 5);
+          }
+        }
+      } else if (b.attackTimer >= Math.max(50, 110 - ph * 12)) {
+        b.attackTimer = 0;
+        const pick = Math.floor(litanyRnd(frame) * 3);
+        if (pick === 0) { b.salvo = 48; Sound.play('warning'); }
+        else if (pick === 1) { bossRing(b.x, b.y, 14 + ph * 2, 0.7, frame * 0.02, 5); Sound.play('hit'); }
+        else {
+          bossAimed(b.x, b.y + 30, [-0.35, -0.12, 0.12, 0.35], 1.1, 6);
+          if (enemies.length < 18) bossMinion(ph >= 3 ? 'bulwark' : 'elite', b.x, b.y + 40);
+          Sound.play('hit');
+        }
+      }
+    }
+
+    // ---- the command ship always adds its own fire, so the two doctrines
+    // ---- never feel like a straight replay of the original fight ----------
+    if (b.attackTimer % Math.max(38, 96 - ph * 12) === 0 && b.attackTimer > 0) {
+      bossAimed(b.x, b.y + 34, ph >= 3 ? [-0.28, 0, 0.28] : [0], 1.05, 5);
+    }
+    if (alive === 0 && frame % 240 === 0 && enemies.length < 16) {
+      bossMinion('lancer', b.x - 60, b.y + 40);
+      bossMinion('lancer', b.x + 60, b.y + 40);
+    }
+  },
+
+  paint(b) {
+    const accent = bossTint(b, '#7fd0ff', '#ffcf74', '#ff6a6a');
+
+    // ---- escorts (drawn around the command ship) ---------------------------
+    for (let i = 0; i < b.escorts.length; i++) {
+      const e = b.escorts[i];
+      if (e.dead) continue;
+      const behind = Math.sin(e.a) < 0;
+      ctx.save();
+      ctx.translate(e.ox, e.oy);
+      ctx.globalAlpha = behind ? 0.65 : 1;
+      const s = behind ? 0.85 : 1;
+      ctx.scale(s, s);
+      ctx.beginPath();
+      ctx.moveTo(0, 16); ctx.lineTo(-15, -6); ctx.lineTo(-6, -13);
+      ctx.lineTo(6, -13); ctx.lineTo(15, -6);
+      ctx.closePath();
+      ctx.fillStyle = '#2e3a4c';
+      ctx.fill();
+      ctx.strokeStyle = accent;
+      ctx.lineWidth = 1.8;
+      ctx.stroke();
+      const frac = e.hp / e.max;
+      ctx.fillStyle = frac > 0.5 ? '#8fe6a0' : (frac > 0.22 ? '#ffcc55' : '#ff5544');
+      ctx.fillRect(-14, -20, 28 * Math.max(0, frac), 2.5);
+      ctx.fillStyle = accent;
+      ctx.beginPath(); ctx.arc(0, 2, 3, 0, Math.PI * 2); ctx.fill();
+      ctx.restore();
+    }
+
+    // ---- command ship --------------------------------------------------------
+    ctx.beginPath();
+    ctx.moveTo(0, 46);
+    ctx.lineTo(-46, 16);
+    ctx.lineTo(-100, 6);
+    ctx.lineTo(-78, -22);
+    ctx.lineTo(-30, -34);
+    ctx.lineTo(30, -34);
+    ctx.lineTo(78, -22);
+    ctx.lineTo(100, 6);
+    ctx.lineTo(46, 16);
+    ctx.closePath();
+    const g = ctx.createLinearGradient(0, -34, 0, 46);
+    g.addColorStop(0, '#71809a');
+    g.addColorStop(0.55, '#333c4e');
+    g.addColorStop(1, '#101520');
+    ctx.fillStyle = g;
+    ctx.fill();
+    ctx.strokeStyle = accent;
+    ctx.lineWidth = 2.5;
+    ctx.stroke();
+    bossFlash(b);
+
+    // doctrine bars — two slots, the live one lit
+    for (let i = 0; i < 2; i++) {
+      const on = i === b.lead;
+      ctx.fillStyle = on ? accent : 'rgba(120,140,170,0.3)';
+      ctx.fillRect(-34 + i * 40, -28, 28, 6);
+      if (on && b.swap > 0) {
+        ctx.fillStyle = 'rgba(255,255,255,' + (b.swap / 40) + ')';
+        ctx.fillRect(-34 + i * 40, -28, 28, 6);
+      }
+    }
+    // fleet hardpoints
+    ctx.fillStyle = '#1b222e';
+    [-72, -46, 46, 72].forEach(function (x) { ctx.fillRect(x - 6, 2, 12, 16); });
+    ctx.fillStyle = accent;
+    [-72, -46, 46, 72].forEach(function (x, i) {
+      const p = 0.3 + 0.6 * Math.abs(Math.sin(frame * 0.08 + i));
+      ctx.globalAlpha = p;
+      ctx.fillRect(x - 4, 16, 8, 3);
+      ctx.globalAlpha = 1;
+    });
+    // bridge
+    ctx.beginPath();
+    ctx.ellipse(0, -12, 22, 11, 0, 0, Math.PI * 2);
+    ctx.fillStyle = '#0d1420';
+    ctx.fill();
+    ctx.strokeStyle = accent;
+    ctx.lineWidth = 2;
+    ctx.stroke();
+    ctx.fillStyle = 'rgba(255,240,200,' + (0.5 + 0.4 * Math.sin(frame * 0.11)) + ')';
+    for (let i = -2; i <= 2; i++) ctx.fillRect(i * 8 - 2, -14, 4, 4);
+    // prow lance
+    ctx.strokeStyle = accent;
+    ctx.lineWidth = 3;
+    ctx.beginPath(); ctx.moveTo(0, 46); ctx.lineTo(0, 60); ctx.stroke();
+  },
+
+  paintWorld(b) {
+    // formation lines, so it reads as a fleet rather than a sprite with dots
+    ctx.save();
+    ctx.strokeStyle = 'rgba(140,200,255,0.16)';
+    ctx.lineWidth = 1;
+    for (let i = 0; i < b.escorts.length; i++) {
+      const e = b.escorts[i];
+      if (e.dead) continue;
+      ctx.beginPath();
+      ctx.moveTo(b.x, b.y);
+      ctx.lineTo(b.x + e.ox, b.y + e.oy);
+      ctx.stroke();
+    }
+    ctx.restore();
+
+    // The captured doctrine's WORLD-space pass, and only that pass. Several
+    // source bosses hurt you from something they only draw here (the Widow's
+    // tether above all), so delegating think() without this would mean
+    // invisible damage. The hull is still drawn as the ARMADA's own.
+    const sub = b.subs && b.subs[b.lead];
+    if (!sub || sub.broken) return;
+    const def = BOSS[sub.key];
+    if (!def || !def.paintWorld) return;
+    ctx.save();
+    try { def.paintWorld(sub); }
+    catch (e) { sub.broken = true; }
+    ctx.restore();
+  },
+
+  title(b) {
+    let alive = 0;
+    for (let i = 0; i < b.escorts.length; i++) if (!b.escorts[i].dead) alive++;
+    const sub = b.subs[b.lead];
+    const name = sub ? (sub.broken ? 'ARMADA DOCTRINE' : sub.key.toUpperCase()) : 'ARMADA';
+    return 'ESCORTS ' + alive + '/' + b.escorts.length + ' — RUNNING: ' + name;
+  }
+};
+// ---- end boss pack: boss_d ----
+
 const BOSS_W = 112, BOSS_H = 54;
 
 function bossMaxHp(lv) {
