@@ -142,8 +142,8 @@ test('the purity scan would still catch a real reference (the scan is not vacuou
 // 1. Save migration
 // ---------------------------------------------------------------------------
 
-test('SAVE_VERSION is 4, as the spec requires', () => {
-  assert.equal(core.SAVE_VERSION, 4);
+test('SAVE_VERSION is 5, as the spec requires', () => {
+  assert.equal(core.SAVE_VERSION, 5);
 });
 
 test('a v1 save keeps its credits, ships and lifetime records', () => {
@@ -924,12 +924,12 @@ test('the ten legacy kinds are still resolvable — boss minions name them', () 
 // Ten bands of ten levels, each a wholly new set of ships, each one member
 // larger than the band below it.
 
-test('there are ten bands and they grow by exactly one ship each', () => {
-  assert.equal(core.ENEMY_BANDS.length, 10);
+test('there are twelve bands and they grow by exactly one ship each', () => {
+  assert.equal(core.ENEMY_BANDS.length, 12);
   core.ENEMY_BANDS.forEach((band, i) => {
     assert.equal(band.length, 5 + i, `band ${i} should hold ${5 + i} ships`);
   });
-  assert.equal(core.ENEMY_ROSTER.length, 95);
+  assert.equal(core.ENEMY_ROSTER.length, 126);
 });
 
 test('every ship id is unique across the whole roster', () => {
@@ -978,14 +978,16 @@ test('bandIndex swaps the roster every ten levels', () => {
   assert.equal(core.bandIndex(20), 1);
   assert.equal(core.bandIndex(91), 9);
   assert.equal(core.bandIndex(100), 9);
+  assert.equal(core.bandIndex(101), 10, 'THE GLASS REACH');
+  assert.equal(core.bandIndex(120), 11, 'THE LAST ORCHARD');
 });
 
 test('past level 100 the bands cycle rather than running out', () => {
   assert.equal(core.CYCLE_FROM, 4);
-  assert.equal(core.bandIndex(101), 4);
-  assert.equal(core.bandIndex(111), 5);
-  assert.equal(core.bandIndex(151), 9, 'the cycle runs up to the last band');
-  assert.equal(core.bandIndex(161), 4, 'and then wraps back to CYCLE_FROM');
+  assert.equal(core.bandIndex(121), 4, 'the cycle starts after the last band');
+  assert.equal(core.bandIndex(131), 5);
+  assert.equal(core.bandIndex(191), 11, 'the cycle runs up to the last band');
+  assert.equal(core.bandIndex(201), 4, 'and then wraps back to CYCLE_FROM');
   for (let level = 1; level < 5000; level += 7) {
     const b = core.bandIndex(level);
     assert.ok(b >= 0 && b < core.ENEMY_BANDS.length, `level ${level} -> band ${b}`);
@@ -1125,7 +1127,7 @@ test('enemyScale is monotonically non-decreasing', () => {
 });
 
 test('every meteorite class carries a payload, a weight and a behaviour', () => {
-  assert.equal(core.METEORS.length, 8);
+  assert.equal(core.METEORS.length, 13);
   const drops = ['scrap', 'shield', 'life', 'rage', 'freeze'];
   core.METEORS.forEach(m => {
     assert.ok(m.behaviour.length > 0, `${m.id} needs a behaviour`);
@@ -1134,12 +1136,12 @@ test('every meteorite class carries a payload, a weight and a behaviour', () => 
     assert.ok(m.weight > 0, `${m.id} can never be rolled`);
     assert.equal(m.col.length, 3, `${m.id} needs three hull colours`);
   });
-  assert.equal(new Set(core.METEORS.map(m => m.id)).size, 8, 'ids must be unique');
+  assert.equal(new Set(core.METEORS.map(m => m.id)).size, 13, 'ids must be unique');
 });
 
 test('meteorite classes phase in as you descend, cheapest first', () => {
   for (let i = 1; i < core.METEORS.length; i++) {
-    assert.ok(core.METEORS[i].from >= core.METEORS[i - 1].from, 'the table must be ordered by depth');
+    assert.ok(core.METEORS[i].from > core.METEORS[i - 1].from, 'the table must be ordered by depth');
     assert.ok(core.METEORS[i].hp > core.METEORS[i - 1].hp, 'and get tougher with it');
   }
   assert.equal(core.METEORS[0].from, 1, 'something must be available on level 1');
@@ -1171,7 +1173,7 @@ test('meteorsFor only ever offers classes the level has reached', () => {
   assert.deepEqual(core.meteorsFor(1).map(m => m.id), ['ice']);
   assert.deepEqual(core.meteorsFor(5).map(m => m.id), ['ice']);
   assert.deepEqual(core.meteorsFor(6).map(m => m.id), ['ice', 'iron']);
-  assert.equal(core.meteorsFor(1000).length, 8);
+  assert.equal(core.meteorsFor(1000).length, 13);
   assert.equal(core.meteorsFor(0).length, 0);
 });
 
@@ -1184,15 +1186,15 @@ test('meteorsFor only ever offers classes the level has reached', () => {
 // Mothership. The ORDER is also load-bearing -- both shield-mechanic fights
 // sit past level 100.
 const SPEC_BOSSES = [
-  [10, 'TRIAD', 6000, 3], [20, 'MAGNETAR', 31000, 3], [30, 'RUSTFALL', 82000, 3],
-  [40, 'THE LONG SILENCE', 162000, 4], [50, 'MIRRORGATE', 275000, 4],
-  [75, 'THE WIDOW', 721000, 4], [100, 'SEVEN ANGLES', 1400000, 5],
-  [150, 'HALO WARDEN', 3700000, 3], [200, 'SCRAPJAW TITAN', 7400000, 2],
-  [250, 'HIVE EMPRESS', 12600000, 4], [300, 'THE CARTOGRAPHER', 19500000, 4],
-  [350, 'NULLPOINT', 28100000, 4], [400, 'ASHEN CHOIRMASTER', 38600000, 5],
-  [500, 'THE THRESHOLD', 65600000, 5], [750, 'PALE HERALD', 171900000, 5],
-  [1000, 'IRON LITANY', 340500000, 6],
-  [2500, 'THE DREADED SCOURGE OF HUMANITY — WARR MOTHERSHIP', 3000000000, 7]
+  [10, 'MAGNETAR', 30000, 3], [20, 'RUSTFALL', 148000, 3], [30, 'TRIAD', 377000, 3],
+  [40, 'THE LONG SILENCE', 731000, 4], [50, 'MIRRORGATE', 1200000, 4],
+  [75, 'THE WIDOW', 3100000, 4], [100, 'PLASMA REVOLUTION', 6000000, 5],
+  [150, 'SEVEN ANGLES', 15300000, 5], [200, 'HALO WARDEN', 29700000, 3],
+  [250, 'SCRAPJAW TITAN', 49700000, 2], [300, 'HIVE EMPRESS', 75700000, 4],
+  [350, 'THE CARTOGRAPHER', 107900000, 4], [400, 'NULLPOINT', 146800000, 4],
+  [500, 'ASHEN CHOIRMASTER', 245400000, 5], [750, 'THE THRESHOLD', 624300000, 5],
+  [1000, 'PALE HERALD', 1210900000, 5], [1500, 'IRON LITANY', 3080800000, 6],
+  [2500, 'THE DREADED SCOURGE OF HUMANITY — WARR MOTHERSHIP', 10000000000, 7]
 ];
 
 // The two shield fights are HALO WARDEN's rotating ring and SCRAPJAW's
@@ -1200,8 +1202,8 @@ const SPEC_BOSSES = [
 // player has no build capable of breaking one quickly.
 const SHIELD_BOSSES = ['halowarden', 'scrapjaw'];
 
-test('there are seventeen hand-built bosses', () => {
-  assert.equal(core.BOSS_TABLE.length, 17);
+test('there are eighteen hand-built bosses', () => {
+  assert.equal(core.BOSS_TABLE.length, 18);
 });
 
 test('boss levels match the spec, in order and strictly increasing', () => {
@@ -1229,20 +1231,34 @@ test('boss HP is strictly increasing up the table', () => {
   }
 });
 
-test('the level-2500 Mothership is exactly 3,000,000,000 HP — the anchor of the curve', () => {
+test('the level-2500 Mothership is exactly 10,000,000,000 HP — the anchor of the curve', () => {
   const m = core.BOSS_TABLE.find(b => b.level === 2500);
-  assert.equal(m.hp, 3000000000);
+  assert.equal(m.hp, 10000000000);
   assert.equal(m.key, 'mothership');
   assert.equal(m.phases, 7);
 });
 
 // Raised from 1,000: a bare ship killed that in about a second and any real
 // build in a third of one, which is a speed bump rather than a boss.
-test('the first boss is exactly 6,000 HP — the other anchor', () => {
+test('the first boss is exactly 30,000 HP — the other anchor', () => {
   const first = core.BOSS_TABLE[0];
   assert.equal(first.level, 10);
-  assert.equal(first.hp, 6000);
-  assert.equal(core.BOSS_HP_BASE, 6000);
+  assert.equal(first.hp, 30000);
+  assert.equal(core.BOSS_HP_BASE, 30000);
+});
+
+// PLASMA REVOLUTION is the seventh fight, and the only one that restricts
+// where the player may stand.
+test('PLASMA REVOLUTION is the seventh boss', () => {
+  assert.equal(core.BOSS_TABLE[6].key, 'plasma');
+  assert.equal(core.BOSS_TABLE[6].name, 'PLASMA REVOLUTION');
+  assert.equal(core.BOSS_TABLE[6].level, 100);
+});
+
+test('TRIAD is the level-30 fight', () => {
+  const t = core.BOSS_TABLE.find(b => b.key === 'choir');
+  assert.equal(t.level, 30);
+  assert.equal(t.name, 'TRIAD');
 });
 
 test('boss health is strictly increasing down the table', () => {
@@ -1359,6 +1375,12 @@ test('bossFor returns the hand-built entry verbatim on table levels', () => {
 test('bossFor between 1100 and 2400 returns an ARMADA composite of two earlier bosses', () => {
   for (let level = 1100; level <= 2400; level += 100) {
     const b = core.bossFor(level);
+    // 1500 is IRON LITANY: a hand-built boss inside the ARMADA stretch, and
+    // the table has to win over the every-100 rule.
+    if (core.BOSS_TABLE.some(x => x.level === level)) {
+      assert.notEqual(b.key, 'armada', `level ${level} is a hand-built fight`);
+      continue;
+    }
     assert.equal(b.key, 'armada', `level ${level}`);
     assert.match(b.name, /^WARR ARMADA — /, `level ${level} name`);
     assert.ok(Array.isArray(b.composite) && b.composite.length === 2, `level ${level} composite`);
@@ -1381,7 +1403,7 @@ test('ARMADA HP sits between IRON LITANY and the Mothership', () => {
   for (let level = 1100; level <= 2400; level += 100) {
     const hp = core.bossFor(level).hp;
     assert.ok(hp > litany, `level ${level} is easier than IRON LITANY`);
-    assert.ok(hp < 3000000000, `level ${level} outguns the Mothership`);
+    assert.ok(hp < 10000000000, `level ${level} outguns the Mothership`);
   }
 });
 
@@ -1436,9 +1458,9 @@ test('fittedBossHp is monotonically non-decreasing', () => {
 });
 
 test('fittedBossHp lands near the hand-set numbers it was fitted from', () => {
-  assert.equal(core.BOSS_HP_BASE, 6000);
-  assert.equal(core.BOSS_HP_EXPONENT, 2.377);
-  [[100, 1400000], [500, 65600000], [1000, 340500000], [2500, 3000000000]].forEach(([level, actual]) => {
+  assert.equal(core.BOSS_HP_BASE, 30000);
+  assert.equal(core.BOSS_HP_EXPONENT, 2.303);
+  [[100, 6000000], [500, 245400000], [1000, 1210900000], [2500, 10000000000]].forEach(([level, actual]) => {
     const fit = core.fittedBossHp(level);
     assert.ok(Math.abs(fit - actual) / actual < 0.35,
       `fitted ${fit} is nowhere near the hand-set ${actual} at level ${level}`);
@@ -1481,18 +1503,17 @@ test('the ARMADA interval is 100 levels', () => {
 // 6. Shop cadence
 // ---------------------------------------------------------------------------
 
-test('shop cadence is 1/2/4/8/8/8 by voidbirth, exactly as the spec table says', () => {
-  assert.deepEqual(core.SHOP_EVERY, [1, 2, 4, 8, 8, 8]);
-  [1, 2, 4, 8, 8, 8].forEach((every, vb) => {
-    assert.equal(core.shopEvery(vb), every, `voidbirth ${vb}`);
-  });
+// The cadence debuff is gone. A voidbirth burns your whole build; making it
+// HARDER to rebuild one afterwards was a punishment for succeeding.
+test('a shop opens after every level, at every depth', () => {
+  for (let vb = 0; vb <= 8; vb++) {
+    assert.equal(core.shopEvery(vb), 1, `voidbirth ${vb}`);
+    for (let level = 1; level < 40; level++) {
+      assert.equal(core.shopOpensAfter(level, vb), true, `level ${level} vb ${vb}`);
+    }
+  }
 });
 
-test('shopEvery clamps rather than returning undefined for silly depths', () => {
-  assert.equal(core.shopEvery(-1), 1);
-  assert.equal(core.shopEvery(99), 8);
-  assert.equal(core.shopEvery(undefined), 1);
-});
 
 test('at voidbirth 0 the shop opens after every single level', () => {
   for (let level = 1; level <= 60; level++) {
@@ -1500,34 +1521,18 @@ test('at voidbirth 0 the shop opens after every single level', () => {
   }
 });
 
-test('at voidbirth 1 the shop opens on even levels', () => {
-  assert.equal(core.shopOpensAfter(2, 1), true);
-  assert.equal(core.shopOpensAfter(4, 1), true);
-  assert.equal(core.shopOpensAfter(3, 1), false);
-  assert.equal(core.shopOpensAfter(5, 1), false);
-});
 
-test('at voidbirth 2 the shop opens every fourth level', () => {
-  assert.equal(core.shopOpensAfter(4, 2), true);
-  assert.equal(core.shopOpensAfter(8, 2), true);
-  assert.equal(core.shopOpensAfter(5, 2), false);
-  assert.equal(core.shopOpensAfter(6, 2), false);
-  assert.equal(core.shopOpensAfter(7, 2), false);
-});
 
-test('at voidbirth 3 and above the shop opens every eighth level', () => {
-  [3, 4, 5].forEach(vb => {
-    assert.equal(core.shopOpensAfter(16, vb), true, `vb ${vb}`);
-    assert.equal(core.shopOpensAfter(17, vb), false, `vb ${vb}`);
-    assert.equal(core.shopOpensAfter(22, vb), false, `vb ${vb}`);
+
+test('a shop always opens before a boss', () => {
+  // Shops open every level now, so this is a weaker claim than it was — but
+  // it is the one that must never stop holding.
+  core.BOSS_TABLE.forEach(b => {
+    for (let vb = 0; vb <= 5; vb++) {
+      assert.equal(core.shopOpensAfter(b.level - 1, vb), true,
+        `no shop before ${b.name} at voidbirth ${vb}`);
+    }
   });
-});
-
-test('a shop always opens before a boss, whatever the cadence says', () => {
-  // Level 9 at voidbirth 3: 9 % 8 !== 0, but SCRAPJAW is next.
-  assert.equal(9 % core.shopEvery(3), 1, 'the cadence alone would keep this shop shut');
-  assert.equal(core.shopOpensAfter(9, 3), true,
-    'walking into a boss with no chance to prepare is a spike made of bookkeeping');
 });
 
 test('every boss in the game is preceded by a shop at every voidbirth depth', () => {
@@ -1735,7 +1740,7 @@ test('byId finds every catalogue entry and returns null for anything else', () =
 });
 
 test('LINEAGE_GROWTH is 2.2', () => {
-  assert.equal(core.LINEAGE_GROWTH, 2.2);
+  assert.equal(core.LINEAGE_GROWTH, 2.5);
 });
 
 test('effectiveTier climbs one rung per voidbirth', () => {
@@ -1847,7 +1852,7 @@ test('effectiveName never returns blank for any upgrade at any depth', () => {
 test('effectiveEffect scales numbers by LINEAGE_GROWTH^voidbirth', () => {
   const u = core.byId('heavy_rounds');
   for (let vb = 0; vb <= 5; vb++) {
-    const want = Math.round(0.06 * Math.pow(2.2, vb) * 100) / 100;
+    const want = Math.round(0.06 * Math.pow(core.LINEAGE_GROWTH, vb) * 100) / 100;
     assert.equal(core.effectiveEffect(u, vb).damageMul, want, `voidbirth ${vb}`);
   }
 });
@@ -1855,8 +1860,12 @@ test('effectiveEffect scales numbers by LINEAGE_GROWTH^voidbirth', () => {
 test('RELOAD COIL grows into a genuinely different upgrade, as the spec promises', () => {
   const u = core.byId('reload_coil');
   assert.equal(core.effectiveEffect(u, 0).fireRateMul, 0.05);
-  assert.equal(core.effectiveEffect(u, 1).fireRateMul, 0.11, 'the spec calls VB1 +11%');
-  assert.equal(core.effectiveEffect(u, 2).fireRateMul, 0.24, 'the spec calls VB2 +24%');
+  // LINEAGE_GROWTH is 2.5 now, raised alongside the boss curve so the deepest
+  // fights stay finishable. Asserted against the constant rather than a frozen
+  // literal, so the relationship is what is under test.
+  const g = core.LINEAGE_GROWTH;
+  assert.equal(core.effectiveEffect(u, 1).fireRateMul, Math.round(0.05 * g * 100) / 100);
+  assert.equal(core.effectiveEffect(u, 2).fireRateMul, Math.round(0.05 * g * g * 100) / 100);
   assert.ok(core.effectiveEffect(u, 4).fireRateMul > 1.0, 'by VB4 it is worth more than doubling');
 });
 
@@ -2202,7 +2211,7 @@ test('with no upgrades every counter is zero and every flag is false', () => {
     'dronesCopyGun', 'phaseDrive', 'twinCore', 'apotheosis', 'singularity',
     'upsideDown', 'mirrored']
     .forEach(k => assert.equal(s[k], false, `${k} should start false`));
-  ['magnetRange', 'dropBonus', 'contactDamage', 'slowField', 'revengeShots',
+  ['dropBonus', 'contactDamage', 'slowField', 'revengeShots',
     'startScrap', 'luck', 'overkill']
     .forEach(k => assert.equal(s[k], 0, `${k} should start at 0`));
 });
@@ -2249,7 +2258,7 @@ test('stat resolution scales with voidbirth depth', () => {
   const at0 = core.resolveStats(SHIP, [{ id: 'heavy_rounds', stacks: 1 }], 0, 1).damage;
   const at1 = core.resolveStats(SHIP, [{ id: 'heavy_rounds', stacks: 1 }], 1, 1).damage;
   const at3 = core.resolveStats(SHIP, [{ id: 'heavy_rounds', stacks: 1 }], 3, 1).damage;
-  close(at1, 10 * 1.13);
+  close(at1, 10 * (1 + 0.06 * core.LINEAGE_GROWTH));
   assert.ok(at1 > at0 && at3 > at1, 'the same upgrade must be worth more the deeper you are');
 });
 
@@ -2607,19 +2616,19 @@ test('TWIN CORE copies preserve the angles of the originals', () => {
 // ---------------------------------------------------------------------------
 
 test('creditsForScore floors at the divisor', () => {
-  assert.equal(core.CREDIT_DIVISOR, 300);
+  assert.equal(core.CREDIT_DIVISOR, 110);
   assert.equal(core.creditsForScore(0), 0);
-  assert.equal(core.creditsForScore(299), 0, 'a score below the divisor earns nothing');
-  assert.equal(core.creditsForScore(300), 1);
-  assert.equal(core.creditsForScore(599), 1);
-  assert.equal(core.creditsForScore(12400), 41);
+  assert.equal(core.creditsForScore(109), 0, 'a score below the divisor earns nothing');
+  assert.equal(core.creditsForScore(110), 1);
+  assert.equal(core.creditsForScore(219), 1);
+  assert.equal(core.creditsForScore(12400), 112);
   assert.equal(core.creditsForScore(-500), 0, 'a negative score never pays');
 });
 
 // Credits are the slowest tap in the game, and deliberately compressive: the
 // hangar is meant to take many runs to fill, not one very good one.
 test('credits compress hard above the knee', () => {
-  assert.equal(core.CREDIT_KNEE, 50000);
+  assert.equal(core.CREDIT_KNEE, 60000);
   const atKnee = core.creditsForScore(core.CREDIT_KNEE);
   assert.equal(atKnee, Math.floor(core.CREDIT_KNEE / core.CREDIT_DIVISOR),
     'the curve is continuous at the knee');
@@ -2904,4 +2913,100 @@ test('every registry entry supplies the two required hooks', () => {
     assert.match(body, /\bthink\s*[:(]/, `BOSS.${m[1]} has no think()`);
     assert.match(body, /\bpaint\s*[:(]/, `BOSS.${m[1]} has no paint()`);
   });
+});
+
+// ---------------------------------------------------------------------------
+// 15. Waypoints
+// ---------------------------------------------------------------------------
+// Reach a checkpoint five times and you may start there. Capped at level 40:
+// past that the run has to be earned, and each one hands you a starting build
+// because arriving at level 40 with nothing is a death sentence, not a
+// shortcut.
+
+test('there are four waypoints and none is past level 40', () => {
+  assert.equal(core.WAYPOINTS.length, 4);
+  assert.deepEqual(core.WAYPOINTS.map(w => w.level), [10, 20, 30, 40]);
+  core.WAYPOINTS.forEach(w => {
+    assert.ok(w.level <= core.MAX_WAYPOINT_LEVEL, `${w.level} is past the cap`);
+    assert.equal(w.needed, 5, 'five arrivals, as the brief says');
+  });
+});
+
+test('the grants are 5, 10, 20, 20', () => {
+  assert.deepEqual(core.WAYPOINTS.map(w => w.grants), [5, 10, 20, 20]);
+});
+
+test('every waypoint is a level a boss actually sits on', () => {
+  core.WAYPOINTS.forEach(w => {
+    assert.equal(core.isBossLevel(w.level), true, `level ${w.level}`);
+  });
+});
+
+test('a waypoint needs exactly five arrivals, and never regresses', () => {
+  let p = {};
+  for (let i = 1; i <= 4; i++) {
+    const r = core.recordWaypoint(p, 20);
+    p = r.progress;
+    assert.equal(r.unlocked, false, `arrival ${i} should not unlock it`);
+    assert.equal(core.waypointUnlocked(p, 20), false);
+  }
+  const fifth = core.recordWaypoint(p, 20);
+  assert.equal(fifth.unlocked, true, 'the fifth arrival unlocks it');
+  assert.equal(core.waypointUnlocked(fifth.progress, 20), true);
+});
+
+test('recording never mutates the map it was given', () => {
+  const before = { 10: 2 };
+  const r = core.recordWaypoint(before, 10);
+  assert.deepEqual(before, { 10: 2 }, 'the caller\'s map must be untouched');
+  assert.equal(r.progress[10], 3);
+});
+
+test('an already-unlocked waypoint stops counting', () => {
+  const p = { 10: 5 };
+  const r = core.recordWaypoint(p, 10);
+  assert.equal(r.unlocked, false, 'it was already unlocked; this is not a new unlock');
+  assert.equal(r.progress[10], 5, 'and the count does not run away');
+});
+
+test('a level with no waypoint records nothing', () => {
+  const r = core.recordWaypoint({}, 17);
+  assert.deepEqual(r.progress, {});
+  assert.equal(r.unlocked, false);
+  assert.equal(core.waypointAt(17), null);
+  assert.equal(core.waypointUnlocked({ 17: 99 }, 17), false);
+});
+
+test('unlockedWaypoints lists only what has been earned, in order', () => {
+  assert.deepEqual(core.unlockedWaypoints({}).map(w => w.level), []);
+  assert.deepEqual(core.unlockedWaypoints({ 20: 5, 40: 5 }).map(w => w.level), [20, 40]);
+  assert.deepEqual(core.unlockedWaypoints({ 20: 4 }).map(w => w.level), [], 'four is not five');
+});
+
+test('waypoint lookups survive a missing or junk progress map', () => {
+  [undefined, null, {}, 'nonsense', 42].forEach(bad => {
+    assert.equal(core.waypointUnlocked(bad, 10), false, JSON.stringify(bad));
+    assert.deepEqual(core.unlockedWaypoints(bad), []);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// 16. Level pacing
+// ---------------------------------------------------------------------------
+
+test('a level is half the length it used to be, and shorter with depth', () => {
+  assert.equal(core.BASE_LEVEL_SECONDS, 12, 'was 24');
+  assert.equal(core.levelSecondsAt(1), 12);
+  assert.ok(core.levelSecondsAt(100) < core.levelSecondsAt(1), 'later levels are shorter');
+  assert.equal(core.levelSecondsAt(2500), core.MIN_LEVEL_SECONDS, 'and it floors');
+});
+
+test('level length never increases and never hits zero', () => {
+  let prev = Infinity;
+  for (let lv = 1; lv <= 3000; lv += 3) {
+    const t = core.levelSecondsAt(lv);
+    assert.ok(t <= prev, `level ${lv} got longer`);
+    assert.ok(t >= core.MIN_LEVEL_SECONDS, `level ${lv} fell below the floor`);
+    prev = t;
+  }
 });

@@ -80,7 +80,9 @@ const fn = new Function(...keys, `${src}\n; return { get state(){return state}, 
   makeEnemy, ENEMY, drawSettings, drawBestiary, openSettings, openBestiary, bestiaryEntries, bestiaryColumns,
   settingsRows, hitPlayer, Save, player,
   clearBoard: () => { asteroids = []; enemyBullets = []; bullets = []; pickups = []; }, set scrap(v){scrap=v}, set enemies(v){enemies=v}, set lives(v){lives=v},
-  set voidbirths(v){voidbirths=v} };`);
+  set voidbirths(v){voidbirths=v}, spawnFormation, spawnBoss, startGame, levelUp,
+  setLaunch: (v) => { launchLevel = v; }, get launch(){ return launchLevel; },
+  get chargeShot(){return chargeShot}, set touchCharging(v){touchCharging=v} };`);
 
 let api, bootError = null;
 try {
@@ -150,11 +152,9 @@ check('a boss level spawns the right named boss', () => {
   api.levelUp();                       // -> level 10
   if (api.state === 'shop') api.closeShop();
   if (!api.boss) throw new Error('no boss at level 10');
-  // The level-10 slot is TRIAD now: both shield-mechanic fights (HALO WARDEN
-  // and SCRAPJAW) were moved past level 100 so nothing in the first hundred
-  // levels asks you to break a shield before you can build one.
-  if (api.boss.name !== 'TRIAD') throw new Error('boss is ' + api.boss.name);
-  if (api.boss.maxHp !== 6000) throw new Error('boss hp ' + api.boss.maxHp);
+  // TRIAD moved to level 30, so MAGNETAR opens the run now.
+  if (api.boss.name !== 'MAGNETAR') throw new Error('boss is ' + api.boss.name);
+  if (api.boss.maxHp !== 30000) throw new Error('boss hp ' + api.boss.maxHp);
 });
 
 check('900 frames of a boss fight without throwing', () => tick(900, 'boss'));
@@ -273,12 +273,17 @@ check('an enemy that gets past you is free — breaches were removed', () => {
   if (api.enemies.indexOf(e) !== -1) throw new Error('it should still be culled offscreen');
 
   // And the station-keeping half of the same rule: a drifter does not leave.
+  // Given absurd health on purpose — auto-fire was killing it, and a dead
+  // enemy leaves the array for a completely different reason, which made this
+  // check fail about one run in ten for the wrong cause.
   api.enemies = [];
   const d = api.makeEnemy('skiff');
   d.y = H_OF(api) * 0.75;
+  d.hp = d.maxHp = 1e12;
   api.enemies.push(d);
   tick(120, 'station keeping');
-  if (api.enemies.indexOf(d) === -1) throw new Error('a drifter sailed off the bottom');
+  if (d.dead) throw new Error('the station-keeping drifter died despite 1e12 HP');
+  if (d.y > H_OF(api)) throw new Error('a drifter sailed off the bottom: y=' + d.y);
 });
 
 check('killing something records it in the bestiary', () => {
@@ -346,4 +351,110 @@ check('every ship in the hangar launches a run without throwing', () => {
   }
   api.Save.data.unlocked = ['vanguard'];
   api.Save.data.selectedShip = 'vanguard';
+});
+
+// ---------------------------------------------------------------------------
+// The third pass
+// ---------------------------------------------------------------------------
+
+check('every formation shape spawns without throwing', () => {
+  api.state = 'play';
+  api.level = 45;
+  ['vee', 'line', 'wall', 'column', 'diamond', 'echelon', 'pincer', 'arrowhead'].forEach(shape => {
+    api.enemies = [];
+    let id;
+    try { id = api.spawnFormation(shape); } catch (e) {
+      throw new Error(`spawnFormation('${shape}') threw: ${e.message}`);
+    }
+    if (!api.enemies.length) throw new Error(`${shape} spawned nothing`);
+    // Everything must start inside the play area horizontally.
+    api.enemies.forEach(e => {
+      if (e.x < 0 || e.x > 480) throw new Error(`${shape} put a ship at x=${e.x}`);
+      if (e.formationId !== id) throw new Error(`${shape} did not tag its members`);
+    });
+    tick(120, shape);
+  });
+});
+
+check('PLASMA REVOLUTION runs its whole fight without throwing', () => {
+  api.state = 'play';
+  api.level = 100;
+  api.enemies = []; api.clearBoard();
+  api.spawnBoss(100);
+  let guard = 0;
+  while (api.boss && api.boss.entering && guard++ < 3000) api.update();
+  if (!api.boss) throw new Error('no boss');
+  if (api.boss.key !== 'plasma') throw new Error('key is ' + api.boss.key);
+  const maxHp = api.boss.maxHp;
+  // Drive it through every phase by hand, checking the lane invariant on
+  // EVERY frame rather than once at the end — "one lane is always standable"
+  // is the whole mechanic, and a single bad frame is a death.
+  let reached = 0;
+  for (let ph = 1; ph <= 5 && api.boss; ph++) {
+    for (let i = 0; i < 400 && api.boss; i++) {
+      // Held at this phase's health every frame: the harness out-damages a
+      // real player by a wide margin and would otherwise end the fight in
+      // phase one, testing a fifth of the boss. `dying` has to be cleared too
+      // — once a single frame's bullets take it to zero the death sequence
+      // latches, and topping the health back up does not cancel it.
+      api.boss.hp = maxHp * (1 - ph / 6);
+      api.boss.dying = 0;
+      // The harness pilot does not dodge, so it burns to death in the lanes —
+      // which is the mechanic working, not a bug. Kept alive so the FIGHT is
+      // what gets tested rather than how fast it can kill a stationary ship.
+      api.lives = 50;
+      api.update(); api.draw();
+      if (api.boss && api.boss.lanes) {
+        if (api.boss.lanes.length !== 5) throw new Error('lanes missing');
+        const burning = api.boss.lanes.filter(l => l.burn > 0).length;
+        if (burning >= 5) throw new Error('every lane was burning at once');
+      }
+    }
+    reached = ph;
+  }
+  if (reached < 3) throw new Error('only drove the fight to phase ' + reached + ' (boss=' + (api.boss ? api.boss.key + ' hp=' + api.boss.hp + ' dying=' + api.boss.dying + ' phase=' + api.boss.phase : 'null') + ' state=' + api.state + ')');
+});
+
+check('the lane lock keeps the player inside the arena', () => {
+  api.state = 'play';
+  api.level = 100;
+  api.enemies = []; api.clearBoard();
+  api.spawnBoss(100);
+  let g = 0;
+  while (api.boss && api.boss.entering && g++ < 3000) api.update();
+  if (!api.boss || api.boss.key !== 'plasma') throw new Error('no plasma boss to test');
+  for (let i = 0; i < 200; i++) {
+    api.update();
+    if (api.player.x < 0 || api.player.x > 480) {
+      throw new Error('the lane lock pushed the ship off-screen: ' + api.player.x);
+    }
+  }
+});
+
+check('a waypoint launch starts at the right level with a real build', () => {
+  api.Save.data.waypoints = { 10: 5, 20: 5, 30: 5, 40: 5 };
+  api.setLaunch(40);
+  api.startGame();
+  if (api.level !== 40) throw new Error('started at level ' + api.level);
+  const stacks = api.runUpgrades.reduce((a, o) => a + o.stacks, 0);
+  if (stacks < 20) throw new Error('only ' + stacks + ' upgrades granted, expected 20');
+  tick(300, 'waypoint run');
+});
+
+check('an unearned waypoint silently falls back to the start', () => {
+  api.Save.data.waypoints = {};
+  api.setLaunch(40);
+  api.startGame();
+  if (api.level !== 1) throw new Error('an unearned waypoint launched at ' + api.level);
+  api.setLaunch(1);
+});
+
+check('reaching a waypoint records it', () => {
+  api.Save.data.waypoints = {};
+  api.startGame();
+  api.level = 9;
+  api.levelUp();
+  if ((api.Save.data.waypoints[10] || 0) !== 1) {
+    throw new Error('arriving at level 10 was not recorded');
+  }
 });

@@ -64,8 +64,8 @@ const CFG = {
       blurb: 'The first hit each level costs you no scrap.' },
     { id: 'magpie',   name: 'MAGPIE',   cost: 7500,  lives: 3, speed: 6.2, fireMul: 0.95, hitW: 26, hitH: 34, spreadMul: 1.0, phase: false,
       hull: ['#dfe8ef', '#4a5a6b', '#12181f'], trim: '#9fd8ff',
-      magnetStart: 220,
-      blurb: 'Every drop on the board comes to you.' },
+      salvage: 0.5,
+      blurb: 'A hit costs you only half the scrap it should.' },
     { id: 'scavenger',name: 'SCAVENGER',cost: 9000,  lives: 3, speed: 5.8, fireMul: 1.10, hitW: 30, hitH: 38, spreadMul: 1.2, phase: false,
       hull: ['#ffe6b0', '#c8973a', '#4a3208'], trim: '#ffcc55',
       scrapBonus: 0.25, creditMul: 1.25,
@@ -117,7 +117,27 @@ const CFG = {
     // Bought with credits like anything else, but ONLY once the hangar has
     // seen a run reach the top of the ladder. It used to be purchasable the
     // moment you could afford it, which made "Unlocked by Voidbirth" a lie.
-    { id: 'ascendant',name: 'ASCENDANT',cost: 27000, lives: 4, speed: 6.4, fireMul: 0.62, hitW: 25, hitH: 33, spreadMul: 0.95, phase: true,
+    { id: 'kestrel',  name: 'KESTREL',  cost: 27000, lives: 3, speed: 7.2, fireMul: 0.78, hitW: 22, hitH: 30, spreadMul: 0.9, phase: false,
+      hull: ['#e8f6ff', '#4a8fb8', '#0c2a3d'], trim: '#7fd4ff',
+      chargeRate: 2.0,
+      blurb: 'Winds a charge shot up twice as fast as anything else.' },
+    { id: 'anvil',    name: 'ANVIL',    cost: 28500, lives: 6, speed: 3.9, fireMul: 1.35, hitW: 38, hitH: 44, spreadMul: 1.4, phase: false,
+      hull: ['#ffe8d0', '#a8642a', '#331a05'], trim: '#ffb060',
+      damageStart: 0.60,
+      blurb: 'Six lives and the heaviest gun in the hangar. Very slow.' },
+    { id: 'harbour',  name: 'HARBOUR',  cost: 30000, lives: 4, speed: 5.4, fireMul: 1.00, hitW: 29, hitH: 36, spreadMul: 1.0, phase: false,
+      hull: ['#d8ffe8', '#2f9e78', '#06331f'], trim: '#5fffc0',
+      dockStart: 2,
+      blurb: 'Starts every shop with two extra cards on the table.' },
+    { id: 'comet',    name: 'COMET',    cost: 31500, lives: 2, speed: 8.0, fireMul: 0.70, hitW: 19, hitH: 27, spreadMul: 0.8, phase: false,
+      hull: ['#fff0ff', '#b855d8', '#340a44'], trim: '#e79fff',
+      speedKills: 0.35,
+      blurb: 'Fastest hull built. Hits harder the faster it flies.' },
+    // Renamed from the old ASCENDANT hull — it is the fleet's flagship, and
+    // calling the ship
+    // and the mechanic by the same word made every sentence about either one
+    // ambiguous.
+    { id: 'ascendant',name: 'FLAGSHIP', cost: 33000, lives: 4, speed: 6.4, fireMul: 0.62, hitW: 25, hitH: 33, spreadMul: 0.95, phase: true,
       hull: ['#ffffff', '#ffcc22', '#7a3d00'], trim: '#ffee88',
       startVoidbirth: 2, requiresVoidbirth: 5,
       blurb: 'Begins two ascensions deep. Needs a run that reached Voidbirth V.' }
@@ -132,7 +152,7 @@ const CFG = {
 
 const RLCore = {};
 
-RLCore.SAVE_VERSION = 4;
+RLCore.SAVE_VERSION = 5;
 
 // Upgrading rather than resetting is the whole point: a loader that throws away
 // any save whose version does not match would wipe every player's credits and
@@ -196,7 +216,7 @@ RLCore.migrateSave = function (parsed, defaults) {
   const fresh = () => ({ data: Object.assign({}, defaults), ok: false });
   if (!parsed || typeof parsed !== 'object') return fresh();
   const v = parsed.version;
-  if ([1, 2, 3, RLCore.SAVE_VERSION].indexOf(v) === -1) return fresh();
+  if ([1, 2, 3, 4, RLCore.SAVE_VERSION].indexOf(v) === -1) return fresh();
 
   const data = Object.assign({}, defaults, parsed);
   data.version = RLCore.SAVE_VERSION;
@@ -219,6 +239,9 @@ RLCore.migrateSave = function (parsed, defaults) {
   if (!data.seenUpgrades || typeof data.seenUpgrades !== 'object') data.seenUpgrades = {};
   if (!data.seenEnemies || typeof data.seenEnemies !== 'object') data.seenEnemies = {};
   if (!data.seenMeteors || typeof data.seenMeteors !== 'object') data.seenMeteors = {};
+  // v5 adds waypoints. An older save starts with none reached, which is
+  // correct: it has no record of ever having got there.
+  if (!data.waypoints || typeof data.waypoints !== 'object') data.waypoints = {};
   data.settings = RLCore.normalizeSettings(data.settings);
   if (!data.tiersFound || typeof data.tiersFound !== 'object') data.tiersFound = {};
   if (!data.bossesKilled || typeof data.bossesKilled !== 'object') data.bossesKilled = {};
@@ -407,7 +430,7 @@ RLCore.ENEMY_HP = {
 // easier than level 100 — band 4's hulls weigh a fifth of band 9's. Past that
 // cliff a ship contributes only its RELATIVE weight inside its own band, and
 // the absolute number comes from a reference pinned to where band 9 left off.
-RLCore.DEEP_REFERENCE = 1400;    // band 9's lightest hull
+RLCore.DEEP_REFERENCE = 2000;    // the last band's lightest hull
 
 RLCore.deepBase = function (def, level) {
   const bd = Math.floor((Math.max(1, level || 1) - 1) / RLCore.BAND_SIZE);
@@ -809,10 +832,109 @@ RLCore.ENEMY_BANDS = [
     { id: 'sentence', name: 'WARR SENTENCE', band: 9, hp: 2100, points: 3360, r: 30, beh: 'lancer',
       art: { nose: 'chisel', body: 'spindle', wing: 'forward', pods: 1, eng: 2, fin: 1,
              cock: 'ringlight', arm: 'outrigger', c0: '#ffffff', c1: '#ffffff', c2: '#975d5d' } },
+  ],
+  // band 10 — levels 101-110 — THE GLASS REACH
+  [
+    { id: 'prism', name: 'PRISM', band: 10, hp: 1650, points: 2640, r: 26, beh: 'drifter',
+      art: { nose: 'chisel', body: 'diamond', wing: 'swept', pods: 1, eng: 2, fin: 1,
+             cock: 'none', arm: 'shoulder', c0: '#506180', c1: '#000000', c2: '#000000' } },
+    { id: 'facet', name: 'FACET', band: 10, hp: 4000, points: 6400, r: 44, beh: 'bulwark',
+      art: { nose: 'blunt', body: 'slab', wing: 'double', pods: 4, eng: 4, fin: 0,
+             cock: 'bubble', arm: 'shoulder', c0: '#627392', c1: '#000015', c2: '#000004' } },
+    { id: 'refract', name: 'REFRACTOR', band: 10, hp: 2400, points: 3840, r: 32, beh: 'blinker',
+      art: { nose: 'prow', body: 'ring', wing: 'ringwing', pods: 2, eng: 2, fin: 0,
+             cock: 'slit', arm: 'shoulder', c0: '#7485a4', c1: '#000039', c2: '#000011' } },
+    { id: 'splinter', name: 'SPLINTER', band: 10, hp: 1750, points: 2800, r: 22, beh: 'charger',
+      art: { nose: 'spike', body: 'spindle', wing: 'anhedral', pods: 0, eng: 1, fin: 2,
+             cock: 'twin', arm: 'shoulder', c0: '#8697b6', c1: '#00005c', c2: '#00001e' } },
+    { id: 'caustic', name: 'CAUSTIC', band: 10, hp: 2900, points: 4640, r: 34, beh: 'sniper',
+      art: { nose: 'chisel', body: 'trident', wing: 'straight', pods: 1, eng: 1, fin: 1,
+             cock: 'ringlight', arm: 'shoulder', c0: '#98a9c8', c1: '#111d7f', c2: '#00002b' } },
+    { id: 'halide', name: 'HALIDE', band: 10, hp: 3400, points: 5440, r: 38, beh: 'shielder',
+      art: { nose: 'dome', body: 'hex', wing: 'double', pods: 3, eng: 2, fin: 0,
+             cock: 'none', arm: 'none', c0: '#abbcdb', c1: '#3440a2', c2: '#020538' } },
+    { id: 'shiver', name: 'SHIVER', band: 10, hp: 1600, points: 2560, r: 18, beh: 'swarm',
+      art: { nose: 'wedge', body: 'tri', wing: 'none', pods: 0, eng: 1, fin: 0,
+             cock: 'bubble', arm: 'none', c0: '#bdceed', c1: '#5763c5', c2: '#0f1245' } },
+    { id: 'lensguard', name: 'LENSGUARD', band: 10, hp: 3100, points: 4960, r: 36, beh: 'turret',
+      art: { nose: 'dome', body: 'cross', wing: 'ringwing', pods: 3, eng: 2, fin: 1,
+             cock: 'slit', arm: 'none', c0: '#cfe0ff', c1: '#7a86e8', c2: '#1c1f52' } },
+    { id: 'sliverate', name: 'SLIVERATE', band: 10, hp: 2200, points: 3520, r: 28, beh: 'weaver',
+      art: { nose: 'fork', body: 'arrow', wing: 'forward', pods: 1, eng: 2, fin: 2,
+             cock: 'twin', arm: 'none', c0: '#e1f2ff', c1: '#9da9ff', c2: '#292c5f' } },
+    { id: 'clearcut', name: 'CLEARCUT', band: 10, hp: 2700, points: 4320, r: 30, beh: 'lancer',
+      art: { nose: 'spike', body: 'spindle', wing: 'straight', pods: 1, eng: 2, fin: 1,
+             cock: 'ringlight', arm: 'none', c0: '#f3ffff', c1: '#c0ccff', c2: '#36396c' } },
+    { id: 'scatter', name: 'SCATTERSHOT', band: 10, hp: 3600, points: 5760, r: 40, beh: 'splitter',
+      art: { nose: 'fork', body: 'trident', wing: 'double', pods: 2, eng: 3, fin: 1,
+             cock: 'none', arm: 'chin', c0: '#ffffff', c1: '#e3efff', c2: '#434679' } },
+    { id: 'mirage', name: 'MIRAGE', band: 10, hp: 2000, points: 3200, r: 24, beh: 'orbiter',
+      art: { nose: 'prow', body: 'delta', wing: 'swept', pods: 1, eng: 3, fin: 2,
+             cock: 'bubble', arm: 'chin', c0: '#ffffff', c1: '#ffffff', c2: '#505386' } },
+    { id: 'annealer', name: 'ANNEALER', band: 10, hp: 3800, points: 6080, r: 42, beh: 'harbinger',
+      art: { nose: 'blunt', body: 'diamond', wing: 'straight', pods: 4, eng: 3, fin: 1,
+             cock: 'slit', arm: 'chin', c0: '#ffffff', c1: '#ffffff', c2: '#5d6093' } },
+    { id: 'obsidice', name: 'OBSIDICE', band: 10, hp: 1900, points: 3040, r: 26, beh: 'mine',
+      art: { nose: 'dome', body: 'ring', wing: 'none', pods: 0, eng: 0, fin: 0,
+             cock: 'twin', arm: 'chin', c0: '#ffffff', c1: '#ffffff', c2: '#6a6da0' } },
+    { id: 'glassjaw', name: 'GLASSJAW', band: 10, hp: 2500, points: 4000, r: 30, beh: 'bomber',
+      art: { nose: 'dome', body: 'diamond', wing: 'anhedral', pods: 2, eng: 2, fin: 0,
+             cock: 'none', arm: 'dorsal', c0: '#ffffff', c1: '#ffffff', c2: '#777aad' } },
+  ],
+  // band 11 — levels 111-120 — THE LAST ORCHARD
+  [
+    { id: 'seedship', name: 'SEEDSHIP', band: 11, hp: 2100, points: 3360, r: 26, beh: 'drifter',
+      art: { nose: 'dome', body: 'delta', wing: 'swept', pods: 1, eng: 2, fin: 1,
+             cock: 'none', arm: 'dorsal', c0: '#775838', c1: '#000000', c2: '#000000' } },
+    { id: 'heartwood', name: 'HEARTWOOD', band: 11, hp: 5200, points: 8320, r: 46, beh: 'bulwark',
+      art: { nose: 'blunt', body: 'slab', wing: 'double', pods: 4, eng: 4, fin: 0,
+             cock: 'slit', arm: 'outrigger', c0: '#896a4a', c1: '#000000', c2: '#000000' } },
+    { id: 'thornrig', name: 'THORNRIG', band: 11, hp: 2300, points: 3680, r: 22, beh: 'charger',
+      art: { nose: 'spike', body: 'arrow', wing: 'anhedral', pods: 0, eng: 1, fin: 2,
+             cock: 'slit', arm: 'dorsal', c0: '#9b7c5c', c1: '#070000', c2: '#000000' } },
+    { id: 'grovewarden', name: 'GROVEWARDEN', band: 11, hp: 4400, points: 7040, r: 40, beh: 'shielder',
+      art: { nose: 'dome', body: 'hex', wing: 'ringwing', pods: 3, eng: 2, fin: 0,
+             cock: 'twin', arm: 'dorsal', c0: '#ad8e6e', c1: '#2a0000', c2: '#030000' } },
+    { id: 'bramble', name: 'BRAMBLE', band: 11, hp: 3000, points: 4800, r: 32, beh: 'weaver',
+      art: { nose: 'fork', body: 'cross', wing: 'forward', pods: 2, eng: 2, fin: 1,
+             cock: 'ringlight', arm: 'dorsal', c0: '#bfa080', c1: '#4d0b00', c2: '#100000' } },
+    { id: 'cropdust', name: 'CROPDUSTER', band: 11, hp: 2600, points: 4160, r: 28, beh: 'bomber',
+      art: { nose: 'dome', body: 'diamond', wing: 'anhedral', pods: 2, eng: 2, fin: 0,
+             cock: 'none', arm: 'outrigger', c0: '#d2b393', c1: '#702e00', c2: '#1d0400' } },
+    { id: 'reaperarm', name: 'REAPER ARM', band: 11, hp: 3700, points: 5920, r: 36, beh: 'splitter',
+      art: { nose: 'chisel', body: 'trident', wing: 'double', pods: 2, eng: 3, fin: 1,
+             cock: 'bubble', arm: 'outrigger', c0: '#e4c5a5', c1: '#935100', c2: '#2a1100' } },
+    { id: 'husk', name: 'HUSK', band: 11, hp: 2000, points: 3200, r: 18, beh: 'swarm',
+      art: { nose: 'wedge', body: 'tri', wing: 'none', pods: 0, eng: 1, fin: 0,
+             cock: 'slit', arm: 'outrigger', c0: '#f6d7b7', c1: '#b6741d', c2: '#371e02' } },
+    { id: 'siloclad', name: 'SILOCLAD', band: 11, hp: 4100, points: 6560, r: 38, beh: 'turret',
+      art: { nose: 'dome', body: 'cross', wing: 'straight', pods: 3, eng: 2, fin: 1,
+             cock: 'twin', arm: 'outrigger', c0: '#ffe9c9', c1: '#da9841', c2: '#442b0f' } },
+    { id: 'grafter', name: 'GRAFTER', band: 11, hp: 3300, points: 5280, r: 34, beh: 'harbinger',
+      art: { nose: 'blunt', body: 'hex', wing: 'double', pods: 4, eng: 3, fin: 0,
+             cock: 'ringlight', arm: 'outrigger', c0: '#fffbdb', c1: '#fdbb64', c2: '#51381c' } },
+    { id: 'windrow', name: 'WINDROW', band: 11, hp: 2800, points: 4480, r: 30, beh: 'lancer',
+      art: { nose: 'chisel', body: 'spindle', wing: 'forward', pods: 1, eng: 2, fin: 1,
+             cock: 'none', arm: 'shoulder', c0: '#ffffee', c1: '#ffde87', c2: '#5e4529' } },
+    { id: 'pollinate', name: 'POLLINATOR', band: 11, hp: 2400, points: 3840, r: 26, beh: 'orbiter',
+      art: { nose: 'prow', body: 'ring', wing: 'ringwing', pods: 1, eng: 3, fin: 2,
+             cock: 'bubble', arm: 'shoulder', c0: '#ffffff', c1: '#ffffaa', c2: '#6b5236' } },
+    { id: 'scytheling', name: 'SCYTHELING', band: 11, hp: 3100, points: 4960, r: 32, beh: 'sniper',
+      art: { nose: 'spike', body: 'spindle', wing: 'straight', pods: 1, eng: 1, fin: 1,
+             cock: 'slit', arm: 'shoulder', c0: '#ffffff', c1: '#ffffcd', c2: '#785f43' } },
+    { id: 'fallowmine', name: 'FALLOW MINE', band: 11, hp: 2200, points: 3520, r: 24, beh: 'mine',
+      art: { nose: 'dome', body: 'ring', wing: 'none', pods: 0, eng: 0, fin: 0,
+             cock: 'twin', arm: 'shoulder', c0: '#ffffff', c1: '#fffff0', c2: '#856c50' } },
+    { id: 'blightjaw', name: 'BLIGHTJAW', band: 11, hp: 3900, points: 6240, r: 40, beh: 'blinker',
+      art: { nose: 'fork', body: 'diamond', wing: 'swept', pods: 2, eng: 2, fin: 2,
+             cock: 'ringlight', arm: 'shoulder', c0: '#ffffff', c1: '#ffffff', c2: '#92795d' } },
+    { id: 'lastbough', name: 'THE LAST BOUGH', band: 11, hp: 4700, points: 7520, r: 44, beh: 'drifter',
+      art: { nose: 'prow', body: 'trident', wing: 'double', pods: 3, eng: 3, fin: 1,
+             cock: 'none', arm: 'none', c0: '#ffffff', c1: '#ffffff', c2: '#9f866a' } },
   ]
 ];
 
-RLCore.BAND_THEMES = ['OUTER DRIFT', 'THE BELT', 'RAIDER LANES', 'COALITION LINE', 'THE RIME', 'SOLAR EDGE', 'HIVE MACHINE', 'SIEGE TRAIN', 'QUIET FLEET', 'WARR VANGUARD'];
+RLCore.BAND_THEMES = ['OUTER DRIFT', 'THE BELT', 'RAIDER LANES', 'COALITION LINE', 'THE RIME', 'SOLAR EDGE', 'HIVE MACHINE', 'SIEGE TRAIN', 'QUIET FLEET', 'WARR VANGUARD', 'THE GLASS REACH', 'THE LAST ORCHARD'];
 
 RLCore.ENEMY_ROSTER = RLCore.ENEMY_BANDS.reduce((a, b) => a.concat(b), []);
 RLCore.ENEMY_BY_ID = {};
@@ -860,8 +982,14 @@ RLCore.METEORS = [
   { id: 'emberrock', name: 'EMBERROCK',         from:   40, hp:  420, weight:  4, behaviour: 'solid',   drop: 'rage',   drops: 1, col: ['#ffcf9a', '#e05a12', '#4d1400'] },
   { id: 'cryolith',  name: 'CRYOLITH',          from:   60, hp:  560, weight:  4, behaviour: 'shatter', drop: 'freeze', drops: 1, col: ['#d6fbff', '#3fd2d8', '#0a4348'] },
   { id: 'starglass', name: 'STARGLASS',         from:  120, hp: 1100, weight:  3, behaviour: 'refract', drop: 'life',   drops: 1, col: ['#ffffff', '#9fd0ff', '#20406b'] },
-  { id: 'shard',     name: 'SINGULARITY SHARD', from:  300, hp: 3200, weight:  2, behaviour: 'pull',    drop: 'scrap',  drops: 12, col: ['#e0c8ff', '#8a3fd0', '#210a3d'] }
+  { id: 'ferrocore', name: 'FERROCORE',         from:  180, hp: 1900, weight:  3, behaviour: 'solid',   drop: 'rage',   drops: 2, col: ['#ffd6c2', '#b5502a', '#3a1005'] },
+  { id: 'hollowice', name: 'HOLLOW ICE',        from:  240, hp: 2200, weight:  3, behaviour: 'shatter', drop: 'freeze', drops: 2, col: ['#e6ffff', '#5fd8e8', '#0a4a55'] },
+  { id: 'shard',     name: 'SINGULARITY SHARD', from:  300, hp: 3200, weight:  2, behaviour: 'pull',    drop: 'scrap',  drops: 12, col: ['#e0c8ff', '#8a3fd0', '#210a3d'] },
+  { id: 'bloomrock', name: 'BLOOMROCK',         from:  420, hp: 4200, weight:  2, behaviour: 'split',   drop: 'shield', drops: 2, col: ['#d8ffd0', '#4fc060', '#0c3d18'] },
+  { id: 'oathstone', name: 'OATHSTONE',         from:  600, hp: 6400, weight:  1, behaviour: 'refract', drop: 'life',   drops: 1, col: ['#fff6d0', '#e0c040', '#4d3a00'] },
+  { id: 'warrslag',  name: 'WARR SLAG',         from:  900, hp: 9000, weight:  2, behaviour: 'pull',    drop: 'scrap',  drops: 20, col: ['#ffc8c8', '#d03030', '#3d0808'] }
 ];
+
 
 RLCore.meteorsFor = function (level) {
   return RLCore.METEORS.filter(m => level >= m.from);
@@ -900,25 +1028,27 @@ RLCore.meteorHp = function (id, level) {
 // past level 100, so nothing in the first hundred levels asks you to solve a
 // shield before you have a build capable of breaking one.
 RLCore.BOSS_TABLE = [
-  { level:   10, key: 'choir',        name: 'TRIAD',               hp:        6000, phases: 3, mechanic: 'three hulls flying as one, sharing a single HP pool' },
-  { level:   20, key: 'magnetar',     name: 'MAGNETAR',            hp:        31000, phases: 3, mechanic: 'polarity flips between pulling you in and shoving you out' },
-  { level:   30, key: 'rustfall',     name: 'RUSTFALL',            hp:       82000, phases: 3, mechanic: 'sheds permanent wreckage that fills the arena' },
-  { level:   40, key: 'longsilence',  name: 'THE LONG SILENCE',    hp:       162000, phases: 4, mechanic: 'kills the lights; you fight by muzzle flash' },
-  { level:   50, key: 'voidgate',     name: 'MIRRORGATE',          hp:       275000, phases: 4, mechanic: 'spawns mirrors of your own ship running your build' },
-  { level:   75, key: 'widow',        name: 'THE WIDOW',           hp:      721000, phases: 4, mechanic: 'a tether that hurts while taut, so you must close in' },
-  { level:  100, key: 'sevenangles',  name: 'SEVEN ANGLES',        hp:      1400000, phases: 5, mechanic: 'a hull that gains a face, and a gun, each phase' },
-  { level:  150, key: 'halowarden',   name: 'HALO WARDEN',         hp:      3700000, phases: 3, mechanic: 'a rotating shield ring with a single gap' },
-  { level:  200, key: 'scrapjaw',     name: 'SCRAPJAW TITAN',      hp:     7400000, phases: 2, mechanic: 'armour plates absorb all damage until broken off' },
-  { level:  250, key: 'hiveempress',  name: 'HIVE EMPRESS',        hp:     12600000, phases: 4, mechanic: 'regenerates unless her brood is cleared' },
-  { level:  300, key: 'cartographer', name: 'THE CARTOGRAPHER',    hp:     19500000, phases: 4, mechanic: 'detonates telegraphed cells of a lit grid' },
-  { level:  350, key: 'nullpoint',    name: 'NULLPOINT',           hp:     28100000, phases: 4, mechanic: 'jams one of your upgrades at a time' },
-  { level:  400, key: 'choirmaster',  name: 'ASHEN CHOIRMASTER',   hp:    38600000, phases: 5, mechanic: 'every attack lands on an audible four-beat bar' },
-  { level:  500, key: 'threshold',    name: 'THE THRESHOLD',       hp:    65600000, phases: 5, mechanic: 'copies your build and fights you with it' },
-  { level:  750, key: 'paleherald',   name: 'PALE HERALD',         hp:    171900000, phases: 5, mechanic: 'destructible hangar bays guard the core' },
-  { level: 1000, key: 'ironlitany',   name: 'IRON LITANY',         hp:   340500000, phases: 6, mechanic: 'so large the fight scrolls sideways along its flank' },
-  { level: 2500, key: 'mothership',   name: 'THE DREADED SCOURGE OF HUMANITY — WARR MOTHERSHIP',
-                                                                   hp:  3000000000, phases: 7, mechanic: 'the Devouring: it eats the arena permanently, phase by phase' }
+  { level:   10, key: 'magnetar',    name: 'MAGNETAR',            hp:       30000, phases: 3, mechanic: 'polarity flips between pulling you in and shoving you out' },
+  { level:   20, key: 'rustfall',    name: 'RUSTFALL',            hp:      148000, phases: 3, mechanic: 'sheds permanent wreckage that fills the arena' },
+  { level:   30, key: 'choir',       name: 'TRIAD',               hp:      377000, phases: 3, mechanic: 'three separate ships flying as one, sharing a single HP pool' },
+  { level:   40, key: 'longsilence', name: 'THE LONG SILENCE',    hp:      731000, phases: 4, mechanic: 'kills the lights; you fight by muzzle flash' },
+  { level:   50, key: 'voidgate',    name: 'MIRRORGATE',          hp:     1200000, phases: 4, mechanic: 'spawns mirrors of your own ship running your build' },
+  { level:   75, key: 'widow',       name: 'THE WIDOW',           hp:     3100000, phases: 4, mechanic: 'a tether that hurts while taut, so you must close in' },
+  { level:  100, key: 'plasma',      name: 'PLASMA REVOLUTION',   hp:     6000000, phases: 5, mechanic: 'the arena becomes five lanes and it burns them one at a time' },
+  { level:  150, key: 'sevenangles', name: 'SEVEN ANGLES',        hp:    15300000, phases: 5, mechanic: 'a hull that gains a face, and a gun, each phase' },
+  { level:  200, key: 'halowarden',  name: 'HALO WARDEN',         hp:    29700000, phases: 3, mechanic: 'a rotating shield ring with a single gap' },
+  { level:  250, key: 'scrapjaw',    name: 'SCRAPJAW TITAN',      hp:    49700000, phases: 2, mechanic: 'armour plates absorb all damage until broken off' },
+  { level:  300, key: 'hiveempress', name: 'HIVE EMPRESS',        hp:    75700000, phases: 4, mechanic: 'regenerates unless her brood is cleared' },
+  { level:  350, key: 'cartographer',name: 'THE CARTOGRAPHER',    hp:   107900000, phases: 4, mechanic: 'detonates telegraphed cells of a lit grid' },
+  { level:  400, key: 'nullpoint',   name: 'NULLPOINT',           hp:   146800000, phases: 4, mechanic: 'jams one of your upgrades at a time' },
+  { level:  500, key: 'choirmaster', name: 'ASHEN CHOIRMASTER',   hp:   245400000, phases: 5, mechanic: 'every attack lands on an audible four-beat bar' },
+  { level:  750, key: 'threshold',   name: 'THE THRESHOLD',       hp:   624300000, phases: 5, mechanic: 'copies your build and fights you with it' },
+  { level: 1000, key: 'paleherald',  name: 'PALE HERALD',         hp:  1210900000, phases: 5, mechanic: 'destructible hangar bays guard the core' },
+  { level: 1500, key: 'ironlitany',  name: 'IRON LITANY',         hp:  3080800000, phases: 6, mechanic: 'so large the fight scrolls sideways along its flank' },
+  { level: 2500, key: 'mothership',  name: 'THE DREADED SCOURGE OF HUMANITY — WARR MOTHERSHIP',
+                                                                  hp: 10000000000, phases: 7, mechanic: 'the Devouring: it eats the arena permanently, phase by phase' }
 ];
+
 
 RLCore.ARMADA_INTERVAL = 100;
 
@@ -934,8 +1064,8 @@ RLCore.isBossLevel = function (level) {
 // Raised hard. The old 1,000 first boss died in about a second to a bare ship
 // and in a third of one to any real build, which is not a boss, it is a speed
 // bump. 6,000 at level 10 and 3,000,000,000 at level 2,500.
-RLCore.BOSS_HP_BASE = 6000;       // the level-10 boss, exactly
-RLCore.BOSS_HP_EXPONENT = 2.377;  // carries it to 3,000,000,000 at level 2500
+RLCore.BOSS_HP_BASE = 30000;      // the level-10 boss, exactly
+RLCore.BOSS_HP_EXPONENT = 2.303;  // carries it to 10,000,000,000 at level 2500
 
 RLCore.fittedBossHp = function (level) {
   const raw = RLCore.BOSS_HP_BASE * Math.pow(Math.max(1, level) / 10, RLCore.BOSS_HP_EXPONENT);
@@ -996,16 +1126,79 @@ RLCore.nextBossLevel = function (level) {
 };
 
 // ---------------------------------------------------------------------------
+// WAYPOINTS
+// ---------------------------------------------------------------------------
+// Reach a checkpoint five times and you may start there instead of level 1.
+// Deliberately capped at level 40: past that the run has to be earned, and a
+// waypoint at 200 would turn the whole first act into a menu. Each one hands
+// you a starting build, because arriving at level 40 with nothing is not a
+// shortcut, it is a death sentence.
+
+RLCore.WAYPOINTS = [
+  { level: 10, needed: 5, grants:  5 },
+  { level: 20, needed: 5, grants: 10 },
+  { level: 30, needed: 5, grants: 20 },
+  { level: 40, needed: 5, grants: 20 }
+];
+
+RLCore.MAX_WAYPOINT_LEVEL = 40;
+
+RLCore.waypointAt = function (level) {
+  return RLCore.WAYPOINTS.find(w => w.level === level) || null;
+};
+
+// How many times each checkpoint has been reached, given a progress map.
+RLCore.waypointUnlocked = function (progress, level) {
+  const w = RLCore.waypointAt(level);
+  if (!w) return false;
+  const seen = (progress && progress[level]) || 0;
+  return seen >= w.needed;
+};
+
+RLCore.unlockedWaypoints = function (progress) {
+  return RLCore.WAYPOINTS.filter(w => RLCore.waypointUnlocked(progress, w.level));
+};
+
+// Called on reaching a level: returns the updated progress map, and whether
+// this arrival was the one that unlocked it. Pure so the count can be tested
+// without a save file.
+RLCore.recordWaypoint = function (progress, level) {
+  const w = RLCore.waypointAt(level);
+  const next = Object.assign({}, progress);
+  if (!w) return { progress: next, unlocked: false };
+  const before = next[level] || 0;
+  if (before >= w.needed) return { progress: next, unlocked: false };
+  next[level] = before + 1;
+  return { progress: next, unlocked: next[level] >= w.needed };
+};
+
+// ---------------------------------------------------------------------------
 // SHOP CADENCE
 // ---------------------------------------------------------------------------
 // Shops thin out as you ascend, so each visit carries more weight. Scrap
 // income rises to match (see scrapForKill), keeping purchasing power per
 // level roughly flat rather than starving the deep game.
 
-RLCore.SHOP_EVERY = [1, 2, 4, 8, 8, 8];
+// Shops used to thin out with depth -- every 2nd level, then 4th, then 8th.
+// That was meant to make each visit weigh more; in practice a voidbirth burns
+// your whole build and then makes it HARDER to rebuild one, which is a
+// punishment for succeeding. Every level opens a shop now, at every depth.
+RLCore.shopEvery = function (vb) { return 1; };
 
-RLCore.shopEvery = function (vb) {
-  return RLCore.SHOP_EVERY[RLCore.clampVoidbirth(vb)];
+// ---------------------------------------------------------------------------
+// LEVEL LENGTH
+// ---------------------------------------------------------------------------
+// Halved, and then shortened further with depth. A level is a wave you clear,
+// not a timer you wait out, and at 24 seconds the walk to the next boss was
+// most of the runtime.
+RLCore.BASE_LEVEL_SECONDS = 12;
+RLCore.MIN_LEVEL_SECONDS = 7;
+RLCore.LEVEL_SHORTEN_PER = 0.02;   // seconds off per level
+
+RLCore.levelSecondsAt = function (level) {
+  const lv = Math.max(1, level || 1);
+  return Math.max(RLCore.MIN_LEVEL_SECONDS,
+    RLCore.BASE_LEVEL_SECONDS - (lv - 1) * RLCore.LEVEL_SHORTEN_PER);
 };
 
 // Called after clearing `level`. A shop always opens before a boss, whatever
@@ -1065,7 +1258,9 @@ RLCore.tierReachable = function (tierId, vb) {
 // twenty times as much. Upgrades without a `line` still climb and still scale;
 // they simply keep their name.
 
-RLCore.LINEAGE_GROWTH = 2.2;
+// Raised with the boss curve: at voidbirth V a lineage card is now ~98x its
+// base rather than ~52x, which is what keeps the deepest fights finishable.
+RLCore.LINEAGE_GROWTH = 2.5;
 
 RLCore.UPGRADES = [
   // --- COMMON -------------------------------------------------------------
@@ -1243,7 +1438,6 @@ RLCore.UPGRADES = [
   { id: 'c_bore_shim',   tier: 'COMMON', name: 'BORE SHIM',      desc: '-6% shot spread',            effect: { spreadMul: -0.06 } },
   { id: 'c_gas_check',   tier: 'COMMON', name: 'GAS CHECK',      desc: '+12% bullet speed',          effect: { bulletSpeedMul: 0.12 } },
   { id: 'c_lens_cut',    tier: 'COMMON', name: 'LENS CUT',       desc: '+2% crit chance',            effect: { critChance: 0.02 } },
-  { id: 'c_grabber',     tier: 'COMMON', name: 'GRABBER ARM',    desc: 'pickups drift to you',       effect: { magnetRange: 40 } },
   { id: 'c_pack_rat',    tier: 'COMMON', name: 'PACK RAT',       desc: '+10% scrap from kills',      effect: { scrapMul: 0.10 } },
   { id: 'c_ballast',     tier: 'COMMON', name: 'BALLAST DUMP',   desc: '+5% speed, -3% hitbox',      effect: { speedMul: 0.05, hitScaleMul: -0.03 } },
   { id: 'c_wide_round',  tier: 'COMMON', name: 'WIDE ROUNDS',    desc: '+15% bullet size',           effect: { bulletSize: 0.15 } },
@@ -1274,7 +1468,6 @@ RLCore.UPGRADES = [
   { id: 'u_slug_press',  tier: 'UNCOMMON', name: 'SLUG PRESS',    desc: '+14% damage',                effect: { damageMul: 0.14 } },
   { id: 'u_lift_body',   tier: 'UNCOMMON', name: 'LIFTING BODY',  desc: '+11% move speed',            effect: { speedMul: 0.11 } },
   { id: 'u_bore_lap',    tier: 'UNCOMMON', name: 'LAPPED BORE',   desc: '-14% shot spread',           effect: { spreadMul: -0.14 } },
-  { id: 'u_lodestone',   tier: 'UNCOMMON', name: 'LODESTONE',     desc: 'pickups fly to you',         effect: { magnetRange: 110 } },
   { id: 'u_prospector',  tier: 'UNCOMMON', name: 'PROSPECTOR',    desc: 'rocks drop two more things', effect: { dropBonus: 2 } },
   { id: 'u_ramplate',    tier: 'UNCOMMON', name: 'RAM PLATE',     desc: 'ramming does real damage',   effect: { contactDamage: 12 } },
   { id: 'u_bulk_round',  tier: 'UNCOMMON', name: 'BULK ROUNDS',   desc: '+35% bullet size',           effect: { bulletSize: 0.35 } },
@@ -1310,7 +1503,6 @@ RLCore.UPGRADES = [
   { id: 'r_spite',       tier: 'RARE', name: 'SPITE',           desc: 'taking a hit fires back hard', effect: { revengeShots: 18 } },
   { id: 'r_overkill',    tier: 'RARE', name: 'OVERKILL',        desc: 'excess damage splashes on',   effect: { overkill: 0.5 } },
   { id: 'r_bloodhound',  tier: 'EPIC', name: 'BLOODHOUND',      desc: 'shots steer toward enemies',  effect: { homing: 0.02 } },
-  { id: 'r_dragnet',     tier: 'RARE', name: 'DRAGNET',         desc: 'pickups come from anywhere',  effect: { magnetRange: 260 } },
   { id: 'r_core_sample', tier: 'RARE', name: 'CORE SAMPLE',     desc: 'rocks drop four more things', effect: { dropBonus: 4 } },
   { id: 'r_shipbreaker', tier: 'RARE', name: 'SHIPBREAKER',     desc: 'ramming is a weapon',         effect: { contactDamage: 45 } },
   { id: 'r_boulder',     tier: 'RARE', name: 'BOULDER ROUNDS',  desc: '+70% bullet size, -6% fire rate', effect: { bulletSize: 0.70, fireRateMul: -0.06 } },
@@ -1343,7 +1535,6 @@ RLCore.UPGRADES = [
   { id: 'e_wrecking',    tier: 'EPIC', name: 'WRECKING BALL',   desc: 'ramming kills, and you keep going', effect: { contactDamage: 140 } },
   { id: 'e_omen',        tier: 'EPIC', name: 'OMEN',            desc: 'the shop shows two better cards', effect: { luck: 2 } },
   { id: 'e_moon_round',  tier: 'EPIC', name: 'MOON ROUNDS',     desc: 'double bullet size',          effect: { bulletSize: 1.0 } },
-  { id: 'e_undertow',    tier: 'EPIC', name: 'UNDERTOW',        desc: 'every pickup on the board is yours', effect: { magnetRange: 900 } },
   { id: 'e_seam_split',  tier: 'EPIC', name: 'SEAM SPLITTER',   desc: 'shots pass through two enemies',effect: { pierce: 2 } },
   { id: 'e_grand_stake', tier: 'EPIC', name: 'GRAND STAKE',     desc: 'start each run rich',         effect: { startScrap: 9000 } },
   { id: 'e_hollow_pt',   tier: 'EPIC', name: 'HOLLOW POINT',    desc: '+20% crit, crits deal 3x',    effect: { critChance: 0.20, critMul: 1 } },
@@ -1709,7 +1900,6 @@ RLCore.resolveStats = function (ship, owned, vb, level) {
       : (sum('strips') > 0 ? RLCore.GREED_SCRAP_LOSS : RLCore.HIT_SCRAP_LOSS),
     enemyBulletMul: Math.max(0.25, 1 + sum('enemyBulletMul')),
     // --- the second catalogue's keys ---------------------------------------
-    magnetRange: max('magnetRange'),
     dropBonus: sum('dropBonus'),
     contactDamage: max('contactDamage'),
     bulletSize: 1 + sum('bulletSize'),
@@ -1744,9 +1934,12 @@ RLCore.resolveStats = function (ship, owned, vb, level) {
 // above the knee: a run that scores ten times as much does not earn ten times
 // the credits, because the point of the hangar is that it takes many runs to
 // fill rather than one very good one.
-RLCore.CREDIT_DIVISOR = 300;
-RLCore.CREDIT_KNEE = 50000;
-RLCore.CREDIT_TAIL = 900;
+// Loosened. The compression is still there so one very good run cannot buy the
+// whole hangar, but the rate itself was punishing: 23 ships at 1,500 apiece is
+// a lot of runs at the old divisor.
+RLCore.CREDIT_DIVISOR = 110;
+RLCore.CREDIT_KNEE = 60000;
+RLCore.CREDIT_TAIL = 320;
 
 RLCore.creditsForScore = function (score) {
   const s = Math.max(0, score || 0);
@@ -1850,7 +2043,7 @@ const Save = {
       credits: 0, unlocked: ['vanguard'], selectedShip: 'vanguard', muted: false,
       bestScrapSpent: 0, apexFound: 0,
       voidbirths: 0, bestVoidbirth: 0, tiersFound: {}, bossesKilled: {},
-      seenUpgrades: {}, seenEnemies: {}, seenMeteors: {},
+      seenUpgrades: {}, seenEnemies: {}, seenMeteors: {}, waypoints: {},
       settings: RLCore.defaultSettings()
     };
   },
@@ -2343,6 +2536,52 @@ const Music = {
       subLen: 3.6, leadLen: 2.6, swing: 0.0
     },
 
+    // 101–110. THE GLASS REACH. Brittle and bright: high bells over a thin
+    // sub, and a hat pattern that never quite settles.
+    glass: {
+      key: 'glass', name: 'THE GLASS REACH', bpm: 130, root: 61.74,
+      scale: [0, 2, 4, 6, 7, 9, 11],                 // lydian — deliberately airless
+      prog:  [0, 0, 2, -3],
+      kick:  'x...x.....x.x...',
+      snare: '....x.......x...',
+      clap:  '....x.......x..x',
+      hat:   'x.xx.xx.x.xx.xx.',
+      open:  '.......x.......x',
+      crashBars: 4,
+      bass:  [0, null, null, 2,  0, null, 4, null,  2, null, null, null,  0, null, 3, null],
+      lead:  [null, 6, null, null,  4, null, null, 2,  null, null, 6, null,  null, 4, null, null],
+      leadB: [9, null, 8, null,  6, null, 4, null,  null, 6, null, 8,  null, null, 9, null],
+      arp:   [0, 4, 6, 4, 2, 4, 6, 8, 6, 4, 2, 4, 6, 8, 6, 4],
+      arpWave: 'sine', arpGain: 0.17,
+      leadWave: 'triangle', bassWave: 'triangle',
+      padChord: [0, 2, 4, 6], padEveryBars: 2, padBars: 2, padWave: 'sawtooth', padDetune: 5,
+      mix: { sub: 0.46, bass: 0.34, pad: 0.36, lead: 0.32, drum: 0.42, arp: 0.34 },
+      subLen: 2.6, leadLen: 1.6, swing: 0.0
+    },
+
+    // 111–120. THE LAST ORCHARD. Warm and wrong: a folk lilt with the bottom
+    // of a war drum under it.
+    orchard: {
+      key: 'orchard', name: 'THE LAST ORCHARD', bpm: 118, root: 55,
+      scale: [0, 2, 3, 5, 7, 9, 10],                 // dorian
+      prog:  [0, -3, 0, 2],
+      kick:  'x..x..x...x.x..x',
+      snare: '....x.......x...',
+      clap:  '............x...',
+      hat:   'x.o.xo..x.o.xo..',
+      open:  '..............x.',
+      crashBars: 8,
+      bass:  [0, null, 2, null,  0, null, null, 4,  3, null, 2, null,  0, null, null, 5],
+      lead:  [4, null, null, 5,  null, 4, null, 2,  null, null, 3, null,  null, null, 4, null],
+      leadB: [7, null, 6, 5,  null, 4, null, null,  5, null, 4, null,  2, null, null, null],
+      arp:   [0, 2, 4, 2, null, 2, 4, 5, 4, 2, 0, 2, null, 4, 2, 0],
+      arpWave: 'triangle', arpGain: 0.15,
+      leadWave: 'square', bassWave: 'sawtooth',
+      padChord: [0, 2, 4], padEveryBars: 2, padBars: 2, padWave: 'sawtooth', padDetune: 9,
+      mix: { sub: 0.58, bass: 0.42, pad: 0.30, lead: 0.30, drum: 0.46, arp: 0.24 },
+      subLen: 3.0, leadLen: 2.2, swing: 0.0
+    },
+
     // 50–199. Four-on-the-floor spine with the bass pushed off the beat.
     belt: {
       key: 'belt', name: 'THE BELT', bpm: 124, root: 55,
@@ -2561,7 +2800,7 @@ const Music = {
   // the sky and the enemy roster. Past level 100 the bands cycle and the
   // music cycles with them — you are always somewhere, and somewhere always
   // sounds like itself.
-  BAND_TRACKS: ['drift', 'belt', 'raider', 'coalition', 'rime', 'deep', 'hive', 'siege', 'silence', 'war'],
+  BAND_TRACKS: ['drift', 'belt', 'raider', 'coalition', 'rime', 'deep', 'hive', 'siege', 'silence', 'war', 'glass', 'orchard'],
 
   _theme: function () {
     if (Music.boss) return Music.THEMES.boss;
@@ -4106,6 +4345,11 @@ function recomputeStats() {
   // pure core stays a function of (ship stats, upgrades, depth) and never has
   // to know about per-hull specials.
   if (ship.scrapBonus) stats.scrapMul += ship.scrapBonus;
+  // ANVIL carries the heaviest gun in the hangar as a flat hull bonus, and
+  // HARBOUR docks with a wider table. Applied after resolution so the pure
+  // core never has to know about individual hulls.
+  if (ship.damageStart) stats.damage *= (1 + ship.damageStart);
+  if (ship.dockStart) stats.shopSlots += ship.dockStart;
   player.speed = stats.speed;
   // Evasion Field shrinks the hitbox relative to the ship's base size.
   // Recomputed here (not applyShip) so it updates live whenever the build
@@ -4139,7 +4383,9 @@ const SKIES = [
   { name: 'HIVE MACHINE',   hues: [95, 85, 110],   back: '#040c04', star: [200, 255, 175], dust: 0.11, streak: 2 },
   { name: 'SIEGE TRAIN',    hues: [45, 35, 25],    back: '#0b0906', star: [235, 225, 200], dust: 0.09, streak: 1 },
   { name: 'QUIET FLEET',    hues: [265, 275, 250], back: '#07040d', star: [220, 205, 255], dust: 0.13, streak: 3 },
-  { name: 'WARR VANGUARD',  hues: [0, 350, 15],    back: '#0e0202', star: [255, 185, 185], dust: 0.16, streak: 2 }
+  { name: 'WARR VANGUARD',  hues: [0, 350, 15],    back: '#0e0202', star: [255, 185, 185], dust: 0.16, streak: 2 },
+  { name: 'THE GLASS REACH',hues: [230, 245, 215], back: '#04050f', star: [225, 235, 255], dust: 0.11, streak: 3 },
+  { name: 'THE LAST ORCHARD',hues: [30, 45, 20],   back: '#0d0803', star: [255, 230, 190], dust: 0.15, streak: 1 }
 ];
 
 function currentSky() {
@@ -4300,6 +4546,15 @@ function tryBuyShip() {
 }
 
 // Launch is only legal on a ship you own.
+// Steps through START and every waypoint that has actually been earned.
+function cycleLaunchPoint() {
+  const opts = [1].concat(RLCore.unlockedWaypoints(Save.data.waypoints).map(w => w.level));
+  if (opts.length < 2) return;
+  const i = opts.indexOf(launchLevel);
+  launchLevel = opts[(i + 1) % opts.length];
+  Sound.play('uiMove');
+}
+
 function tryLaunch() {
   if (!shipOwned(CFG.ships[selIndex].id)) return false;
   startGame();
@@ -4378,6 +4633,7 @@ document.addEventListener('keydown', e => {
     if (e.key === 'ArrowRight') cycleShip(1);
     if (e.key === 'b' || e.key === 'B') tryBuyShip();
     if (e.key === 'c' || e.key === 'C') openBestiary();
+    if (e.key === 'w' || e.key === 'W') cycleLaunchPoint();
     if (e.key === ' ' || e.key === 'Enter') tryLaunch();
   } else if (state === 'dead') {
     if (e.key === ' ' || e.key === 'Enter') state = 'start';
@@ -4424,6 +4680,7 @@ function handlePointer(p) {
   if (pointInRect(p, muteRect())) { toggleMute(); return true; }
   if (state === 'start') {
     if (pointInRect(p, SETTINGS_RECT)) { openSettings('start'); return true; }
+    if (pointInRect(p, { x: 60, y: 500, w: W - 120, h: 26 })) { cycleLaunchPoint(); return true; }
     if (pointInRect(p, BESTIARY_RECT)) { openBestiary(); return true; }
   }
   if (state === 'shop') {
@@ -4537,10 +4794,16 @@ function applyShip(def) {
   // otherwise have its bonus wiped out by that assignment.
 }
 
+// Which waypoint the hangar is set to launch from. 1 means the beginning.
+let launchLevel = 1;
+
 function startGame() {
   const ship = currentShip();
   state = 'play';
-  score = 0; level = 1; frame = 0; runKills = 0;
+  score = 0; frame = 0; runKills = 0;
+  // Launching from a waypoint you have earned. Anything not actually unlocked
+  // falls back to the start rather than being trusted.
+  level = RLCore.waypointUnlocked(Save.data.waypoints, launchLevel) ? launchLevel : 1;
   player.x = W/2; player.y = H - 120; player.invincible = 0; player.shieldCharges = 0; player.shieldRegenTimer = 0; player.trail = [];
   player.phaseCharge = 0; player.phaseDriveTimer = 0;
   applyShip(ship);
@@ -4580,6 +4843,23 @@ function startGame() {
       recomputeStats();
     }
   }
+  // A waypoint hands you a starting build. Arriving at level 40 with nothing
+  // is not a shortcut, it is a death sentence — so the deeper the checkpoint,
+  // the more it gives you.
+  const wp = RLCore.waypointAt(level);
+  if (wp && level > 1) {
+    for (let i = 0; i < wp.grants; i++) {
+      const u = RLCore.rollSlot(level, voidbirths, runUpgrades, Math.random, []);
+      if (!u) break;
+      const have = runUpgrades.find(o => o.id === u.id);
+      if (have) have.stacks++; else runUpgrades.push({ id: u.id, stacks: 1 });
+      noteUpgradeSeen(u.id, RLCore.effectiveTier(u, voidbirths));
+    }
+    runUpgradesVersion++;
+    recomputeStats();
+    addFlashText('WAYPOINT ' + level + ' — ' + wp.grants + ' UPGRADES', W/2, H/2, '#ffdd55');
+  }
+
   lives += stats.extraLives;
   player.shieldCharges = stats.shieldCharges;
   // BULWARK comes out of the gate armoured.
@@ -4611,6 +4891,20 @@ function levelUp() {
   scrap += clearPay;
   const cleared = level;
   levelTimer = 0; level++;
+  // Arriving at a checkpoint is what counts, not clearing it. Five arrivals
+  // and you may start there next time.
+  if (RLCore.waypointAt(level)) {
+    const r = RLCore.recordWaypoint(Save.data.waypoints, level);
+    Save.data.waypoints = r.progress;
+    ledgerDirty = true;
+    if (r.unlocked) {
+      addFlashText('WAYPOINT ' + level + ' UNLOCKED', W/2, H/2 - 40, '#ffdd55');
+      Sound.play('apex');
+    } else {
+      const need = RLCore.waypointAt(level).needed - (r.progress[level] || 0);
+      addFlashText('WAYPOINT ' + level + ' — ' + need + ' MORE', W/2, H/2 - 40, '#8fb4c8');
+    }
+  }
   Music.setIntensity(level);
   const shipNow = currentShip();
   if (player.canPhase) player.phaseReady = true;   // Phantom recharges each level
@@ -5652,6 +5946,150 @@ SHIP_ART.lottery = function (c0, c1, c2, trim) {
   ctx.fillStyle = c0; ctx.fillRect(-4, 16, 3, 6); ctx.fillRect(1, 16, 3, 6);
 };
 
+// KESTREL — a fast interceptor built around a charge coil: twin capacitor rings
+// either side of a narrow spine, forward-swept wings.
+SHIP_ART.kestrel = function (c0, c1, c2, trim) {
+  ctx.beginPath(); ctx.moveTo(-6, 6); ctx.lineTo(-20, -8); ctx.lineTo(-19, 0); ctx.lineTo(-6, 12); ctx.closePath();
+  ctx.fillStyle = c2; ctx.fill(); ctx.strokeStyle = trim; ctx.lineWidth = 1.2; ctx.stroke();
+  ctx.beginPath(); ctx.moveTo(6, 6); ctx.lineTo(20, -8); ctx.lineTo(19, 0); ctx.lineTo(6, 12); ctx.closePath();
+  ctx.fill(); ctx.stroke();
+
+  // The coils — the reason it charges faster than anything else.
+  ctx.strokeStyle = trim; ctx.lineWidth = 2;
+  ctx.beginPath(); ctx.arc(-10, -4, 5, 0, Math.PI * 2); ctx.stroke();
+  ctx.beginPath(); ctx.arc(10, -4, 5, 0, Math.PI * 2); ctx.stroke();
+
+  ctx.beginPath();
+  ctx.moveTo(0, -23); ctx.lineTo(5, -8); ctx.lineTo(7, 8);
+  ctx.lineTo(4, 18); ctx.lineTo(-4, 18); ctx.lineTo(-7, 8); ctx.lineTo(-5, -8);
+  ctx.closePath();
+  const g = ctx.createLinearGradient(0, -23, 0, 18);
+  g.addColorStop(0, c0); g.addColorStop(0.5, c1); g.addColorStop(1, c2);
+  ctx.fillStyle = g; ctx.fill();
+  ctx.strokeStyle = trim; ctx.lineWidth = 1.5; ctx.stroke();
+
+  ctx.beginPath(); ctx.ellipse(0, -9, 3, 5, 0, 0, Math.PI * 2);
+  const cg = ctx.createRadialGradient(0, -10, 1, 0, -9, 5);
+  cg.addColorStop(0, '#ffffff'); cg.addColorStop(1, c2);
+  ctx.fillStyle = cg; ctx.fill();
+
+  ctx.fillStyle = c0; ctx.fillRect(-3, 16, 2.5, 6); ctx.fillRect(0.5, 16, 2.5, 6);
+};
+
+// ANVIL — the heaviest hull in the hangar. Squat, wide, blunt, with a cannon
+// block filling most of the nose and four engine bells crammed at the back.
+SHIP_ART.anvil = function (c0, c1, c2, trim) {
+  ctx.beginPath(); ctx.moveTo(-12, -2); ctx.lineTo(-27, 6); ctx.lineTo(-26, 16); ctx.lineTo(-12, 17); ctx.closePath();
+  ctx.fillStyle = c2; ctx.fill(); ctx.strokeStyle = trim; ctx.lineWidth = 1.3; ctx.stroke();
+  ctx.beginPath(); ctx.moveTo(12, -2); ctx.lineTo(27, 6); ctx.lineTo(26, 16); ctx.lineTo(12, 17); ctx.closePath();
+  ctx.fill(); ctx.stroke();
+
+  ctx.beginPath();
+  ctx.moveTo(-9, -20); ctx.lineTo(9, -20); ctx.lineTo(15, -6);
+  ctx.lineTo(14, 18); ctx.lineTo(-14, 18); ctx.lineTo(-15, -6);
+  ctx.closePath();
+  const g = ctx.createLinearGradient(0, -20, 0, 18);
+  g.addColorStop(0, c0); g.addColorStop(0.45, c1); g.addColorStop(1, c2);
+  ctx.fillStyle = g; ctx.fill();
+  ctx.strokeStyle = trim; ctx.lineWidth = 2.2; ctx.stroke();
+
+  // The cannon block.
+  ctx.fillStyle = c2;
+  ctx.fillRect(-11, -26, 22, 9);
+  ctx.strokeStyle = trim; ctx.lineWidth = 1.4;
+  ctx.strokeRect(-11, -26, 22, 9);
+  ctx.fillStyle = trim;
+  ctx.fillRect(-8, -29, 5, 4); ctx.fillRect(3, -29, 5, 4);
+
+  // Armour banding.
+  ctx.strokeStyle = c2; ctx.lineWidth = 1;
+  ctx.beginPath(); ctx.moveTo(-14, 2); ctx.lineTo(14, 2); ctx.stroke();
+  ctx.beginPath(); ctx.moveTo(-14, 9); ctx.lineTo(14, 9); ctx.stroke();
+
+  ctx.beginPath(); ctx.ellipse(0, -10, 4, 4.5, 0, 0, Math.PI * 2);
+  ctx.fillStyle = 'rgba(255,255,255,0.85)'; ctx.fill();
+
+  ctx.fillStyle = c2;
+  [-9, -3, 3, 9].forEach(x => ctx.fillRect(x - 2, 16, 4, 6));
+  ctx.strokeStyle = trim; ctx.lineWidth = 0.8;
+  [-9, -3, 3, 9].forEach(x => ctx.strokeRect(x - 2, 16, 4, 6));
+};
+
+// HARBOUR — a trader escort. Broad flat deck, cargo clamps down each flank,
+// a small cockpit set well forward.
+SHIP_ART.harbour = function (c0, c1, c2, trim) {
+  ctx.beginPath();
+  ctx.moveTo(0, -8); ctx.lineTo(24, 8); ctx.lineTo(20, 17);
+  ctx.lineTo(-20, 17); ctx.lineTo(-24, 8);
+  ctx.closePath();
+  ctx.fillStyle = c2; ctx.fill(); ctx.strokeStyle = trim; ctx.lineWidth = 1.3; ctx.stroke();
+
+  ctx.beginPath();
+  ctx.moveTo(0, -22); ctx.lineTo(8, -10); ctx.lineTo(9, 6);
+  ctx.lineTo(6, 18); ctx.lineTo(-6, 18); ctx.lineTo(-9, 6); ctx.lineTo(-8, -10);
+  ctx.closePath();
+  const g = ctx.createLinearGradient(0, -22, 0, 18);
+  g.addColorStop(0, c0); g.addColorStop(0.5, c1); g.addColorStop(1, c2);
+  ctx.fillStyle = g; ctx.fill();
+  ctx.strokeStyle = trim; ctx.lineWidth = 1.6; ctx.stroke();
+
+  // Cargo clamps — three a side, the thing that says "this ship carries".
+  ctx.fillStyle = c1;
+  [-1, 1].forEach(side => {
+    [2, 8, 14].forEach(y => {
+      ctx.fillRect(side * 11 - 2.5, y, 5, 4);
+      ctx.strokeStyle = trim; ctx.lineWidth = 0.8;
+      ctx.strokeRect(side * 11 - 2.5, y, 5, 4);
+    });
+  });
+
+  ctx.beginPath(); ctx.ellipse(0, -11, 3.4, 5, 0, 0, Math.PI * 2);
+  const cg = ctx.createRadialGradient(0, -12, 1, 0, -11, 5);
+  cg.addColorStop(0, '#ffffff'); cg.addColorStop(1, c2);
+  ctx.fillStyle = cg; ctx.fill();
+
+  ctx.fillStyle = c0;
+  ctx.fillRect(-16, 16, 5, 5); ctx.fillRect(11, 16, 5, 5);
+  ctx.fillRect(-3, 17, 6, 5);
+};
+
+// COMET — almost all engine. A needle of a fuselage trailing three huge bells,
+// with a bright leading edge and swept-back stabilisers.
+SHIP_ART.comet = function (c0, c1, c2, trim) {
+  ctx.beginPath(); ctx.moveTo(-4, 2); ctx.lineTo(-17, 18); ctx.lineTo(-5, 14); ctx.closePath();
+  ctx.fillStyle = c1; ctx.fill(); ctx.strokeStyle = trim; ctx.lineWidth = 1; ctx.stroke();
+  ctx.beginPath(); ctx.moveTo(4, 2); ctx.lineTo(17, 18); ctx.lineTo(5, 14); ctx.closePath();
+  ctx.fill(); ctx.stroke();
+
+  ctx.beginPath();
+  ctx.moveTo(0, -25); ctx.lineTo(4, -10); ctx.lineTo(6, 6);
+  ctx.lineTo(5, 16); ctx.lineTo(-5, 16); ctx.lineTo(-6, 6); ctx.lineTo(-4, -10);
+  ctx.closePath();
+  const g = ctx.createLinearGradient(0, -25, 0, 16);
+  g.addColorStop(0, '#ffffff'); g.addColorStop(0.3, c0); g.addColorStop(0.7, c1); g.addColorStop(1, c2);
+  ctx.fillStyle = g; ctx.fill();
+  ctx.strokeStyle = trim; ctx.lineWidth = 1.5; ctx.stroke();
+
+  // Three oversized bells — the whole point of the hull.
+  ctx.fillStyle = c2;
+  [-6, 0, 6].forEach(x => {
+    ctx.beginPath();
+    ctx.moveTo(x - 3.5, 14); ctx.lineTo(x + 3.5, 14);
+    ctx.lineTo(x + 5, 23); ctx.lineTo(x - 5, 23);
+    ctx.closePath(); ctx.fill();
+    ctx.strokeStyle = trim; ctx.lineWidth = 1; ctx.stroke();
+  });
+
+  ctx.beginPath(); ctx.ellipse(0, -13, 2.6, 4.5, 0, 0, Math.PI * 2);
+  ctx.fillStyle = 'rgba(255,255,255,0.9)'; ctx.fill();
+
+  // A bright leading edge, because it is the fastest thing in the hangar.
+  ctx.strokeStyle = '#ffffff'; ctx.lineWidth = 1.2; ctx.globalAlpha = 0.7;
+  ctx.beginPath(); ctx.moveTo(0, -25); ctx.lineTo(-4, -10); ctx.stroke();
+  ctx.beginPath(); ctx.moveTo(0, -25); ctx.lineTo(4, -10); ctx.stroke();
+  ctx.globalAlpha = 1;
+};
+
 function drawShip(x, y, invincible, shield, t, muzzle, shipDef) {
   const def = shipDef || currentShip();
   const [c0, c1, c2] = def.hull;
@@ -6351,22 +6789,18 @@ function spawnPickup(x, y, kind, value) {
   });
 }
 
-// Scrap is ALWAYS collected — it is income, not a skill check, and making it
-// depend on an upgrade meant an ascension (which burns every upgrade) silently
-// broke your ability to pick your own money up. Everything else still needs a
-// magnet, so LODESTONE and MAGPIE's hull keep a job.
-const SCRAP_AUTO_RANGE = 2000;
+// EVERYTHING is collected, always. Collection was never a skill — it was a tax
+// on not owning a particular upgrade — and once scrap auto-collected, a card or
+// a hull that improved collection was selling you something you already had.
+// The four collector cards and MAGPIE's magnet hook went with this.
+const AUTO_COLLECT_RANGE = 2000;
 
-function pickupRange(kind) {
-  if (kind === 'scrap') return SCRAP_AUTO_RANGE;
-  const ship = currentShip();
-  return Math.max(stats ? stats.magnetRange : 0, ship.magnetStart || 0) + 26;
-}
+function pickupRange() { return AUTO_COLLECT_RANGE; }
 
 function updatePickups() {
   pickups.forEach(p => {
     if (p.taken) return;
-    const range = pickupRange(p.kind);
+    const range = pickupRange();
     const dx = player.x - p.x, dy = player.y - p.y;
     const d2 = dx*dx + dy*dy;
     if (d2 < range * range) {
@@ -6998,6 +7432,308 @@ BOSS.halowarden = {
 // faster and angrier — so the order and timing are the puzzle, and burning
 // one down early is a real (punishable) choice.
 // ---------------------------------------------------------------------------
+// ===== PLASMA REVOLUTION (level 100) =====
+// The arena stops being open space and becomes FIVE LANES. You are locked to a
+// lane and hop between them; the boss burns lanes out one at a time, so the
+// fight is a moving question of "which strip of floor is still floor".
+//
+// Nothing else in the roster restricts where you can stand, which is the whole
+// reason this one exists.
+
+const PLASMA_LANES = 5;
+const PLASMA_LANE_W = W / PLASMA_LANES;
+
+function plasmaLaneX(i) { return PLASMA_LANE_W * (i + 0.5); }
+
+// Which lane a world x sits in.
+function plasmaLaneAt(x) {
+  return Math.max(0, Math.min(PLASMA_LANES - 1, Math.floor(x / PLASMA_LANE_W)));
+}
+
+// A lane is safe unless it is fully burning. Charging lanes are a warning,
+// not damage — the telegraph has to be survivable or lane-locking is a trap.
+function plasmaLaneState(b, i) {
+  const l = b.lanes[i];
+  if (l.burn > 0) return 'burning';
+  if (l.charge > 0) return 'charging';
+  return 'clear';
+}
+
+BOSS.plasma = {
+  w: 190, h: 96,
+
+  init(b) {
+    b.lanes = Array.from({ length: PLASMA_LANES }, () => ({ charge: 0, burn: 0, heat: 0 }));
+    b.lane = 2;                  // the boss sits over a lane too, and moves between them
+    b.laneTimer = 90;
+    b.cycle = 0;
+    b.ringSpin = 0;
+    b.coilPhase = 0;
+    // The player is snapped into the lane grid for the duration and released
+    // on death. Stored so the release is exact rather than approximate.
+    b.playerLane = plasmaLaneAt(player.x);
+    b.lockPlayer = true;
+  },
+
+  onPhase(b, ph) {
+    // Each phase burns more lanes at once and burns them for longer.
+    b.laneTimer = Math.max(30, 90 - ph * 10);
+    FX.addShake(18);
+    addFlashText('THE LANES SHIFT', W / 2, 210, '#ff8844');
+  },
+
+  move(b) {
+    // Slides between lanes rather than tracking you smoothly — it is a
+    // creature of the grid as much as you are.
+    b.laneTimer--;
+    if (b.laneTimer <= 0) {
+      b.laneTimer = Math.max(40, 110 - b.phase * 12);
+      // Prefers to sit over the lane you are in, but never on a burning one.
+      const want = b.playerLane;
+      let best = want, bestScore = -1;
+      for (let i = 0; i < PLASMA_LANES; i++) {
+        if (b.lanes[i].burn > 0) continue;
+        const score = 10 - Math.abs(i - want) * 3 + (i === want ? 5 : 0);
+        if (score > bestScore) { bestScore = score; best = i; }
+      }
+      b.lane = best;
+    }
+    const tx = plasmaLaneX(b.lane);
+    b.x += (tx - b.x) * 0.06;
+    b.y = 150 + Math.sin(frame * 0.02) * 10;
+  },
+
+  think(b, ph) {
+    b.ringSpin += 0.03;
+    b.coilPhase += 0.08;
+
+    // ---- lane lock ---------------------------------------------------------
+    // The player hops lane to lane instead of sliding freely. Movement input is
+    // read here rather than fighting the normal mover: update() has already run
+    // its own step, so the position is simply overwritten with the lane centre.
+    if (b.lockPlayer && !b.dying) {
+      if (b.hopCooldown > 0) b.hopCooldown--;
+      const wantLeft = held('left'), wantRight = held('right');
+      if (b.hopCooldown <= 0 && (wantLeft || wantRight)) {
+        const dir = wantLeft ? -1 : 1;
+        const next = Math.max(0, Math.min(PLASMA_LANES - 1, b.playerLane + dir));
+        if (next !== b.playerLane) {
+          b.playerLane = next;
+          b.hopCooldown = 10;
+          spawnParticles(player.x, player.y + 10, '#66ddff', 8);
+          Sound.play('uiMove');
+        }
+      }
+      // Touch steers by lane too: whichever lane the finger is over.
+      if (touchX !== null) {
+        const rect = canvas.getBoundingClientRect();
+        const tx = (touchX - rect.left) * (W / rect.width);
+        const want = plasmaLaneAt(stats && stats.mirrored ? W - tx : tx);
+        if (want !== b.playerLane && b.hopCooldown <= 0) {
+          b.playerLane += Math.sign(want - b.playerLane);
+          b.hopCooldown = 8;
+        }
+      }
+      const target = plasmaLaneX(b.playerLane);
+      player.x += (target - player.x) * 0.35;
+    }
+
+    // ---- the burn cycle ----------------------------------------------------
+    b.lanes.forEach((l, i) => {
+      if (l.charge > 0) {
+        l.charge--;
+        if (l.charge === 0) {
+          l.burn = 70 + b.phase * 12;
+          FX.addShake(10);
+          Sound.play('explode');
+        }
+      } else if (l.burn > 0) {
+        l.burn--;
+        // Standing in a burning lane costs you. The lane took a full second to
+        // light up first, so this is never a surprise.
+        if (b.lockPlayer && b.playerLane === i && player.invincible <= 0) {
+          hitPlayer();
+        }
+        if (l.burn === 0) l.heat = 40;
+      } else if (l.heat > 0) {
+        l.heat--;
+      }
+    });
+
+    // Light new lanes on a cycle. Never all five: one lane is always clear, or
+    // the mechanic stops being a puzzle and starts being a coin flip.
+    b.attackTimer++;
+    const period = Math.max(80, 190 - ph * 22);
+    if (b.attackTimer >= period) {
+      b.attackTimer = 0;
+      b.cycle++;
+      const count = Math.min(PLASMA_LANES - 1, 1 + Math.floor(ph / 2));
+      // Choose deterministically off the cycle counter so the pattern is
+      // learnable rather than random.
+      const picks = [];
+      for (let k = 0; k < count; k++) {
+        picks.push((b.cycle * 2 + k * 2 + (b.cycle % 3)) % PLASMA_LANES);
+      }
+      // Always leave the boss's own lane and at least one other alive.
+      picks.forEach(i => {
+        if (b.lanes[i].burn > 0 || b.lanes[i].charge > 0) return;
+        const wouldBurn = b.lanes.filter((l, j) => l.burn > 0 || l.charge > 0 || j === i).length;
+        if (wouldBurn >= PLASMA_LANES) return;
+        b.lanes[i].charge = 60;
+      });
+      Sound.play('warning');
+    }
+
+    // ---- guns --------------------------------------------------------------
+    // Fires straight down its own lane, so the lane you are standing in is
+    // always the dangerous one to stay in.
+    b.shootTimer = (b.shootTimer || 0) + 1;
+    if (b.shootTimer >= Math.max(26, 70 - ph * 8)) {
+      b.shootTimer = 0;
+      const x = plasmaLaneX(b.lane);
+      bossShot(x, b.y + 40, Math.PI / 2, 1.0, 6, true);
+      if (ph >= 3) {
+        bossShot(x - 16, b.y + 36, Math.PI / 2 + 0.06, 0.9, 4);
+        bossShot(x + 16, b.y + 36, Math.PI / 2 - 0.06, 0.9, 4);
+      }
+    }
+
+    // Cross-lane sweep from phase 4: a slow wall that forces a hop.
+    if (ph >= 4) {
+      b.sweepTimer = (b.sweepTimer || 0) + 1;
+      if (b.sweepTimer >= 150) {
+        b.sweepTimer = 0;
+        const dir = b.cycle % 2 === 0 ? 1 : -1;
+        for (let i = 0; i < PLASMA_LANES; i++) {
+          const x = plasmaLaneX(dir > 0 ? i : PLASMA_LANES - 1 - i);
+          bossShot(x, b.y + 30, Math.PI / 2, 0.55, 5, false);
+        }
+      }
+    }
+
+    // Phase 5 adds escorts that sit in the lanes with you.
+    if (ph >= 5) {
+      b.minionTimer++;
+      if (b.minionTimer >= 220) {
+        b.minionTimer = 0;
+        const clear = [];
+        b.lanes.forEach((l, i) => { if (l.burn === 0 && l.charge === 0) clear.push(i); });
+        // The band's own lightest hull, not a hardcoded kind — bossMinion
+        // passes this straight to makeEnemy and a null would land on a ship
+        // whose `kind` no lookup can resolve.
+        const escort = RLCore.rosterFor(level).reduce((x, y) => (x.hp <= y.hp ? x : y)).id;
+        clear.slice(0, 2).forEach(i => bossMinion(escort, plasmaLaneX(i), 40));
+      }
+    }
+  },
+
+  // The lanes are drawn under everything else, in world space.
+  paintWorld(b) {
+    for (let i = 0; i < PLASMA_LANES; i++) {
+      const l = b.lanes[i];
+      const x = i * PLASMA_LANE_W;
+      const st = plasmaLaneState(b, i);
+      if (st === 'burning') {
+        const a = 0.20 + 0.14 * Math.sin(frame * 0.4 + i);
+        const g = ctx.createLinearGradient(0, 0, 0, H);
+        g.addColorStop(0, `rgba(255,140,40,${a})`);
+        g.addColorStop(1, `rgba(255,40,0,${a * 1.5})`);
+        ctx.fillStyle = g;
+        ctx.fillRect(x, 0, PLASMA_LANE_W, H);
+      } else if (st === 'charging') {
+        const t = 1 - l.charge / 60;
+        ctx.fillStyle = `rgba(255,180,60,${0.05 + 0.16 * t})`;
+        ctx.fillRect(x, 0, PLASMA_LANE_W, H);
+        // A closing bracket at the bottom: the countdown you actually read.
+        ctx.strokeStyle = `rgba(255,200,80,${0.4 + 0.5 * t})`;
+        ctx.lineWidth = 3;
+        const inset = PLASMA_LANE_W * 0.5 * (1 - t);
+        ctx.beginPath();
+        ctx.moveTo(x + inset, H - 8);
+        ctx.lineTo(x + PLASMA_LANE_W - inset, H - 8);
+        ctx.stroke();
+      } else if (l.heat > 0) {
+        ctx.fillStyle = `rgba(255,90,30,${0.10 * (l.heat / 40)})`;
+        ctx.fillRect(x, 0, PLASMA_LANE_W, H);
+      }
+      // Lane dividers, always visible, so the grid is legible from frame one.
+      ctx.strokeStyle = 'rgba(120,190,255,0.16)';
+      ctx.lineWidth = 1;
+      ctx.beginPath(); ctx.moveTo(x, 0); ctx.lineTo(x, H); ctx.stroke();
+    }
+  },
+
+  paint(b) {
+    const c0 = bossTint(b, '#ffe6a8', '#ffc356', '#ff7a33');
+    const c1 = bossTint(b, '#e87a1f', '#d85a12', '#c02808');
+    const c2 = '#3d1400';
+
+    // Two counter-rotating coils either side of the core — the thing that is
+    // clearly generating the lanes.
+    [-1, 1].forEach(side => {
+      ctx.save();
+      ctx.translate(side * 66, 6);
+      ctx.rotate(b.ringSpin * side);
+      ctx.strokeStyle = c1; ctx.lineWidth = 5;
+      ctx.beginPath(); ctx.arc(0, 0, 22, 0, Math.PI * 2); ctx.stroke();
+      ctx.strokeStyle = c0; ctx.lineWidth = 2;
+      for (let i = 0; i < 4; i++) {
+        const a = i * Math.PI / 2;
+        ctx.beginPath();
+        ctx.moveTo(Math.cos(a) * 9, Math.sin(a) * 9);
+        ctx.lineTo(Math.cos(a) * 22, Math.sin(a) * 22);
+        ctx.stroke();
+      }
+      ctx.restore();
+    });
+
+    // Arc between the coils, brighter as the phase climbs.
+    ctx.strokeStyle = `rgba(255,220,140,${0.3 + 0.12 * b.phase})`;
+    ctx.lineWidth = 2 + b.phase * 0.4;
+    ctx.beginPath();
+    for (let i = 0; i <= 12; i++) {
+      const t = i / 12;
+      const x = -66 + 132 * t;
+      const y = 6 + Math.sin(b.coilPhase + t * 7) * 9 * (1 - Math.abs(t - 0.5) * 1.4);
+      i ? ctx.lineTo(x, y) : ctx.moveTo(x, y);
+    }
+    ctx.stroke();
+
+    // Hull: a wide, flat generator barge.
+    ctx.beginPath();
+    ctx.moveTo(0, 46); ctx.lineTo(52, 24); ctx.lineTo(78, -6);
+    ctx.lineTo(56, -34); ctx.lineTo(-56, -34); ctx.lineTo(-78, -6); ctx.lineTo(-52, 24);
+    ctx.closePath();
+    const g = ctx.createLinearGradient(0, -34, 0, 46);
+    g.addColorStop(0, c0); g.addColorStop(0.55, c1); g.addColorStop(1, c2);
+    ctx.fillStyle = g; ctx.fill();
+    ctx.strokeStyle = c0; ctx.lineWidth = 2.5; ctx.stroke();
+
+    // Five emitter mouths along the bottom edge, one per lane.
+    for (let i = 0; i < PLASMA_LANES; i++) {
+      const x = -48 + i * 24;
+      const lit = b.lanes[i] && (b.lanes[i].charge > 0 || b.lanes[i].burn > 0);
+      ctx.fillStyle = lit ? '#fff0c0' : c2;
+      ctx.fillRect(x - 6, 30, 12, 10);
+      ctx.strokeStyle = c0; ctx.lineWidth = 1;
+      ctx.strokeRect(x - 6, 30, 12, 10);
+    }
+
+    // Core.
+    const cg = ctx.createRadialGradient(0, -2, 3, 0, -2, 26);
+    cg.addColorStop(0, '#ffffff'); cg.addColorStop(0.4, c0); cg.addColorStop(1, 'rgba(0,0,0,0)');
+    ctx.beginPath(); ctx.arc(0, -2, 26, 0, Math.PI * 2);
+    ctx.fillStyle = cg; ctx.fill();
+
+    bossFlash(b);
+  },
+
+  title(b) {
+    const clear = b.lanes.filter(l => l.burn === 0 && l.charge === 0).length;
+    return clear + ' / ' + PLASMA_LANES + ' LANES CLEAR';
+  }
+};
+
 // TRIAD's three ships. Nose-down like every other enemy hull, and genuinely
 // different from one another: a needle-nosed interceptor, a broad gunship with
 // outboard cannons, and a blunt carrier with an open drone bay.
@@ -12839,6 +13575,70 @@ function spawnFormation(type) {
       e.zigzagDir = 0; e.formationId = id;
       enemies.push(e);
     }
+  } else if (type === 'wall') {
+    // Six abreast, no gaps except the two at the edges. Punishes camping.
+    for (let i = 0; i < 6; i++) {
+      const e = makeEnemy(kind);
+      e.x = 44 + i * ((W - 88) / 5);
+      e.y = -30;
+      e.vx = 0; e.vy = d.enemySpeed * 0.7;
+      e.zigzagDir = 0; e.formationId = id;
+      enemies.push(e);
+    }
+  } else if (type === 'column') {
+    // A single file down one column — a wall you can step out of, if you move.
+    const cx = 60 + Math.random() * (W - 120);
+    for (let i = 0; i < 5; i++) {
+      const e = makeEnemy(kind);
+      e.x = cx; e.y = -30 - i * 46;
+      e.vx = 0; e.vy = d.enemySpeed * 1.1;
+      e.zigzagDir = 0; e.formationId = id;
+      enemies.push(e);
+    }
+  } else if (type === 'diamond') {
+    const cx = 110 + Math.random() * (W - 220);
+    [[0, 0], [-40, 40], [40, 40], [0, 80], [-80, 80], [80, 80]].forEach(([ox, oy]) => {
+      const e = makeEnemy(kind);
+      e.x = Math.max(24, Math.min(W - 24, cx + ox));
+      e.y = -30 - oy;
+      e.vx = 0; e.vy = d.enemySpeed * 0.8;
+      e.zigzagDir = 0; e.formationId = id;
+      enemies.push(e);
+    });
+  } else if (type === 'echelon') {
+    // A diagonal stagger, so the whole line never crosses your column at once.
+    const dir = Math.random() < 0.5 ? 1 : -1;
+    for (let i = 0; i < 5; i++) {
+      const e = makeEnemy(kind);
+      e.x = Math.max(28, Math.min(W - 28, W / 2 + dir * (i - 2) * 52));
+      e.y = -30 - i * 34;
+      e.vx = 0; e.vy = d.enemySpeed * 0.85;
+      e.zigzagDir = 0; e.formationId = id;
+      enemies.push(e);
+    }
+  } else if (type === 'pincer') {
+    // Two groups down the walls that converge. The middle is safe, briefly.
+    for (let side = -1; side <= 1; side += 2) {
+      for (let i = 0; i < 3; i++) {
+        const e = makeEnemy(kind);
+        e.x = side < 0 ? 40 + i * 18 : W - 40 - i * 18;
+        e.y = -30 - i * 30;
+        e.vx = side * -0.7; e.vy = d.enemySpeed * 0.75;
+        e.zigzagDir = 0; e.formationId = id;
+        enemies.push(e);
+      }
+    }
+  } else if (type === 'arrowhead') {
+    // A vee pointed the other way, coming to a point AT you.
+    const cx = 100 + Math.random() * (W - 200);
+    for (let i = -2; i <= 2; i++) {
+      const e = makeEnemy(kind);
+      e.x = Math.max(26, Math.min(W - 26, cx + i * 34));
+      e.y = -30 - (2 - Math.abs(i)) * 30;
+      e.vx = 0; e.vy = d.enemySpeed * 0.95;
+      e.zigzagDir = 0; e.formationId = id;
+      enemies.push(e);
+    }
   } else {
     for (let i = 0; i < 4; i++) {
       const e = makeEnemy(kind);
@@ -12881,7 +13681,10 @@ function fireWeapon() {
   // EMBERROCK's OVERDRIVE is a timed window, not a permanent stat, so it is
   // applied here rather than resolved into stats.
   const rage = boostRage > 0 ? 2.2 : 1;
-  const dmg = stats.damage * (crit ? stats.critMul : 1) * rage;
+  // COMET hits harder the faster it is actually travelling — standing still
+  // gives nothing, so it rewards the flying its speed is built for.
+  const momentum = 1 + (currentShip().speedKills || 0) * Math.min(1, Math.abs(player.vx || 0) / Math.max(1, stats.speed));
+  const dmg = stats.damage * (crit ? stats.critMul : 1) * rage * momentum;
   const speed = BULLET_SPEED * stats.bulletSpeedMul;
   // HOWITZER's hull and the BULK ROUNDS line both widen the shot. Bigger
   // bullets hit from further away — see the collision test, which reads b.w.
@@ -13444,7 +14247,8 @@ function hitPlayer() {
     addFlashText('GRACE', player.x, player.y - 30, '#88bbff');
   } else if (stats.scrapLoss > 0 && scrap > 0) {
     const before = scrap;
-    scrap = RLCore.scrapAfterHit(scrap, stats.scrapLoss);
+    // MAGPIE's salvage rig halves the bill.
+    scrap = RLCore.scrapAfterHit(scrap, stats.scrapLoss * (currentShip().salvage || 1));
     addFlashText('-' + (before - scrap).toLocaleString() + ' SCRAP', player.x, player.y - 30, '#ffcc44');
     Sound.play('strip');
   }
@@ -13516,7 +14320,7 @@ function update() {
   // The clock stops during a boss fight — the fight is the level.
   if (!bossActive) {
     levelTimer++;
-    if (levelTimer > 60*CFG.levelSeconds) levelUp();
+    if (levelTimer > 60 * RLCore.levelSecondsAt(level)) levelUp();
   }
   if (bossWarning > 0) bossWarning--;
 
@@ -13543,7 +14347,11 @@ function update() {
     if (tx < player.x - 15) dx = -1;
     else if (tx > player.x + 15) dx = 1;
   }
+  // Recorded so COMET's momentum bonus has a real velocity to read; without
+  // it the hull's whole special would resolve to 1 every frame.
+  const wasX = player.x;
   player.x = Math.max(20, Math.min(W-20, player.x + dx*player.speed));
+  player.vx = player.x - wasX;
 
   // The ship has NO vertical control — ArrowUp/ArrowDown are swallowed but
   // never move it. So any boss that displaces the pilot vertically (Magnetar
@@ -13602,7 +14410,10 @@ function update() {
   // up; let go and it fires. Holding is therefore a real trade — you give up
   // your damage-per-second for a few seconds to get a burst back.
   const holdingFire = held('fire') || touchCharging;
-  if (holdingFire && chargeShot < CHARGE_FULL) chargeShot++;
+  // KESTREL winds a charge up faster than anything else in the hangar.
+  if (holdingFire && chargeShot < CHARGE_FULL) {
+    chargeShot = Math.min(CHARGE_FULL, chargeShot + (currentShip().chargeRate || 1));
+  }
   if (!holdingFire && chargeShot > 0) {
     if (chargeShot >= CHARGE_MIN) fireCharged(chargeShot / CHARGE_FULL);
     chargeShot = 0;
@@ -13652,7 +14463,13 @@ function update() {
       spawnTimer = 0;
       spawnCycle++;
       if (level >= 3 && spawnCycle % 3 === 0) {
-        spawnFormation(Math.random() < 0.5 ? 'vee' : 'line');
+        // The pool widens as you descend, so the shapes keep changing along
+        // with the ships flying them.
+        const shapes = ['vee', 'line'];
+        if (level >= 8)  shapes.push('wall', 'column');
+        if (level >= 18) shapes.push('diamond', 'echelon');
+        if (level >= 35) shapes.push('pincer', 'arrowhead');
+        spawnFormation(shapes[Math.floor(Math.random() * shapes.length)]);
       } else if (Math.random() < 0.7) {
         enemies.push(makeEnemy(pickEnemyKind()));
       }
@@ -14255,9 +15072,12 @@ function draw() {
       ctx.translate(b.x, b.y);
       ctx.rotate(Math.atan2(b.vy, b.vx) + Math.PI/2);   // point along travel
       const bg2 = ctx.createLinearGradient(0, 0, 0, b.h);
+      // Neon white. The type-coloured tints made a busy screen read as
+      // confetti; a bullet should be the one thing you never have to decode.
+      // Crits keep a warm core because "that one hit hard" is worth saying.
       bg2.addColorStop(0, '#ffffff');
-      bg2.addColorStop(0.3, b.charged ? '#bfefff' : b.crit ? '#ffdd33' : b.isSplit ? '#88ddff' : b.pierce > 0 ? '#ffbbff' : '#88ffff');
-      bg2.addColorStop(1, 'rgba(0,200,255,0)');
+      bg2.addColorStop(0.35, b.crit ? '#fff2c0' : '#ffffff');
+      bg2.addColorStop(1, 'rgba(200,240,255,0)');
       // The lance gets a glow around it, so a charged shot reads as an event
       // rather than as a slightly wider bullet.
       if (b.charged) {
@@ -14698,6 +15518,37 @@ function drawStart() {
     }
   }
 
+  // ---- LAUNCH POINT ------------------------------------------------------
+  // Only drawn once at least one waypoint has been earned, so a new player
+  // never sees a control that does nothing.
+  const unlocked = RLCore.unlockedWaypoints(Save.data.waypoints);
+  if (unlocked.length) {
+    const opts = [1].concat(unlocked.map(w => w.level));
+    if (opts.indexOf(launchLevel) === -1) launchLevel = 1;
+    ctx.textAlign = 'center';
+    ctx.fillStyle = '#4d6a78'; ctx.font = '9px monospace';
+    ctx.fillText('LAUNCH FROM   [W]', W/2, 496);
+    const bw = 42, gap = 6;
+    const total = opts.length * bw + (opts.length - 1) * gap;
+    opts.forEach((lv, i) => {
+      const x = W/2 - total/2 + i * (bw + gap);
+      const on = lv === launchLevel;
+      ctx.fillStyle = on ? 'rgba(255,210,60,0.20)' : 'rgba(255,255,255,0.05)';
+      ctx.fillRect(x, 502, bw, 22);
+      ctx.strokeStyle = on ? '#ffcc33' : 'rgba(140,160,180,0.35)';
+      ctx.lineWidth = 1.2;
+      ctx.strokeRect(x, 502, bw, 22);
+      ctx.fillStyle = on ? '#ffdd66' : '#7d8894';
+      ctx.font = 'bold 10px monospace';
+      ctx.fillText(lv === 1 ? 'START' : 'LV ' + lv, x + bw/2, 517);
+    });
+    if (launchLevel > 1) {
+      const w = RLCore.waypointAt(launchLevel);
+      ctx.fillStyle = '#8a7f5a'; ctx.font = '9px monospace';
+      ctx.fillText('begins with ' + w.grants + ' free upgrades', W/2, 534);
+    }
+  }
+
   // The two panel buttons, top right, beside mute.
   [[SETTINGS_RECT, '⚙', 'ESC'], [BESTIARY_RECT, '☰', 'C']].forEach(([r, glyph, hint]) => {
     ctx.fillStyle = 'rgba(0,40,60,0.5)';
@@ -14724,14 +15575,14 @@ function drawStart() {
   ctx.textAlign = 'center';
   ctx.fillStyle = '#5b6b80';
   ctx.font = '11px monospace';
-  ctx.fillText('← → move    auto-fire is on    HOLD SPACE to charge a lance', W/2, 512);
-  ctx.fillText('kills earn SCRAP — spend it when cargo docks', W/2, 530);
+  ctx.fillText('← → move   auto-fire is on   HOLD SPACE to charge', W/2, 550);
+  ctx.fillText('kills earn SCRAP — spend it when cargo docks', W/2, 564);
 
   if (owned) {
     const pulse = 0.6 + 0.4*Math.sin(frame*0.08);
     ctx.fillStyle = `rgba(0,255,200,${pulse})`;
     ctx.font = 'bold 17px monospace';
-    ctx.fillText('PRESS SPACE TO LAUNCH', W/2, 570);
+    ctx.fillText('PRESS SPACE TO LAUNCH', W/2, 588);
   } else {
     ctx.fillStyle = 'rgba(120,135,150,0.8)';
     ctx.font = 'bold 13px monospace';
@@ -14742,7 +15593,7 @@ function drawStart() {
 
   ctx.fillStyle = '#445566';
   ctx.font = '10px monospace';
-  ctx.fillText('M to mute', W/2, 596);
+  ctx.fillText('M to mute', W/2, 606);
 
   if (!Save.ok) {
     ctx.fillStyle = '#665533';

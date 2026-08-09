@@ -772,3 +772,87 @@ CHARGE pad charges, any other finger steers, and sliding off the pad cancels.
   and engine bells. MAGPIE is no longer a Vanguard with a hoop on it.
 - **TRIAD is three different ships** — LANCE, MAUL, KEEL — each drawn as itself,
   each named in the boss bar, and each leaving its own wreck in formation.
+
+---
+
+# ADDENDUM III — "VOIDRUNNER BEYOND" (2026-08-09, fourth pass)
+
+## 0. A correction from the last round
+
+Addendum II recorded the voidbirth debuff as being about scrap collection. It
+was not: the ask was **"the voidbirth's debuff of not opening shops every
+time"**, and it is repeated here as *"when you voidbirth you can still get the
+shop every time, because it becomes way too hard."*
+
+`shopEvery` returned 1/2/4/8/8/8 by depth. That was meant to make each visit
+weigh more; in practice a voidbirth burns your entire build and then makes it
+*harder* to rebuild one, which is a punishment for succeeding. **Shops now open
+after every level at every depth.**
+
+## 1. Pace
+
+The brief: *"It takes too long to get to the next level, make each level ½ as
+long"* and *"Make later levels shorter."*
+
+`levelSecondsAt` — 12 seconds at level 1 (was 24), shortening 0.02s a level to
+a floor of 7. A level is a wave you clear, not a timer you wait out.
+
+Credits loosened as well: divisor 300 → 110, tail 900 → 320. The compression
+above the knee stays, so one very good run still cannot buy the whole hangar.
+
+## 2. Bosses
+
+*"BOSSES NEED WAY WAY WAY MORE HEALTH"* —
+
+```
+hp = 30000 × (level/10)^2.303
+```
+
+30,000 at level 10 (was 6,000, was 1,000 before that) to **10,000,000,000** at
+2,500. `LINEAGE_GROWTH` went 2.2 → 2.5 alongside it: at voidbirth V a lineage
+card is now ~98× its base rather than ~52×, which is what keeps the deepest
+fights closable at all.
+
+**PLASMA REVOLUTION** is the new seventh boss, at level 100. The arena stops
+being open space and becomes **five lanes**; you are locked to one and hop
+between them while it burns lanes out one at a time. One lane is *always*
+standable — a test asserts it on every frame of every phase, because the
+mechanic is a puzzle only if that holds. Nothing else in the roster restricts
+where you may stand, which is the whole reason it exists.
+
+**TRIAD moved to level 30** and MAGNETAR opens the run.
+
+## 3. Two new areas
+
+Bands 10 and 11 — **THE GLASS REACH** (101–110, 15 ships) and **THE LAST
+ORCHARD** (111–120, 16 ships). 126 enemies now, all 126 silhouettes distinct.
+Each area brings its own sky and its own soundtrack theme.
+
+## 4. Waypoints
+
+Reach a checkpoint five times and you may launch from it. **Capped at level
+40** — past that the run has to be earned. Each hands you a starting build,
+because arriving at level 40 with nothing is a death sentence, not a shortcut:
+
+| waypoint | 10 | 20 | 30 | 40 |
+|---|---|---|---|---|
+| free upgrades | 5 | 10 | 20 | 20 |
+
+An unearned waypoint silently falls back to level 1 rather than being trusted.
+
+## 5. Everything else
+
+- **Seven formations** on top of vee and line: wall, column, diamond, echelon,
+  pincer, arrowhead. The pool widens with depth.
+- **Bullets are neon white** again. The type-coloured tints made a busy screen
+  read as confetti; crits keep a warm core because "that one hit hard" is worth
+  saying.
+- **All collector content deleted.** Everything auto-collects, so a card or a
+  hull that improved collection was selling you something you already had. Four
+  cards and MAGPIE's magnet hook went; MAGPIE now halves the scrap a hit costs.
+- **Four more ships** — KESTREL (charges twice as fast), ANVIL (heaviest gun,
+  six lives), HARBOUR (two extra shop cards), COMET (fastest hull, hits harder
+  the faster it flies). 23 total.
+- **ASCENDANT is now FLAGSHIP.** Calling the ship and the mechanic by the same
+  word made every sentence about either one ambiguous.
+- **Six more meteor classes**, arriving from level 180 to 900.
