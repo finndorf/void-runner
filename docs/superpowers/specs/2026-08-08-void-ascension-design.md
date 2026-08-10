@@ -856,3 +856,54 @@ An unearned waypoint silently falls back to level 1 rather than being trusted.
 - **ASCENDANT is now FLAGSHIP.** Calling the ship and the mechanic by the same
   word made every sentence about either one ambiguous.
 - **Six more meteor classes**, arriving from level 180 to 900.
+
+---
+
+# ADDENDUM IV — visibility, cadence, the charge line (2026-08-09)
+
+## 1. Bullets
+
+The old shot was 3×10px with a gradient that faded to transparent at its own
+tail, which is most of why it vanished against a bright nebula. Now 4.5×14 and
+drawn in three layers: a soft halo so the shot carries its own light, an opaque
+body that never fades, and a hard white core down the middle. Incoming fire got
+the same treatment — glow plus a solid core — because a bullet you have to
+dodge should never be a smudge.
+
+## 2. Shop cadence — resolving an apparent contradiction
+
+Two asks that sound opposed and are not:
+
+- *"get rid of the voidbirth's debuff of not opening shops every time"*
+- *"reduce the frequency that the cargo docker appears"*
+
+The first is about **depth changing the cadence**; the second is about **the
+cadence itself**. `SHOP_EVERY` is now a flat 2 at every voidbirth depth: half
+as often as before, and a voidbirth never makes it worse. A test asserts the
+docking pattern is byte-identical at depths 0 through 8.
+
+Context for why every-level was wrong: levels are half as long now, so a shop
+after each one meant docking roughly five times a minute. The cargo hauler had
+stopped being an event and become a loading screen.
+
+## 3. The charge line
+
+Holding fire was one fixed mechanic every ship had identically. **Seventeen
+cards** now build on it, spanning COMMON through OVERCLOCKED:
+
+| key | what it does |
+|---|---|
+| `chargeSpeed` | wind-up rate (multiplier, base 1) |
+| `chargePower` | lance damage (multiplier, base 1) |
+| `chargeSpread` | extra lances either side of the main one |
+| `chargeSplash` | burst radius where it lands |
+| `chargeAuto` | fires at full charge and immediately starts the next |
+
+`chargeSpeed` and `chargePower` are multipliers with a base of **1**, not 0 —
+a test asserts neither can ever resolve below 1 at any depth, because a zero
+would mean a lance that never winds up or does nothing at all.
+
+**Inference stated:** "make charging up an upgrade feature" was read as *add an
+upgrade family for it*, not *lock the charge behind an upgrade*. The base
+charge still works on every hull. Gating it entirely would remove a working
+mechanic, which is the more expensive mistake if the reading is wrong.

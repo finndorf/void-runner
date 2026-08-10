@@ -133,6 +133,9 @@ check('enemies spawn with curve HP, not the old flat table', () => {
 });
 
 check('the shop opens, rolls resolved cards, and closes', () => {
+  // Shops open every SECOND level now, and the cadence is checked against the
+  // level you just CLEARED — so clear an even one.
+  api.level = 4;
   api.levelUp();
   if (api.state !== 'shop') throw new Error('state is ' + api.state);
   for (let i = 0; i < 120; i++) api.draw();
@@ -141,7 +144,8 @@ check('the shop opens, rolls resolved cards, and closes', () => {
 });
 
 check('the shop has NO timer that can close it', () => {
-  api.levelUp();
+  api.level = 6;
+  api.levelUp();                       // clearing an even level docks
   for (let i = 0; i < 60 * 90; i++) { /* 90 seconds */ }
   if (api.state !== 'shop') throw new Error('shop closed on its own');
   api.closeShop();

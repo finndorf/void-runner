@@ -1503,23 +1503,33 @@ test('the ARMADA interval is 100 levels', () => {
 // 6. Shop cadence
 // ---------------------------------------------------------------------------
 
-// The cadence debuff is gone. A voidbirth burns your whole build; making it
-// HARDER to rebuild one afterwards was a punishment for succeeding.
-test('a shop opens after every level, at every depth', () => {
+// Two rules that sound contradictory and are not: a voidbirth must never
+// change the cadence, AND the cadence is every second level rather than every
+// level. Levels are half as long as they were, so a shop after every one meant
+// docking five times a minute.
+test('the shop cadence is every second level, and depth never changes it', () => {
+  assert.equal(core.SHOP_EVERY, 2);
   for (let vb = 0; vb <= 8; vb++) {
-    assert.equal(core.shopEvery(vb), 1, `voidbirth ${vb}`);
+    assert.equal(core.shopEvery(vb), 2, `voidbirth ${vb}`);
+  }
+  // The same pattern at every depth is the property that matters most here.
+  const at0 = [];
+  for (let level = 1; level < 40; level++) at0.push(core.shopOpensAfter(level, 0));
+  for (let vb = 1; vb <= 8; vb++) {
     for (let level = 1; level < 40; level++) {
-      assert.equal(core.shopOpensAfter(level, vb), true, `level ${level} vb ${vb}`);
+      assert.equal(core.shopOpensAfter(level, vb), at0[level - 1],
+        `level ${level} differs at voidbirth ${vb}`);
     }
   }
 });
 
-
-test('at voidbirth 0 the shop opens after every single level', () => {
-  for (let level = 1; level <= 60; level++) {
-    assert.equal(core.shopOpensAfter(level, 0), true, `level ${level}`);
-  }
+test('an ordinary odd level does not open a shop', () => {
+  assert.equal(core.shopOpensAfter(3, 0), false);
+  assert.equal(core.shopOpensAfter(4, 0), true);
+  assert.equal(core.shopOpensAfter(5, 0), false);
 });
+
+
 
 
 
@@ -3009,4 +3019,66 @@ test('level length never increases and never hits zero', () => {
     assert.ok(t >= core.MIN_LEVEL_SECONDS, `level ${lv} fell below the floor`);
     prev = t;
   }
+});
+
+// ---------------------------------------------------------------------------
+// 17. The charge line
+// ---------------------------------------------------------------------------
+// Holding fire used to be one fixed mechanic every ship had identically. These
+// cards make it something you build toward.
+
+test('a bare ship has a neutral charge profile', () => {
+  const s = core.resolveStats(SHIP, [], 0, 1);
+  assert.equal(s.chargeSpeed, 1, 'no card means no speed-up, not zero speed');
+  assert.equal(s.chargePower, 1, 'and no damage multiplier, not zero damage');
+  assert.equal(s.chargeSpread, 0);
+  assert.equal(s.chargeSplash, 0);
+  assert.equal(s.chargeAuto, false);
+});
+
+// chargeSpeed and chargePower are MULTIPLIERS with a base of 1. If either ever
+// resolved to 0 the lance would never wind up, or would do nothing at all.
+test('the charge multipliers can never resolve below one', () => {
+  const cards = core.UPGRADES.filter(u =>
+    u.effect.chargeSpeed !== undefined || u.effect.chargePower !== undefined);
+  cards.forEach(u => {
+    for (let vb = 0; vb <= 5; vb++) {
+      const s = core.resolveStats(SHIP, [{ id: u.id, stacks: 1 }], vb, 1);
+      assert.ok(s.chargeSpeed >= 1, `${u.id} drove chargeSpeed to ${s.chargeSpeed}`);
+      assert.ok(s.chargePower >= 1, `${u.id} drove chargePower to ${s.chargePower}`);
+    }
+  });
+});
+
+test('the charge line spans the ladder from COMMON to OVERCLOCKED', () => {
+  const charge = core.UPGRADES.filter(u =>
+    Object.keys(u.effect).some(k => k.indexOf('charge') === 0));
+  assert.ok(charge.length >= 15, `only ${charge.length} charge cards`);
+  const tiers = new Set(charge.map(u => u.tier));
+  ['COMMON', 'UNCOMMON', 'RARE', 'EPIC', 'LEGENDARY', 'MYTHIC', 'APEX', 'OVERCLOCKED']
+    .forEach(t => assert.ok(tiers.has(t), `nothing in the charge line at ${t}`));
+});
+
+test('charge cards stack the way their wording implies', () => {
+  const two = core.resolveStats(SHIP,
+    [{ id: 'ch_coil', stacks: 1 }, { id: 'ch_bank', stacks: 1 }], 0, 1);
+  close(two.chargeSpeed, 1 + 0.25 + 0.50, 'speed-ups add');
+  const dmg = core.resolveStats(SHIP,
+    [{ id: 'ch_tap', stacks: 1 }, { id: 'ch_heavy', stacks: 1 }], 0, 1);
+  close(dmg.chargePower, 1 + 0.30 + 0.70, 'damage bonuses add');
+  const spread = core.resolveStats(SHIP,
+    [{ id: 'ch_prism', stacks: 1 }, { id: 'ch_fan', stacks: 1 }], 0, 1);
+  assert.equal(spread.chargeSpread, 3, 'escorts add');
+});
+
+test('AUTOLOADER and THE SPEAR both set the auto flag', () => {
+  ['ch_autoload', 'ch_perpetual', 'ch_singular'].forEach(id => {
+    assert.equal(core.resolveStats(SHIP, [{ id, stacks: 1 }], 0, 1).chargeAuto, true, id);
+  });
+});
+
+test('splash takes the best source rather than adding', () => {
+  const s = core.resolveStats(SHIP,
+    [{ id: 'ch_burst', stacks: 1 }, { id: 'ch_detonate', stacks: 1 }], 0, 1);
+  assert.equal(s.chargeSplash, 120, 'the larger head wins; they do not sum');
 });

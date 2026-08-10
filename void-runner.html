@@ -1179,11 +1179,19 @@ RLCore.recordWaypoint = function (progress, level) {
 // income rises to match (see scrapForKill), keeping purchasing power per
 // level roughly flat rather than starving the deep game.
 
-// Shops used to thin out with depth -- every 2nd level, then 4th, then 8th.
-// That was meant to make each visit weigh more; in practice a voidbirth burns
-// your whole build and then makes it HARDER to rebuild one, which is a
-// punishment for succeeding. Every level opens a shop now, at every depth.
-RLCore.shopEvery = function (vb) { return 1; };
+// Two rules that sound contradictory and are not:
+//
+//   1. A voidbirth must NEVER change the cadence. It burns your whole build;
+//      making it harder to rebuild one is a punishment for succeeding, and
+//      that debuff is what "get rid of the voidbirth's shop debuff" meant.
+//   2. The cadence itself is every SECOND level, not every level. Levels are
+//      half as long as they used to be, so a shop after every one meant
+//      docking roughly five times a minute -- the cargo hauler stopped being
+//      an event and became a loading screen.
+//
+// So: flat at every depth, and half as often as before.
+RLCore.SHOP_EVERY = 2;
+RLCore.shopEvery = function (vb) { return RLCore.SHOP_EVERY; };
 
 // ---------------------------------------------------------------------------
 // LEVEL LENGTH
@@ -1660,6 +1668,29 @@ RLCore.UPGRADES = [
   { id: 's_mirror',      tier: 'SECRET', name: 'THROUGH THE LOOKING GLASS', desc: 'left is right. right is left.', effect: { mirrored: true, fireRateMul: 1.50 } },
   { id: 's_tiny',        tier: 'SECRET', name: 'VERY SMALL SHIP',desc: 'you are extremely small and extremely fast', effect: { hitScaleMul: -0.55, speedMul: 1.20, damageMul: 1.50 } },
   { id: 's_bighead',     tier: 'SECRET', name: 'THE BIG ONE',   desc: 'one bullet. it is the size of the moon.', effect: { bulletSize: 9.0, damageMul: 5.0, fireRateMul: -0.60 } },
+  // --- THE CHARGE LINE ------------------------------------------------------
+  // The lance used to be one fixed mechanic every ship had identically. These
+  // make holding fire a build you invest in rather than a button you either
+  // use or do not.
+  { id: 'ch_coil',      tier: 'COMMON', name: 'CHARGE COIL',   desc: 'the lance winds up 25% faster',   effect: { chargeSpeed: 0.25 },
+    line: ['CHARGE COIL', 'CHARGE ARRAY', 'CHARGE LATTICE', 'CHARGE CASCADE', 'CHARGE SINGULARITY', 'INSTANT ON'] },
+  { id: 'ch_tap',       tier: 'COMMON', name: 'TAP CAPACITOR', desc: '+30% lance damage',               effect: { chargePower: 0.30 } },
+  { id: 'ch_bank',      tier: 'UNCOMMON', name: 'CAPACITOR BANK', desc: 'the lance winds up 50% faster', effect: { chargeSpeed: 0.50 } },
+  { id: 'ch_heavy',     tier: 'UNCOMMON', name: 'HEAVY LANCE',  desc: '+70% lance damage',              effect: { chargePower: 0.70 } },
+  { id: 'ch_burst',     tier: 'UNCOMMON', name: 'BURST HEAD',   desc: 'the lance bursts where it lands',effect: { chargeSplash: 60 } },
+  { id: 'ch_prism',     tier: 'RARE', name: 'PRISM SPLIT',      desc: 'the lance fires with an escort either side', effect: { chargeSpread: 1 } },
+  { id: 'ch_dynamo',    tier: 'RARE', name: 'DYNAMO',           desc: 'winds up twice as fast',         effect: { chargeSpeed: 1.0 } },
+  { id: 'ch_spike',     tier: 'RARE', name: 'SPIKE DRIVER',     desc: '+140% lance damage',             effect: { chargePower: 1.40 } },
+  { id: 'ch_fan',       tier: 'EPIC', name: 'PRISM FAN',        desc: 'two escorts either side of the lance', effect: { chargeSpread: 2 } },
+  { id: 'ch_detonate',  tier: 'EPIC', name: 'DETONATOR HEAD',   desc: 'the lance detonates hard on impact', effect: { chargeSplash: 120 } },
+  { id: 'ch_flywheel',  tier: 'EPIC', name: 'FLYWHEEL',         desc: 'winds up three times as fast, +60% damage', effect: { chargeSpeed: 2.0, chargePower: 0.60 } },
+  { id: 'ch_railhead',  tier: 'LEGENDARY', name: 'RAILHEAD',    desc: '+300% lance damage',             effect: { chargePower: 3.0 } },
+  { id: 'ch_broadlance',tier: 'LEGENDARY', name: 'BROAD LANCE', desc: 'three escorts a side, and they burst', effect: { chargeSpread: 3, chargeSplash: 90 } },
+  { id: 'ch_autoload',  tier: 'MYTHIC', name: 'AUTOLOADER',     desc: 'hold fire and it lances over and over on its own', effect: { chargeAuto: true, chargeSpeed: 1.0 } },
+  { id: 'ch_stormlance',tier: 'MYTHIC', name: 'STORM LANCE',    desc: '+600% lance damage, four escorts a side', effect: { chargePower: 6.0, chargeSpread: 4 } },
+  { id: 'ch_perpetual', tier: 'APEX', name: 'PERPETUAL ARC',    desc: 'endless lances, twice as fast, six a side', effect: { chargeAuto: true, chargeSpeed: 3.0, chargeSpread: 6, chargePower: 4.0 } },
+  { id: 'ch_singular',  tier: 'OVERCLOCKED', name: 'THE SPEAR', desc: 'one continuous lance, +1500% damage', effect: { chargeAuto: true, chargeSpeed: 6.0, chargePower: 15.0, chargeSplash: 200 } },
+
   { id: 's_everything',  tier: 'SECRET', name: 'YES',           desc: 'yes',                          effect: { upsideDown: true, mirrored: true, apotheosis: true, damageMul: 2.0 } }
 ];
 
@@ -1899,6 +1930,16 @@ RLCore.resolveStats = function (ship, owned, vb, level) {
     scrapLoss: has('noStrip') ? 0
       : (sum('strips') > 0 ? RLCore.GREED_SCRAP_LOSS : RLCore.HIT_SCRAP_LOSS),
     enemyBulletMul: Math.max(0.25, 1 + sum('enemyBulletMul')),
+    // --- the charge shot ---------------------------------------------------
+    // The lance was a fixed mechanic every ship had identically. These make it
+    // a build you can actually invest in: wind-up speed, damage, extra lances,
+    // splash on impact, and finally a hull that never stops firing them.
+    chargeSpeed: 1 + sum('chargeSpeed'),
+    chargePower: 1 + sum('chargePower'),
+    chargeSpread: sum('chargeSpread'),
+    chargeSplash: max('chargeSplash'),
+    chargeAuto: has('chargeAuto'),
+
     // --- the second catalogue's keys ---------------------------------------
     dropBonus: sum('dropBonus'),
     contactDamage: max('contactDamage'),
@@ -13709,7 +13750,7 @@ function fireWeapon() {
       vx: Math.sin(a) * speed,
       vy: -Math.cos(a) * speed,
       // THE NEEDLE is one screen-height lance that never stops.
-      w: (s.needle ? 7 : 3) * size, h: (s.needle ? 26 : 10) * (1 + (size - 1) * 0.4),
+      w: (s.needle ? 8 : 4.5) * size, h: (s.needle ? 30 : 14) * (1 + (size - 1) * 0.4),
       pierce: s.needle ? 9999 : stats.pierce,
       damage: s.needle ? dmg * 2.2 : dmg,
       homing: stats.homing,
@@ -13734,26 +13775,34 @@ let chargeShot = 0;
 let touchCharging = false;
 
 function chargeDamage(t) {
-  // 3x at the minimum useful charge, 14x at full.
-  return stats.damage * (3 + 11 * t) * (boostRage > 0 ? 2.2 : 1);
+  // 3x at the minimum useful charge, 14x at full, before the CHARGE line.
+  return stats.damage * (3 + 11 * t) * stats.chargePower * (boostRage > 0 ? 2.2 : 1);
 }
 
 function fireCharged(t) {
   const power = Math.max(0, Math.min(1, t));
   const w = 14 + 30 * power;
-  bullets.push({
-    x: player.x, y: player.y - 18,
-    vx: 0, vy: -(BULLET_SPEED + 4) * stats.bulletSpeedMul,
-    w: w * stats.bulletSize, h: 46 + 44 * power,
-    pierce: 9999,
-    damage: chargeDamage(power),
-    homing: 0,
-    splash: Math.max(stats.splash, 40 + 60 * power),
-    split: false, crit: true,
-    burn: stats.burn, chill: stats.chill,
-    bounces: 0, needle: false, charged: true,
-    dead: false
-  });
+  // PRISM SPLIT and its lineage fan extra lances either side of the main one.
+  const extra = Math.min(6, stats.chargeSpread);
+  for (let i = -extra; i <= extra; i++) {
+    const a = i * 0.13;
+    const isMain = i === 0;
+    bullets.push({
+      x: player.x + i * 9, y: player.y - 18,
+      vx: Math.sin(a) * (BULLET_SPEED + 4) * stats.bulletSpeedMul,
+      vy: -Math.cos(a) * (BULLET_SPEED + 4) * stats.bulletSpeedMul,
+      w: w * stats.bulletSize * (isMain ? 1 : 0.6),
+      h: (46 + 44 * power) * (isMain ? 1 : 0.7),
+      pierce: 9999,
+      damage: chargeDamage(power) * (isMain ? 1 : 0.55),
+      homing: 0,
+      splash: Math.max(stats.splash, stats.chargeSplash, 40 + 60 * power),
+      split: false, crit: true,
+      burn: stats.burn, chill: stats.chill,
+      bounces: 0, needle: false, charged: true,
+      dead: false
+    });
+  }
   FX.addShake(8 + 14 * power);
   spawnParticles(player.x, player.y - 16, '#ffffff', 14 + Math.round(18 * power));
   addFlashText(power >= 0.99 ? 'FULL CHARGE' : 'CHARGE', player.x, player.y - 46, '#9fe8ff');
@@ -14410,9 +14459,16 @@ function update() {
   // up; let go and it fires. Holding is therefore a real trade — you give up
   // your damage-per-second for a few seconds to get a burst back.
   const holdingFire = held('fire') || touchCharging;
-  // KESTREL winds a charge up faster than anything else in the hangar.
+  // KESTREL's hull and the CAPACITOR line both wind the charge up faster.
+  const windUp = (currentShip().chargeRate || 1) * stats.chargeSpeed;
   if (holdingFire && chargeShot < CHARGE_FULL) {
-    chargeShot = Math.min(CHARGE_FULL, chargeShot + (currentShip().chargeRate || 1));
+    chargeShot = Math.min(CHARGE_FULL, chargeShot + windUp);
+  }
+  // AUTOLOADER: at full charge it fires on its own and starts the next one,
+  // so a fully committed charge build becomes a rhythm rather than a decision.
+  if (holdingFire && stats.chargeAuto && chargeShot >= CHARGE_FULL) {
+    fireCharged(1);
+    chargeShot = 0;
   }
   if (!holdingFire && chargeShot > 0) {
     if (chargeShot >= CHARGE_MIN) fireCharged(chargeShot / CHARGE_FULL);
@@ -15071,34 +15127,43 @@ function draw() {
       ctx.save();
       ctx.translate(b.x, b.y);
       ctx.rotate(Math.atan2(b.vy, b.vx) + Math.PI/2);   // point along travel
-      const bg2 = ctx.createLinearGradient(0, 0, 0, b.h);
-      // Neon white. The type-coloured tints made a busy screen read as
-      // confetti; a bullet should be the one thing you never have to decode.
-      // Crits keep a warm core because "that one hit hard" is worth saying.
-      bg2.addColorStop(0, '#ffffff');
-      bg2.addColorStop(0.35, b.crit ? '#fff2c0' : '#ffffff');
-      bg2.addColorStop(1, 'rgba(200,240,255,0)');
-      // The lance gets a glow around it, so a charged shot reads as an event
-      // rather than as a slightly wider bullet.
-      if (b.charged) {
-        const halo = ctx.createRadialGradient(0, -b.h/2, 2, 0, -b.h/2, b.w * 1.6);
-        halo.addColorStop(0, 'rgba(180,240,255,0.55)');
-        halo.addColorStop(1, 'rgba(120,220,255,0)');
-        ctx.fillStyle = halo;
-        ctx.beginPath(); ctx.ellipse(0, -b.h/2, b.w * 1.6, b.h * 0.7, 0, 0, Math.PI*2); ctx.fill();
-        ctx.fillStyle = bg2;
-      }
-      ctx.beginPath(); ctx.roundRect(-b.w/2, -b.h, b.w, b.h, 2); ctx.fill();
+      // Three layers, because one gradient that faded to transparent at the
+      // tail was most of why these were hard to see against a bright nebula:
+      //   1. a soft halo so the shot carries its own light
+      //   2. an opaque body that never fades out
+      //   3. a hard white core down the middle
+      const warm = b.crit || b.charged;
+      const halo = ctx.createRadialGradient(0, -b.h * 0.5, 1, 0, -b.h * 0.5, b.w * 2.6);
+      halo.addColorStop(0, warm ? 'rgba(255,235,170,0.55)' : 'rgba(150,225,255,0.5)');
+      halo.addColorStop(1, 'rgba(120,200,255,0)');
+      ctx.fillStyle = halo;
+      ctx.beginPath();
+      ctx.ellipse(0, -b.h * 0.5, b.w * 2.6, b.h * 0.85, 0, 0, Math.PI * 2);
+      ctx.fill();
+
+      ctx.fillStyle = warm ? '#ffdd66' : '#8fe4ff';
+      ctx.beginPath(); ctx.roundRect(-b.w/2, -b.h, b.w, b.h, b.w * 0.4); ctx.fill();
+
+      ctx.fillStyle = '#ffffff';
+      const cw = Math.max(1.4, b.w * 0.46);
+      ctx.beginPath(); ctx.roundRect(-cw/2, -b.h + 1, cw, b.h - 2, cw * 0.5); ctx.fill();
       ctx.restore();
     });
 
     enemyBullets.forEach(b => {
       ctx.save(); ctx.translate(b.x, b.y);
-      let eg = ctx.createRadialGradient(0,0,1,0,0,b.r);
-      eg.addColorStop(0, b.elite ? '#ffffff' : '#ffcc00');
-      eg.addColorStop(1, 'rgba(255,80,0,0)');
+      // Glow, then a solid core. The old single gradient faded to nothing at
+      // its own edge, which made incoming fire a smudge rather than a shape.
+      let eg = ctx.createRadialGradient(0, 0, 1, 0, 0, b.r * 2.1);
+      eg.addColorStop(0, b.elite ? 'rgba(255,220,160,0.85)' : 'rgba(255,170,40,0.7)');
+      eg.addColorStop(1, 'rgba(255,60,0,0)');
       ctx.fillStyle = eg;
-      ctx.beginPath(); ctx.arc(0,0,b.r,0,Math.PI*2); ctx.fill();
+      ctx.beginPath(); ctx.arc(0, 0, b.r * 2.1, 0, Math.PI*2); ctx.fill();
+
+      ctx.fillStyle = b.elite ? '#ff8844' : '#ffb020';
+      ctx.beginPath(); ctx.arc(0, 0, b.r, 0, Math.PI*2); ctx.fill();
+      ctx.fillStyle = '#fff4d8';
+      ctx.beginPath(); ctx.arc(0, -b.r * 0.15, b.r * 0.5, 0, Math.PI*2); ctx.fill();
       ctx.restore();
     });
 
