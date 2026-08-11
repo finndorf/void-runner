@@ -907,3 +907,27 @@ would mean a lance that never winds up or does nothing at all.
 upgrade family for it*, not *lock the charge behind an upgrade*. The base
 charge still works on every hull. Gating it entirely would remove a working
 mechanic, which is the more expensive mistake if the reading is wrong.
+
+---
+
+# ADDENDUM V — cadence and scrap (2026-08-11)
+
+**`SHOP_EVERY` 2 → 4.** At 12-second levels the hauler now arrives about once a
+minute. Still flat at every voidbirth depth — the test that asserts the docking
+pattern is identical from depth 0 to 8 is the one that must never break, so it
+reads the constant rather than a literal.
+
+**Scrap is credited, never collected.** It used to spawn a hex that flew to the
+ship; at a real kill rate that is a constant stream of small objects crossing
+the screen, sitting on top of the one thing you actually need to see. It is
+income — it just arrives. Consecutive grants inside 24 frames merge into a
+single rising number instead of stacking a dozen on the same spot.
+
+Boosts (shield, life, overdrive, cold snap) still drop as objects. They are
+events, not income, and there are only ever a handful on screen. `PICKUP` lost
+its `scrap` entry along with the collect and draw branches for it.
+
+Verified in a browser: 2,500 frames of real play at level 30 put **zero**
+pickups on screen, and income is unchanged (14,087 scrap over two levels with
+no deaths — the low figure in the first measurement was the 50%-per-hit
+penalty, not a regression).

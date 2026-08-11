@@ -1189,8 +1189,10 @@ RLCore.recordWaypoint = function (progress, level) {
 //      docking roughly five times a minute -- the cargo hauler stopped being
 //      an event and became a loading screen.
 //
-// So: flat at every depth, and half as often as before.
-RLCore.SHOP_EVERY = 2;
+// So: flat at every depth, and a quarter as often as it once was. At 12-second
+// levels, every 4th means the hauler arrives about once a minute -- often
+// enough to matter, rare enough to be an event.
+RLCore.SHOP_EVERY = 4;
 RLCore.shopEvery = function (vb) { return RLCore.SHOP_EVERY; };
 
 // ---------------------------------------------------------------------------
@@ -4856,7 +4858,7 @@ function startGame() {
   dyingTimer = 0;
   boss = null; bossActive = false; bossWarning = 0;
   runUpgrades = []; scrap = 0; scrapSpent = 0; scrapOnUpgrades = 0;
-  pickups = []; boostRage = 0; boostFreeze = 0;
+  pickups = []; boostRage = 0; boostFreeze = 0; scrapPopup = null;
   // Ascension is per-run, like the upgrades it governs. A new run starts at
   // the bottom of the ladder however deep the last one got.
   voidbirths = 0;
@@ -6814,14 +6816,36 @@ function drawBossWarning() {
 let pickups = [];
 
 const PICKUP = {
-  scrap:  { col: '#ffd23f', edge: '#8a6a00', label: 'SCRAP' },
   shield: { col: '#5fe0ff', edge: '#0a5a78', label: '+SHIELD' },
   life:   { col: '#5fff9f', edge: '#0a6a34', label: '+1 LIFE' },
   rage:   { col: '#ff6a3a', edge: '#7a2000', label: 'OVERDRIVE' },
   freeze: { col: '#a8f0ff', edge: '#1a6a80', label: 'COLD SNAP' }
 };
 
+// Scrap never becomes an object. It used to spawn a hex that flew to the ship,
+// and at a real kill rate that meant a constant stream of little things
+// crossing the screen — noise, and it sat on top of the one thing you actually
+// need to see, which is the bullets. It is income: it just arrives.
+//
+// Consecutive grants merge into a single rising number rather than stacking a
+// dozen of them on the same spot.
+let scrapPopup = null;
+
+function grantScrap(x, y, amount) {
+  const n = Math.max(0, Math.round(amount));
+  if (!n) return;
+  scrap += n;
+  if (scrapPopup && scrapPopup.text.life > 0 && frame - scrapPopup.frame < 24) {
+    scrapPopup.amount += n;
+    scrapPopup.frame = frame;
+    scrapPopup.text.text = '+' + scrapPopup.amount.toLocaleString();
+    return;
+  }
+  scrapPopup = { amount: n, frame, text: addFlashText('+' + n.toLocaleString(), x, y - 10, '#ffd23f') };
+}
+
 function spawnPickup(x, y, kind, value) {
+  if (kind === 'scrap') { grantScrap(x, y, value); return; }
   if (pickups.length > 60) return;
   pickups.push({
     x, y, kind, value: value || 0,
@@ -6860,12 +6884,8 @@ function updatePickups() {
 
 function collectPickup(p) {
   p.taken = true;
-  const d = PICKUP[p.kind] || PICKUP.scrap;
+  const d = PICKUP[p.kind] || PICKUP.shield;
   switch (p.kind) {
-    case 'scrap':
-      scrap += p.value;
-      addFlashText('+' + p.value.toLocaleString(), p.x, p.y - 12, d.col);
-      break;
     case 'shield':
       if (player.shieldCharges < RLCore.MAX_SHIELD_CHARGES) player.shieldCharges++;
       addFlashText(d.label, p.x, p.y - 12, d.col);
@@ -6891,28 +6911,24 @@ function collectPickup(p) {
 
 function drawPickups() {
   pickups.forEach(p => {
-    const d = PICKUP[p.kind] || PICKUP.scrap;
+    const d = PICKUP[p.kind] || PICKUP.shield;
     const fade = p.life < 90 ? (p.life % 12 < 6 ? 0.35 : 1) : 1;
     ctx.save();
     ctx.globalAlpha = fade;
     ctx.translate(p.x, p.y);
-    ctx.rotate(p.kind === 'scrap' ? p.spin * 0.35 : 0);
     const glow = ctx.createRadialGradient(0, 0, 1, 0, 0, 15);
     glow.addColorStop(0, d.col); glow.addColorStop(1, 'rgba(0,0,0,0)');
     ctx.globalAlpha = fade * 0.45;
     ctx.beginPath(); ctx.arc(0, 0, 15, 0, Math.PI*2); ctx.fillStyle = glow; ctx.fill();
     ctx.globalAlpha = fade;
-    if (p.kind === 'scrap') drawScrapIcon(0, 0, 8, d.col, d.edge);
-    else {
-      ctx.beginPath(); ctx.arc(0, 0, 7, 0, Math.PI*2);
-      ctx.fillStyle = d.col; ctx.fill();
-      ctx.strokeStyle = d.edge; ctx.lineWidth = 1.5; ctx.stroke();
-      ctx.fillStyle = d.edge;
-      if (p.kind === 'shield') { ctx.fillRect(-1.5, -4, 3, 8); ctx.fillRect(-4, -1.5, 8, 3); }
-      else if (p.kind === 'life') { ctx.fillRect(-1.5, -4, 3, 8); ctx.fillRect(-4, -1.5, 8, 3); ctx.fillStyle = d.col; ctx.fillRect(-1, -3, 2, 6); }
-      else if (p.kind === 'rage') { ctx.beginPath(); ctx.moveTo(1,-5); ctx.lineTo(-3,1); ctx.lineTo(0,1); ctx.lineTo(-1,5); ctx.lineTo(3,-1); ctx.lineTo(0,-1); ctx.closePath(); ctx.fill(); }
-      else if (p.kind === 'freeze') { for (let i=0;i<3;i++){ const a=i*Math.PI/3; ctx.beginPath(); ctx.moveTo(-Math.cos(a)*5,-Math.sin(a)*5); ctx.lineTo(Math.cos(a)*5,Math.sin(a)*5); ctx.lineWidth=1.6; ctx.strokeStyle=d.edge; ctx.stroke(); } }
-    }
+    ctx.beginPath(); ctx.arc(0, 0, 7, 0, Math.PI*2);
+    ctx.fillStyle = d.col; ctx.fill();
+    ctx.strokeStyle = d.edge; ctx.lineWidth = 1.5; ctx.stroke();
+    ctx.fillStyle = d.edge;
+    if (p.kind === 'shield') { ctx.fillRect(-1.5, -4, 3, 8); ctx.fillRect(-4, -1.5, 8, 3); }
+    else if (p.kind === 'life') { ctx.fillRect(-1.5, -4, 3, 8); ctx.fillRect(-4, -1.5, 8, 3); ctx.fillStyle = d.col; ctx.fillRect(-1, -3, 2, 6); }
+    else if (p.kind === 'rage') { ctx.beginPath(); ctx.moveTo(1,-5); ctx.lineTo(-3,1); ctx.lineTo(0,1); ctx.lineTo(-1,5); ctx.lineTo(3,-1); ctx.lineTo(0,-1); ctx.closePath(); ctx.fill(); }
+    else if (p.kind === 'freeze') { for (let i=0;i<3;i++){ const a=i*Math.PI/3; ctx.beginPath(); ctx.moveTo(-Math.cos(a)*5,-Math.sin(a)*5); ctx.lineTo(Math.cos(a)*5,Math.sin(a)*5); ctx.lineWidth=1.6; ctx.strokeStyle=d.edge; ctx.stroke(); } }
     ctx.restore();
   });
 }
@@ -14233,7 +14249,11 @@ function killEnemy(e) {
 }
 
 function addFlashText(text, x, y, color) {
-  flashText.push({text, x, y, life: 60, color, vy: -1.2});
+  const t = {text, x, y, life: 60, color, vy: -1.2};
+  flashText.push(t);
+  // Returned so a caller can keep editing it — the scrap counter merges
+  // consecutive grants into one rising number instead of stacking a dozen.
+  return t;
 }
 
 function hitPlayer() {

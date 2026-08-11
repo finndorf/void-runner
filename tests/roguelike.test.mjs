@@ -1507,10 +1507,13 @@ test('the ARMADA interval is 100 levels', () => {
 // change the cadence, AND the cadence is every second level rather than every
 // level. Levels are half as long as they were, so a shop after every one meant
 // docking five times a minute.
-test('the shop cadence is every second level, and depth never changes it', () => {
-  assert.equal(core.SHOP_EVERY, 2);
+test('the shop cadence is fixed, and depth never changes it', () => {
+  // The exact number has moved twice; what must never move is that it is the
+  // SAME number at every depth. Asserted against the constant so a retune
+  // cannot silently reintroduce the voidbirth debuff.
+  assert.equal(core.SHOP_EVERY, 4);
   for (let vb = 0; vb <= 8; vb++) {
-    assert.equal(core.shopEvery(vb), 2, `voidbirth ${vb}`);
+    assert.equal(core.shopEvery(vb), core.SHOP_EVERY, `voidbirth ${vb}`);
   }
   // The same pattern at every depth is the property that matters most here.
   const at0 = [];
@@ -1523,10 +1526,13 @@ test('the shop cadence is every second level, and depth never changes it', () =>
   }
 });
 
-test('an ordinary odd level does not open a shop', () => {
-  assert.equal(core.shopOpensAfter(3, 0), false);
-  assert.equal(core.shopOpensAfter(4, 0), true);
-  assert.equal(core.shopOpensAfter(5, 0), false);
+test('only every SHOP_EVERY-th ordinary level opens a shop', () => {
+  // Levels 1..8 are clear of the level-10 boss, so the cadence is the only
+  // thing deciding here.
+  for (let level = 1; level <= 8; level++) {
+    assert.equal(core.shopOpensAfter(level, 0), level % core.SHOP_EVERY === 0,
+      `level ${level}`);
+  }
 });
 
 

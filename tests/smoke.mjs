@@ -79,7 +79,9 @@ const fn = new Function(...keys, `${src}\n; return { get state(){return state}, 
   get seenEnemies(){return Save.data.seenEnemies}, get seenUpgrades(){return Save.data.seenUpgrades},
   makeEnemy, ENEMY, drawSettings, drawBestiary, openSettings, openBestiary, bestiaryEntries, bestiaryColumns,
   settingsRows, hitPlayer, Save, player,
-  clearBoard: () => { asteroids = []; enemyBullets = []; bullets = []; pickups = []; }, set scrap(v){scrap=v}, set enemies(v){enemies=v}, set lives(v){lives=v},
+  clearBoard: () => { asteroids = []; enemyBullets = []; bullets = []; pickups = []; },
+  clearFlashText: () => { flashText = []; scrapPopup = null; },
+  get flashText(){ return flashText; }, spawnPickup, set scrap(v){scrap=v}, set enemies(v){enemies=v}, set lives(v){lives=v},
   set voidbirths(v){voidbirths=v}, spawnFormation, spawnBoss, startGame, levelUp,
   setLaunch: (v) => { launchLevel = v; }, get launch(){ return launchLevel; },
   get chargeShot(){return chargeShot}, set touchCharging(v){touchCharging=v} };`);
@@ -133,9 +135,9 @@ check('enemies spawn with curve HP, not the old flat table', () => {
 });
 
 check('the shop opens, rolls resolved cards, and closes', () => {
-  // Shops open every SECOND level now, and the cadence is checked against the
-  // level you just CLEARED — so clear an even one.
-  api.level = 4;
+  // The cadence is checked against the level you just CLEARED, so land on a
+  // multiple of it rather than hardcoding a number that keeps moving.
+  api.level = api.RLCore.SHOP_EVERY;
   api.levelUp();
   if (api.state !== 'shop') throw new Error('state is ' + api.state);
   for (let i = 0; i < 120; i++) api.draw();
@@ -144,8 +146,8 @@ check('the shop opens, rolls resolved cards, and closes', () => {
 });
 
 check('the shop has NO timer that can close it', () => {
-  api.level = 6;
-  api.levelUp();                       // clearing an even level docks
+  api.level = api.RLCore.SHOP_EVERY * 2;
+  api.levelUp();                       // clearing a cadence level docks
   for (let i = 0; i < 60 * 90; i++) { /* 90 seconds */ }
   if (api.state !== 'shop') throw new Error('shop closed on its own');
   api.closeShop();
@@ -240,18 +242,48 @@ check('one level in every band runs clean', () => {
   }
 });
 
-check('meteors break open and drop something you can pick up', () => {
+check('scrap is credited on the spot and never becomes an object', () => {
   api.state = 'play';
   api.level = 40;
-  api.enemies = [];
-  const before = api.pickups.length;
+  api.enemies = []; api.clearBoard();
+  const before = api.scrap;
+  api.spawnPickup(200, 200, 'scrap', 500);
+  if (api.scrap !== before + 500) throw new Error('scrap was not credited instantly');
+  if (api.pickups.length !== 0) throw new Error('scrap spawned a flying object');
+});
+
+check('consecutive scrap grants merge into one number', () => {
+  api.state = 'play';
+  api.clearBoard();
+  api.clearFlashText();
+  const before = api.scrap;
+  for (let i = 0; i < 8; i++) api.spawnPickup(200, 200, 'scrap', 100);
+  if (api.scrap !== before + 800) throw new Error('scrap total is wrong: ' + (api.scrap - before));
+  const numbers = api.flashText.filter(t => t.text.charAt(0) === '+');
+  if (numbers.length !== 1) throw new Error(numbers.length + ' popups instead of one merged');
+  if (numbers[0].text !== '+800') throw new Error('merged popup reads ' + numbers[0].text);
+});
+
+check('boosts DO still drop as objects you can see arrive', () => {
+  api.state = 'play';
+  api.clearBoard();
+  api.spawnPickup(200, 200, 'shield', 0);
+  if (api.pickups.length !== 1) throw new Error('a shield boost did not drop');
+  tick(200, 'boost collection');
+  if (api.pickups.length !== 0) throw new Error('the boost was never collected');
+});
+
+check('meteors break open and pay out', () => {
+  api.state = 'play';
+  api.level = 40;
+  api.enemies = []; api.clearBoard();
+  const before = api.scrap;
   let guard = 0;
-  // Park the player under the rocks so the magnet has something to do.
-  while (api.pickups.length === before && guard++ < 4000) {
+  while (api.scrap === before && guard++ < 4000) {
     api.asteroids.forEach(a => { a.hp = 0.0001; });
     tick(1, 'meteor drops');
   }
-  if (api.pickups.length === before) throw new Error('no pickup ever dropped from a meteor');
+  if (api.scrap === before) throw new Error('no meteor ever paid out');
 });
 
 check('an enemy that gets past you is free — breaches were removed', () => {
