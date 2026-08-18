@@ -1884,6 +1884,11 @@ RLCore.rollSlot = function (level, vb, owned, rnd, exclude, bump) {
   return null;
 };
 
+// The gun's hard ceilings. Bounces in particular turn a wide fan into a solid
+// curtain, because every shot gets a second and third pass across the screen.
+RLCore.MAX_EXTRA_SHOTS = 7;    // 9 forward shots, plus rear/sides
+RLCore.MAX_RICOCHET = 2;
+
 RLCore.BASE_SHOP_SLOTS = 3;
 
 RLCore.rollShop = function (level, vb, owned, rnd, slots, bumpFirst) {
@@ -1998,7 +2003,10 @@ RLCore.resolveStats = function (ship, owned, vb, level) {
     hitScale: Math.max(0.4, 1 + sum('hitScaleMul')),
     bulletSpeedMul: 1 + sum('bulletSpeedMul'),
     shieldCharges: Math.min(RLCore.MAX_SHIELD_CHARGES, sum('shieldCharges')),
-    extraShots: sum('extraShots'),
+    // Capped. Uncapped, a deep build fired a wall of twenty-eight bullets a
+    // volley that nothing could fly through — which is not a gun, it is a
+    // screen wipe you hold down.
+    extraShots: Math.min(RLCore.MAX_EXTRA_SHOTS, sum('extraShots')),
     extraLives: Math.min(RLCore.REPAIR_KIT_MAX, sum('lives')) + sum('extraLife'),
     scrapMul: 1 + sum('scrapMul'),
     scrapPerLevel: sum('scrapPerLevel'),
@@ -2012,7 +2020,7 @@ RLCore.resolveStats = function (ship, owned, vb, level) {
     splash: max('splash'),
     burn: max('burn'),
     chill: max('chill'),
-    ricochet: max('ricochet'),
+    ricochet: Math.min(RLCore.MAX_RICOCHET, max('ricochet')),
     execute: max('execute'),
     verdict: max('verdict'),
     // See SHIELD_REGEN_RATIO: regrowth is forced strictly slower than the
@@ -2112,8 +2120,10 @@ RLCore.creditsForScore = function (score) {
 // flat 0.8 comes off the top, so income at depth is roughly three-quarters of
 // what it was. Enough that a shop is a decision again; not so much that the
 // deep game starves.
-RLCore.SCRAP_RATE = 0.8;
-RLCore.SCRAP_DEPTH_EXPONENT = 0.50;
+// Cut hard. At the old rate forty kills on level 22 paid 26,737 against a
+// 240-scrap common — the shop was not a decision, it was a formality.
+RLCore.SCRAP_RATE = 0.34;
+RLCore.SCRAP_DEPTH_EXPONENT = 0.42;
 
 RLCore.scrapForKill = function (points, scrapMul, level) {
   const depth = Math.pow(Math.max(1, level || 1), RLCore.SCRAP_DEPTH_EXPONENT);
@@ -2138,16 +2148,37 @@ RLCore.scrapAfterHit = function (scrap, fraction) {
 
 RLCore.rerollCost = function (uses) { return 300 * Math.pow(2, uses); };
 
-RLCore.priceFor = function (tierId, priceDiscount) {
+// Prices used to be flat forever while income scaled with depth, so one level
+// at level 22 paid for a HUNDRED common cards. The result was a build of ~100
+// upgrades and a screen so full of your own bullets that nothing could reach
+// you. Scrap was not the reward for playing well; it was a formality.
+//
+// Every upgrade you already own makes the next one dearer. That is a soft cap
+// rather than a hard one: you converge on a build of thirty-odd rather than
+// being told "no", and choosing WHICH thirty is the game.
+RLCore.PRICE_GROWTH = 1.09;
+
+RLCore.priceFor = function (tierId, priceDiscount, ownedCount) {
   const base = RLCore.tierOf(tierId).price;
-  return Math.max(1, Math.round(base * (1 - Math.min(0.6, priceDiscount || 0))));
+  const owned = Math.max(0, ownedCount || 0);
+  const scaled = base * Math.pow(RLCore.PRICE_GROWTH, owned);
+  return Math.max(1, Math.round(scaled * (1 - Math.min(0.6, priceDiscount || 0))));
+};
+
+// How many upgrades a build holds, counting stacks — three stacks of a common
+// is three purchases and should price like it.
+RLCore.buildSize = function (owned) {
+  return (owned || []).reduce((n, o) => n + (o.stacks || 0), 0);
 };
 
 // Firing pattern: the two base shots fly parallel until WIDE MOUNT adds more,
 // at which point the whole pattern fans out (narrower with TIGHT BARREL).
 RLCore.buildShots = function (s) {
   if (s.needle) return [{ dx: 0, dy: -10, a: 0, needle: true }];
-  const n = 2 + s.extraShots;
+  // Clamped here as well as in resolveStats. This function owns the answer to
+  // "how many bullets exist", so it should not depend on every caller having
+  // remembered to cap its input.
+  const n = 2 + Math.min(RLCore.MAX_EXTRA_SHOTS, Math.max(0, s.extraShots || 0));
   const step = 0.085 * s.spread;
   const fan = s.extraShots > 0;
   const shots = [];
@@ -16142,7 +16173,7 @@ const SKIP_RECT   = { x: W/2 +  84, y: 474, w: 142, h: 34 };
 // WAR CHEST discounts everything on the rack. Read through one function so
 // the card, the affordability check, and the charge can never disagree.
 function slotPrice(u) {
-  return RLCore.priceFor(u.tier, stats ? stats.priceDiscount : 0);
+  return RLCore.priceFor(u.tier, stats ? stats.priceDiscount : 0, RLCore.buildSize(runUpgrades));
 }
 
 function tryBuySlot(i) {

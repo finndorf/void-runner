@@ -2677,22 +2677,67 @@ test('scrapForKill scales with the level you are on', () => {
 });
 
 test('scrapForKill follows the tightened depth curve', () => {
-  assert.equal(core.SCRAP_DEPTH_EXPONENT, 0.50);
-  assert.equal(core.SCRAP_RATE, 0.8);
+  assert.equal(core.SCRAP_DEPTH_EXPONENT, 0.42);
+  assert.equal(core.SCRAP_RATE, 0.34);
   [1, 10, 100, 500, 2500].forEach(level => {
     assert.equal(core.scrapForKill(100, 1, level),
-      Math.max(1, Math.round(100 * Math.pow(level, 0.50) * 0.8)), `level ${level}`);
+      Math.max(1, Math.round(100 * Math.pow(level, core.SCRAP_DEPTH_EXPONENT) * core.SCRAP_RATE)),
+      `level ${level}`);
   });
 });
 
-// "Harder, but only by a bit" — the brief. Roughly three-quarters of the old
-// rate, not a tenth of it.
-test('income is tightened by a notch, not strangled', () => {
-  [10, 100, 1000].forEach(level => {
-    const now = core.scrapForKill(100, 1, level);
-    const before = Math.round(100 * Math.pow(level, 0.55));
-    assert.ok(now < before, `level ${level} did not actually get tighter`);
-    assert.ok(now > before * 0.45, `level ${level} fell to ${now / before} of the old rate`);
+// The screenshot that started this: level 22, ninety-nine upgrades, a screen
+// so full of the player's own bullets that nothing could reach them. The path
+// there was reroll-and-rebuy — buy every slot, reroll, buy again — which flat
+// prices made unlimited. This models it and pins the outcome.
+function greedyBuildSize(maxLevel) {
+  let owned = 0, purse = 0;
+  for (let lv = 1; lv <= maxLevel; lv++) {
+    purse += 40 * core.scrapForKill(160, 1, lv) + 400;
+    if (lv % core.SHOP_EVERY !== 0) continue;
+    let rerolls = 0;
+    for (let round = 0; round < 60; round++) {
+      let bought = 0;
+      for (let slot = 0; slot < 5; slot++) {
+        const p = core.priceFor('RARE', 0, owned);
+        if (purse < p) break;
+        purse -= p; owned++; bought++;
+      }
+      const rc = core.rerollCost(rerolls);
+      if (purse < rc) break;
+      purse -= rc; rerolls++;
+      if (bought === 0 && rerolls > 6) break;
+    }
+  }
+  return owned;
+}
+
+test('a run cannot buy its way to a hundred upgrades', () => {
+  assert.ok(greedyBuildSize(22) < 40, `level 22 reached ${greedyBuildSize(22)} upgrades`);
+  assert.ok(greedyBuildSize(100) < 70, `level 100 reached ${greedyBuildSize(100)} upgrades`);
+});
+
+test('a build still GROWS — the cap is soft, not a wall', () => {
+  assert.ok(greedyBuildSize(50) > greedyBuildSize(22), 'depth must still buy you more');
+  assert.ok(greedyBuildSize(22) > 12, 'and level 22 must still afford a real build');
+});
+
+// The shape that matters: income grows with depth, but the cost of the NEXT
+// card grows faster, so a build converges instead of running away.
+test('build size converges rather than running away', () => {
+  const affordable = level => {
+    const income = 40 * core.scrapForKill(160, 1, level) + 400;
+    let owned = 0;
+    // Spend a whole level's income on commons and see where it stops.
+    let purse = income;
+    while (purse >= core.priceFor('COMMON', 0, owned) && owned < 500) {
+      purse -= core.priceFor('COMMON', 0, owned);
+      owned++;
+    }
+    return owned;
+  };
+  [10, 22, 50, 100].forEach(lv => {
+    assert.ok(affordable(lv) < 30, `a single level at ${lv} still buys ${affordable(lv)} cards`);
   });
 });
 
@@ -3262,4 +3307,68 @@ test("a save with ONLY 'p' on pause falls back rather than being left unbound", 
     { version: 5, settings: { binds: { pause: ['p'] } } }, DEFAULTS());
   assert.ok(data.settings.binds.pause.length > 0, 'settings became unreachable');
   assert.deepEqual(data.settings.binds.pause, core.DEFAULT_BINDS.pause);
+});
+
+// ---------------------------------------------------------------------------
+// 21. The cost of a build
+// ---------------------------------------------------------------------------
+// Prices were flat forever while income scaled with depth, so a level at 22
+// paid for a hundred commons. The result was a hundred-upgrade build and a
+// screen so full of the player's own bullets that nothing could reach them.
+
+test('every upgrade owned makes the next one dearer', () => {
+  assert.ok(core.PRICE_GROWTH > 1);
+  let prev = 0;
+  for (let owned = 0; owned <= 60; owned++) {
+    const p = core.priceFor('RARE', 0, owned);
+    assert.ok(p > prev, `price did not rise at ${owned} owned`);
+    prev = p;
+  }
+  assert.equal(core.priceFor('RARE', 0, 0), core.tierOf('RARE').price, 'the first card is full price');
+});
+
+test('a big build prices itself out long before a hundred cards', () => {
+  const income = 40 * core.scrapForKill(160, 1, 30) + 400;
+  // At forty owned, one EPIC should cost several levels of income.
+  assert.ok(core.priceFor('EPIC', 0, 40) > income * 4,
+    'forty upgrades in, an EPIC is still casually affordable');
+});
+
+test('buildSize counts stacks, not entries', () => {
+  assert.equal(core.buildSize([]), 0);
+  assert.equal(core.buildSize([{ id: 'a', stacks: 3 }, { id: 'b', stacks: 2 }]), 5);
+  assert.equal(core.buildSize(undefined), 0);
+});
+
+test('the discount still works, and still cannot make things free', () => {
+  const full = core.priceFor('EPIC', 0, 10);
+  const cut = core.priceFor('EPIC', 0.5, 10);
+  assert.ok(cut < full && cut > 0);
+  assert.ok(core.priceFor('COMMON', 5, 0) >= 1, 'a silly discount must not zero a price');
+});
+
+test('the gun has a hard ceiling however many cards stack', () => {
+  assert.equal(core.MAX_EXTRA_SHOTS, 7);
+  assert.equal(core.MAX_RICOCHET, 2);
+  const every = core.UPGRADES
+    .filter(u => u.effect.extraShots || u.effect.ricochet)
+    .map(u => ({ id: u.id, stacks: core.tierOf(u.tier).stackLimit }));
+  for (let vb = 0; vb <= 5; vb++) {
+    const s = core.resolveStats(SHIP, every, vb, 60);
+    assert.ok(s.extraShots <= core.MAX_EXTRA_SHOTS, `extraShots ${s.extraShots} at vb${vb}`);
+    assert.ok(s.ricochet <= core.MAX_RICOCHET, `ricochet ${s.ricochet} at vb${vb}`);
+  }
+});
+
+test('buildShots clamps its own input, whatever it is handed', () => {
+  assert.equal(core.buildShots({ extraShots: 999, spread: 1 }).length, 2 + core.MAX_EXTRA_SHOTS);
+  assert.equal(core.buildShots({ extraShots: -5, spread: 1 }).length, 2);
+});
+
+test('no build can put more than a readable number of bullets in a volley', () => {
+  const every = core.UPGRADES
+    .filter(u => u.effect.extraShots || u.effect.rear || u.effect.sides || u.effect.twinCore)
+    .map(u => ({ id: u.id, stacks: core.tierOf(u.tier).stackLimit }));
+  const shots = core.buildShots(core.resolveStats(SHIP, every, 5, 60));
+  assert.ok(shots.length <= 30, `${shots.length} bullets a volley is a curtain, not a gun`);
 });

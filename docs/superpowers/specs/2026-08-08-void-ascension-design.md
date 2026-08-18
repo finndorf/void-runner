@@ -1042,3 +1042,59 @@ project's oldest bug wearing a menu instead of an upgrade card.
 Both removed, and `tools/hookaudit.mjs` gained two checks so it cannot recur:
 every action in `BIND_ORDER` must be read by `keyMatches` or `held`, and no two
 actions may claim the same default key.
+
+---
+
+# ADDENDUM VIII — ninety-nine upgrades (2026-08-18)
+
+A screenshot: **level 22, "+86 MORE" upgrades, 540,829 scrap**, and a screen so
+full of the player's own bullets that nothing could fly through it.
+
+## The arithmetic
+
+Prices were **flat forever** while income scaled with depth:
+
+| level | scrap from a level | COMMON | RARE | EPIC |
+|---|---|---|---|---|
+| 5 | 12,652 | 240 | 900 | 2,100 |
+| 22 | 26,737 | 240 | 900 | 2,100 |
+| 50 | 40,499 | 240 | 900 | 2,100 |
+
+**One level at 22 paid for 106 common cards.** The shop was not a decision.
+
+The route to a hundred upgrades was **reroll-and-rebuy**: buy every slot,
+reroll, buy again, repeat while the purse holds. Modelled, that reaches **108
+upgrades by level 22** on flat prices — which matches the screenshot.
+
+## The fix
+
+**Every upgrade you own makes the next one dearer** (`PRICE_GROWTH = 1.09`,
+compounding on build size). A soft cap, not a wall: you converge on thirty-odd
+and choosing *which* thirty is the game.
+
+| owned | COMMON | RARE | EPIC |
+|---|---|---|---|
+| 0 | 240 | 900 | 2,100 |
+| 20 | 1,345 | 5,044 | 11,769 |
+| 40 | 7,538 | 28,268 | 65,960 |
+
+Plus **income cut to roughly a third** (`SCRAP_RATE` 0.8 → 0.34, exponent 0.50
+→ 0.42), and hard ceilings on the gun: `MAX_EXTRA_SHOTS = 7` and
+`MAX_RICOCHET = 2`. Bounces are what turned a wide fan into a solid curtain,
+since every shot got two more passes across the screen. `buildShots` clamps its
+own input too, rather than trusting every caller.
+
+## Measured, same conditions
+
+A real run played to level 23, buying and rerolling as hard as the purse allows
+at all seven docks:
+
+| | before | after |
+|---|---|---|
+| upgrades at level 22 | 99 | **17** |
+| scrap left over | 540,829 | **61** |
+| bullets in a volley | a curtain | 2 |
+| enemies pressing in | ~0 | 32 |
+
+The modelled greedy maximum went from 108 to 29 at level 22, and 781 to 51 at
+level 100.
