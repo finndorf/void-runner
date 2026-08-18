@@ -80,11 +80,14 @@ const fn = new Function(...keys, `${src}\n; return { get state(){return state}, 
   makeEnemy, ENEMY, drawSettings, drawBestiary, openSettings, openBestiary, bestiaryEntries, bestiaryColumns,
   settingsRows, hitPlayer, Save, player,
   clearBoard: () => { asteroids = []; enemyBullets = []; bullets = []; pickups = []; },
-  clearFlashText: () => { flashText = []; scrapPopup = null; },
+  clearFlashText: () => { flashText = []; scrapPopup = null; scrapLossPopup = null; },
   get flashText(){ return flashText; }, spawnPickup, set scrap(v){scrap=v}, set enemies(v){enemies=v}, set lives(v){lives=v},
   set voidbirths(v){voidbirths=v}, spawnFormation, spawnBoss, startGame, levelUp,
   setLaunch: (v) => { launchLevel = v; }, get launch(){ return launchLevel; },
-  get chargeShot(){return chargeShot}, set touchCharging(v){touchCharging=v} };`);
+  get chargeShot(){return chargeShot}, set touchCharging(v){touchCharging=v},
+  retireRun, closeShop, bumpUpgrades: () => { runUpgradesVersion++; }, recomputeStats,
+  addScore: (n) => { score += n; },
+  killEnemy, get livesFromKills(){return livesFromKills} };`);
 
 let api, bootError = null;
 try {
@@ -493,4 +496,116 @@ check('reaching a waypoint records it', () => {
   if ((api.Save.data.waypoints[10] || 0) !== 1) {
     throw new Error('arriving at level 10 was not recorded');
   }
+});
+
+// ---------------------------------------------------------------------------
+// The credits fix
+// ---------------------------------------------------------------------------
+// Credits used to be paid only in endRun(), so a run you could not lose paid
+// nothing at all. That was the bug being reported as "impossible to collect".
+
+check('credits bank as you clear levels, without dying', () => {
+  api.Save.data.credits = 0;
+  api.startGame();
+  api.level = 20;
+  const before = api.Save.data.credits;
+  // Earn something, then clear a few levels.
+  api.addScore(60000);
+  for (let i = 0; i < 4; i++) {
+    api.levelUp();
+    if (api.state === 'shop') api.closeShop();
+  }
+  if (api.Save.data.credits <= before) {
+    throw new Error('nothing banked after four cleared levels');
+  }
+  if (api.state === 'dying' || api.state === 'dead') throw new Error('the pilot had to die for it');
+});
+
+check('banking never pays for the same score twice', () => {
+  api.Save.data.credits = 0;
+  api.startGame();
+  api.level = 20;
+  api.addScore(60000);
+  api.levelUp(); if (api.state === 'shop') api.closeShop();
+  const afterOne = api.Save.data.credits;
+  // No further score: clearing more levels must pay nothing extra.
+  for (let i = 0; i < 3; i++) { api.levelUp(); if (api.state === 'shop') api.closeShop(); }
+  if (api.Save.data.credits !== afterOne) {
+    throw new Error('paid ' + (api.Save.data.credits - afterOne) + ' extra for no new score');
+  }
+});
+
+check('retiring ends the run and keeps everything', () => {
+  api.Save.data.credits = 0;
+  api.startGame();
+  api.level = 20;
+  api.addScore(60000);
+  api.levelUp(); if (api.state === 'shop') api.closeShop();
+  const banked = api.Save.data.credits;
+  if (banked <= 0) throw new Error('nothing was banked before retiring');
+  api.state = 'play';
+  api.retireRun();
+  if (api.state !== 'dying' && api.state !== 'dead') throw new Error('retire did not end the run');
+  if (api.Save.data.credits < banked) throw new Error('retiring lost credits');
+});
+
+check('a shield block gives less mercy each time it is repeated', () => {
+  api.state = 'play';
+  api.level = 30;
+  api.enemies = []; api.clearBoard();
+  api.player.mercyStreak = 0; api.player.mercyTimer = 0;
+  const windows = [];
+  for (let i = 0; i < 4; i++) {
+    api.player.shieldCharges = 3;
+    api.player.invincible = 0;
+    api.hitPlayer();
+    windows.push(api.player.invincible);
+  }
+  for (let i = 1; i < windows.length; i++) {
+    if (windows[i] > windows[i - 1]) {
+      throw new Error('mercy grew on repeat: ' + windows.join(','));
+    }
+  }
+  if (windows[3] >= windows[0]) throw new Error('no decay at all: ' + windows.join(','));
+  if (windows[0] > api.RLCore.MAX_SHIELD_MERCY) throw new Error('first window over the cap');
+});
+
+check('lives from kills stop at the cap', () => {
+  api.startGame();
+  api.level = 30;
+  api.runUpgrades.length = 0;
+  api.runUpgrades.push({ id: 'l_second_life', stacks: 1 });
+  api.bumpUpgrades(); api.recomputeStats();
+  api.lives = 3;
+  const start = api.lives;
+  // Driven through the REAL kill path, not a copy of its arithmetic — a test
+  // that reimplements the rule proves only that the copy agrees with itself.
+  for (let i = 0; i < 2000; i++) {
+    const e = api.makeEnemy('skiff');
+    e.x = 240; e.y = 200;
+    api.enemies.push(e);
+    api.killEnemy(e);
+  }
+  const gained = api.lives - start;
+  if (gained === 0) throw new Error('the card granted nothing at all');
+  if (gained > api.RLCore.MAX_LIVES_FROM_KILLS) {
+    throw new Error('gained ' + gained + ' lives, cap is ' + api.RLCore.MAX_LIVES_FROM_KILLS);
+  }
+  if (api.livesFromKills !== api.RLCore.MAX_LIVES_FROM_KILLS) {
+    throw new Error('counter reads ' + api.livesFromKills + ' after 2000 kills');
+  }
+});
+
+check('repeated scrap LOSSES merge into one number too', () => {
+  api.state = 'play';
+  api.level = 20;
+  api.enemies = []; api.clearBoard(); api.clearFlashText();
+  api.scrap = 100000;
+  api.player.shieldCharges = 0;
+  api.player.phaseReady = false;
+  api.player.phaseCharge = 0;
+  api.lives = 40;
+  for (let i = 0; i < 6; i++) { api.player.invincible = 0; api.hitPlayer(); }
+  const numbers = api.flashText.filter(t => t.text.charAt(0) === '-');
+  if (numbers.length !== 1) throw new Error(numbers.length + ' loss popups instead of one merged');
 });

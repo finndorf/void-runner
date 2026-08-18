@@ -931,3 +931,79 @@ Verified in a browser: 2,500 frames of real play at level 30 put **zero**
 pickups on screen, and income is unchanged (14,087 scrap over two levels with
 no deaths — the low figure in the first measurement was the 50%-per-hit
 penalty, not a regression).
+
+---
+
+# ADDENDUM VI — why it stopped being hard (2026-08-18)
+
+## The measurement
+
+A pilot that **never moves** — the worst possible player — booted headless:
+
+| build | enemies on screen | incoming bullets | outcome |
+|---|---|---|---|
+| bare | 17.7 | 14.7 | dead in 8s |
+| strong | 0.5–2.8 | **0.5–1** | 3 minutes, **zero hits** |
+
+Then the decisive one. The immortal build was **invulnerable 87% of a
+two-minute fight**, taking 32 shield blocks. The screen was *not* empty and it
+*was* being hit — every block bought a mercy window nearly as long as the gap
+until the next hit, so the windows chained into permanent immunity.
+
+Two independent causes, then, and the second was the real one.
+
+## 1. Threat was capped; damage was not
+
+`spawnRate` floored at 35 frames from level 11 and never moved: 1.71 ships a
+second at level 20 and the same 1.71 at level 2,500. Only health grew — and
+**health is not threat**, because an enemy needs about a second and a half on
+screen before it fires. Anything killed faster contributes nothing however
+tough it was.
+
+- `spawnRateAt` keeps shrinking past the knee, floor 5 frames (12/s).
+- `spawnBurstAt` sends **groups**, up to 4 at a time. Rate alone cannot fill a
+  screen against a build that deletes a ship on contact.
+- `spawnReadiness` — at depth ships arrive with most of their firing cycle
+  already spent, so a tough hull gets its round off before it dies. This is
+  what finally makes enemy health mean something.
+- Concurrent enemy cap 40 → 64.
+
+Effective pressure: **1.7/s → 6.5/s at level 40, 19.6/s at level 90.**
+Untouched below level 11.
+
+## 2. Mercy windows chained
+
+- `MAX_SHIELD_MERCY = 90` — a block bought up to 180 frames. Mercy nearly as
+  long as the gap between hits *is* immunity.
+- `mercyFor` decays the window on repeated blocks, floored so a block always
+  reads.
+- `SHIELD_REGEN_RATIO` forces regrowth strictly slower than the mercy granted,
+  enforced on the **resolved stats** so no card *combination* can recreate the
+  loop. A test pairs every regen card with every mercy card at every depth.
+- `MAX_GRACE_SECONDS = 2.5` — one card gave five.
+- The regen ceiling was `shieldCharges + 3`, letting a 3-charge build float
+  six. Now the resolved cap.
+- Lives from kills are capped at 3 a run: kill rate scales with damage, so an
+  uncapped source means the stronger you get the more lives you gain.
+
+## 3. You had to die to get paid
+
+`endRun()` was the only place credits were banked, so a run you could not lose
+paid **nothing**. This was arguably the more annoying half of the report.
+
+- `bankCredits()` pays out every level clear, on the difference between earned
+  and already-paid, so the compressive curve still applies to the run total.
+- **RETIRE**, on the pause panel mid-run, ends the run deliberately. Two
+  presses. A retired run and a wrecked one pay identically.
+
+## Result — stationary pilot, level 60
+
+| build | before | after |
+|---|---|---|
+| bare | 5.6s | 5.6s |
+| strong | ~78s | 23.6s |
+| maxed endgame | never died | 131.5s |
+
+The gradient is the point: a big build should be *much* stronger, not immortal.
+Early levels are untouched — a bare ship still survives 20s at level 1 standing
+completely still.

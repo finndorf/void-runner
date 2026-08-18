@@ -2899,8 +2899,124 @@ test('speeds are monotonically non-decreasing with depth', () => {
 test('spawn and asteroid rates stay clamped at their floors', () => {
   for (const lv of [1, 20, 100, 2500]) {
     const d = core.difficultyAt(lv);
-    assert.ok(d.spawnRate >= 35 && d.asteroidRate >= 50, `level ${lv}`);
+    assert.ok(d.spawnRate >= core.SPAWN_FLOOR, `level ${lv} spawn`);
+    assert.ok(d.asteroidRate >= 28, `level ${lv} asteroid`);
   }
+});
+
+// ---------------------------------------------------------------------------
+// 18. Spawn density — the fix for "it stops being hard"
+// ---------------------------------------------------------------------------
+// The interval used to floor at 35 frames from level 11 and never move again:
+// 1.71 ships a second at level 20 and the same 1.71 at level 2,500. Health is
+// not threat — an enemy needs about a second and a half before it fires, so
+// anything killed faster than that contributes nothing however tough it was.
+
+test('the opening is untouched below the spawn knee', () => {
+  assert.equal(core.SPAWN_KNEE, 11);
+  for (let lv = 1; lv <= core.SPAWN_KNEE; lv++) {
+    assert.equal(core.spawnRateAt(lv), Math.max(35, 90 - lv * 5), `level ${lv}`);
+  }
+});
+
+test('spawn density keeps climbing past the knee', () => {
+  let prev = Infinity;
+  for (let lv = 1; lv <= 3000; lv += 7) {
+    const r = core.spawnRateAt(lv);
+    assert.ok(r <= prev + 1e-9, `interval grew at level ${lv}`);
+    assert.ok(r >= core.SPAWN_FLOOR, `level ${lv} fell through the floor`);
+    prev = r;
+  }
+  // The whole point: it must actually be denser at depth, not merely non-worse.
+  assert.ok(core.spawnRateAt(100) < core.spawnRateAt(20) * 0.75, 'level 100 is barely denser than 20');
+  assert.equal(core.spawnRateAt(3000), core.SPAWN_FLOOR, 'and it does bottom out');
+});
+
+test('ships arrive in groups at depth, one at a time early on', () => {
+  assert.equal(core.spawnBurstAt(1), 1);
+  assert.equal(core.spawnBurstAt(core.BURST_FROM - 1), 1, 'nothing before the knee');
+  assert.ok(core.spawnBurstAt(90) > 1);
+  let prev = 0;
+  for (let lv = 1; lv <= 3000; lv += 3) {
+    const b = core.spawnBurstAt(lv);
+    assert.ok(b >= prev, `burst shrank at level ${lv}`);
+    assert.ok(b <= core.BURST_MAX, `burst ran away at level ${lv}`);
+    prev = b;
+  }
+});
+
+test('effective pressure rises many times over across the run', () => {
+  const at = lv => (60 / core.spawnRateAt(lv)) * core.spawnBurstAt(lv);
+  assert.ok(at(90) > at(20) * 5, 'level 90 must be several times level 20');
+  assert.ok(at(1000) > at(90), 'and it must keep climbing');
+});
+
+test('enemies arrive nearly ready to fire at depth, never early on', () => {
+  assert.equal(core.spawnReadiness(1), 0);
+  assert.equal(core.spawnReadiness(core.READY_FROM), 0, 'the early game is untouched');
+  assert.ok(core.spawnReadiness(60) > 0.3);
+  assert.equal(core.spawnReadiness(9999), core.READY_CAP, 'and it caps');
+  let prev = -1;
+  for (let lv = 1; lv <= 3000; lv += 11) {
+    const r = core.spawnReadiness(lv);
+    assert.ok(r >= prev && r <= 1, `level ${lv}`);
+    prev = r;
+  }
+});
+
+// ---------------------------------------------------------------------------
+// 19. Invulnerability
+// ---------------------------------------------------------------------------
+// The measured cause of immortality. A fully-built ship spent 87% of a
+// two-minute fight invulnerable: it WAS being hit — 32 times — but each block
+// bought a mercy window nearly as long as the gap until the next hit, so the
+// windows chained into permanent immunity.
+
+test('a shield can never regrow faster than the mercy it grants', () => {
+  const shieldCards = core.UPGRADES.filter(u => u.effect.shieldRegen);
+  const mercyCards = core.UPGRADES.filter(u => u.effect.shieldIframes);
+  // Every regen card against every mercy card, at every depth. If any pair
+  // locks, the run is unkillable.
+  shieldCards.forEach(a => mercyCards.concat([{ id: null }]).forEach(b => {
+    const owned = [{ id: a.id, stacks: 1 }].concat(b.id ? [{ id: b.id, stacks: 1 }] : []);
+    for (let vb = 0; vb <= 5; vb++) {
+      const s = core.resolveStats(SHIP, owned, vb, 60);
+      const mercy = Math.min(core.MAX_SHIELD_MERCY, Math.max(60, s.shieldIframes));
+      assert.ok(s.shieldRegen > mercy,
+        `${a.id} + ${b.id} at vb${vb}: regen ${s.shieldRegen} <= mercy ${mercy}`);
+    }
+  }));
+});
+
+test('the mercy window is capped however many cards stack', () => {
+  assert.equal(core.MAX_SHIELD_MERCY, 90);
+  const every = core.UPGRADES.filter(u => u.effect.shieldIframes).map(u => ({ id: u.id, stacks: 1 }));
+  const s = core.resolveStats(SHIP, every, 5, 60);
+  assert.ok(Math.min(core.MAX_SHIELD_MERCY, Math.max(60, s.shieldIframes)) <= core.MAX_SHIELD_MERCY);
+});
+
+test('repeated blocks give steadily less mercy, but never nothing', () => {
+  const base = core.MAX_SHIELD_MERCY;
+  let prev = Infinity;
+  for (let streak = 0; streak < 12; streak++) {
+    const m = core.mercyFor(base, streak);
+    assert.ok(m <= prev, `streak ${streak} gave more than ${streak - 1}`);
+    assert.ok(m >= core.MERCY_FLOOR, `streak ${streak} fell below the floor`);
+    prev = m;
+  }
+  assert.equal(core.mercyFor(base, 0), base, 'a first block is untouched');
+});
+
+test('grace is a breath, not a nap', () => {
+  assert.equal(core.MAX_GRACE_SECONDS, 2.5);
+  const every = core.UPGRADES.filter(u => u.effect.graceSeconds).map(u => ({ id: u.id, stacks: 1 }));
+  assert.ok(core.resolveStats(SHIP, every, 5, 60).graceSeconds <= core.MAX_GRACE_SECONDS);
+});
+
+test('lives from kills are capped, and so are lives', () => {
+  assert.equal(core.MAX_LIVES_FROM_KILLS, 3);
+  assert.equal(core.MAX_LIVES, 9);
+  assert.ok(core.MAX_LIVES_FROM_KILLS < core.MAX_LIVES);
 });
 
 // ---------------------------------------------------------------------------

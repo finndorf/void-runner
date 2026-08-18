@@ -34,7 +34,7 @@ const CFG = {
   maxComboMultiplier: 8,   // uncapped, a long streak runs score into the millions
   levelSeconds: 24,
 
-  caps: { particles: 400, bullets: 200, enemyBullets: 300, enemies: 40 },
+  caps: { particles: 400, bullets: 200, enemyBullets: 300, enemies: 64 },
 
   // Ship roster. `id` is the persisted key.
   ships: [
@@ -494,6 +494,59 @@ RLCore.ENEMY_SPEED_CAP = 6.0;
 RLCore.BULLET_SPEED_KNEE = 50;   // where 2.5 + 0.15*level reaches the cap
 RLCore.BULLET_SPEED_CAP = 10.0;
 
+// ---------------------------------------------------------------------------
+// SPAWN DENSITY -- the fix for "it stops being hard"
+// ---------------------------------------------------------------------------
+// The old rule floored the spawn interval at 35 frames from level 11 onward
+// and never moved again: the game sent 1.71 ships a second at level 20 and the
+// SAME 1.71 a second at level 2,500. Only their health grew.
+//
+// Health is not threat. An enemy needs about a second and a half on screen
+// before it fires, so anything you kill faster than that contributes nothing
+// no matter how much HP it had. That is why a strong build faces an empty
+// screen -- measured at 0.5 incoming bullets a second against 14.7 for a bare
+// ship. Defence never gets tested because nothing lives long enough to test it.
+//
+// So the interval keeps shrinking. It is unchanged below the knee, so the
+// opening is exactly as tuned.
+RLCore.SPAWN_KNEE = 11;          // where 90 - 5*level reaches 35
+RLCore.SPAWN_AT_KNEE = 35;
+RLCore.SPAWN_FLOOR = 5;          // 12 ships a second, the hard ceiling
+RLCore.SPAWN_DECAY = 0.5;
+
+// And they arrive in groups. Rate alone could not keep up with a build that
+// deletes a ship on contact -- one at a time is one at a time however fast the
+// clock ticks. Groups mean the screen can actually fill.
+RLCore.BURST_FROM = 15;
+RLCore.BURST_EVERY = 25;
+RLCore.BURST_MAX = 4;
+
+RLCore.spawnBurstAt = function (level) {
+  const lv = Math.max(1, level || 1);
+  if (lv < RLCore.BURST_FROM) return 1;
+  return Math.min(RLCore.BURST_MAX, 1 + Math.floor((lv - RLCore.BURST_FROM) / RLCore.BURST_EVERY));
+};
+
+RLCore.spawnRateAt = function (level) {
+  const lv = Math.max(1, level || 1);
+  if (lv <= RLCore.SPAWN_KNEE) return Math.max(RLCore.SPAWN_AT_KNEE, 90 - lv * 5);
+  const shrink = Math.pow(RLCore.SPAWN_KNEE / lv, RLCore.SPAWN_DECAY);
+  return Math.max(RLCore.SPAWN_FLOOR, RLCore.SPAWN_AT_KNEE * shrink);
+};
+
+// How much of its firing cycle an enemy has ALREADY spent when it arrives.
+// At depth ships turn up nearly ready to shoot, so a tough hull gets its round
+// off even if you delete it — which is what finally makes enemy health mean
+// something. Zero for the whole early game.
+RLCore.READY_FROM = 12;
+RLCore.READY_CAP = 0.85;
+
+RLCore.spawnReadiness = function (level) {
+  const lv = Math.max(1, level || 1);
+  if (lv <= RLCore.READY_FROM) return 0;
+  return Math.min(RLCore.READY_CAP, (lv - RLCore.READY_FROM) * 0.012);
+};
+
 RLCore.difficultyAt = function (level) {
   const lv = Math.max(1, level || 1);
   const enemySpeed = lv <= RLCore.ENEMY_SPEED_KNEE
@@ -503,9 +556,11 @@ RLCore.difficultyAt = function (level) {
     ? 2.5 + lv * 0.15
     : RLCore.BULLET_SPEED_CAP + Math.min(0.5, (lv - RLCore.BULLET_SPEED_KNEE) * 0.0004);
   return {
-    spawnRate: Math.max(35, 90 - lv * 5),
-    asteroidRate: Math.max(50, 120 - lv * 6),
-    enemySpeed, bulletSpeed
+    spawnRate: RLCore.spawnRateAt(lv),
+    asteroidRate: Math.max(28, 120 - lv * 6),
+    enemySpeed, bulletSpeed,
+    readiness: RLCore.spawnReadiness(lv),
+    burst: RLCore.spawnBurstAt(lv)
   };
 };
 
@@ -1853,6 +1908,47 @@ RLCore.MAX_SHIELD_CHARGES = 3;
 // relative strength.
 RLCore.UPKEEP_SCARCITY = 1.8;
 
+// A shield that regrows faster than the mercy window it grants is literal
+// immortality: every block buys enough invulnerable frames to cover its own
+// replacement, forever. NEVER SCRATCHED did exactly that (regen 120, mercy
+// 120) and FOREVER was worse (60 against 180). Rather than hand-tune two
+// cards, the RULE is enforced on the resolved stats, so no future card or
+// combination can recreate the loop.
+RLCore.SHIELD_REGEN_RATIO = 1.6;
+
+// The measured cause of immortality, and it was not damage: a fully-built ship
+// spent 87% of a two-minute fight INVULNERABLE. It was taking 32 hits — the
+// screen was not empty at all — but every block bought a mercy window long
+// enough to cover the wait for the next one, so the windows chained.
+//
+// A single block still gives its full mercy. Blocking again while the last
+// window is still warm gives less, and less again after that. You cannot buy
+// permanent immunity by being hit a lot, which is what the old rule allowed.
+// The blunt half of the fix, and the one that actually bites. A block used to
+// buy up to 180 frames — three seconds — while a heavily-built ship only takes
+// a hit every three and a half. Mercy nearly as long as the gap between hits
+// IS immunity, however you dress it up. Capped at a second and a half, which
+// is still long enough that a burst cannot strip a whole shield stack.
+RLCore.MAX_SHIELD_MERCY = 90;
+
+RLCore.MERCY_DECAY = 0.55;      // each recent block cuts the next window
+RLCore.MERCY_FLOOR = 18;        // never less than this, so a block still reads
+RLCore.MERCY_STREAK_RESET = 150; // a quiet second and a half clears the streak
+
+RLCore.mercyFor = function (base, streak) {
+  const n = Math.max(0, streak || 0);
+  return Math.max(RLCore.MERCY_FLOOR, Math.round(base / (1 + n * RLCore.MERCY_DECAY)));
+};
+
+// Grace was up to five seconds of untouchability from one card. Capped: the
+// point of SECOND WIND is a breath, not a nap.
+RLCore.MAX_GRACE_SECONDS = 2.5;
+
+// Lives from kills is a feedback loop: more damage means more kills means more
+// lives, and damage is the thing that grows without bound. Capped per run.
+RLCore.MAX_LIVES_FROM_KILLS = 3;
+RLCore.MAX_LIVES = 9;
+
 RLCore.resolveStats = function (ship, owned, vb, level) {
   const v = RLCore.clampVoidbirth(vb);
   const lv = Math.max(1, level || 1);
@@ -1911,11 +2007,18 @@ RLCore.resolveStats = function (ship, owned, vb, level) {
     ricochet: max('ricochet'),
     execute: max('execute'),
     verdict: max('verdict'),
-    shieldRegen: max('shieldRegen'),
+    // See SHIELD_REGEN_RATIO: regrowth is forced strictly slower than the
+    // mercy window, whichever cards the two numbers came from.
+    shieldRegen: (function () {
+      const regen = max('shieldRegen');
+      if (regen <= 0) return 0;
+      const mercy = Math.max(60, max('shieldIframes'));
+      return Math.max(regen, Math.ceil(mercy * RLCore.SHIELD_REGEN_RATIO));
+    })(),
     shieldPerKills: max('shieldPerKills') * RLCore.UPKEEP_SCARCITY,
     shieldRefund: max('shieldRefund'),
     shieldIframes: max('shieldIframes'),
-    graceSeconds: max('graceSeconds'),
+    graceSeconds: Math.min(RLCore.MAX_GRACE_SECONDS, max('graceSeconds')),
     overcharge: max('overcharge'),
     lifePerKills: max('lifePerKills') * RLCore.UPKEEP_SCARCITY,
     reviveOnDeath: max('reviveOnDeath'),
@@ -3965,6 +4068,10 @@ let flashText = [], levelBanner = null;
 let frame = 0;
 let runKills = 0;
 let runCredits = 0, creditsShown = 0;
+// Credits used to be paid ONLY on death, so a run you could not lose paid
+// nothing at all. They are banked as you clear levels now, and the run-end
+// screen settles whatever is left rather than being the only payday.
+let bankedCredits = 0;
 let selIndex = 0;   // start-screen ship selector
 
 // ---- ROGUELIKE RUN STATE (Task 8) ----
@@ -3980,6 +4087,10 @@ let scrapOnUpgrades = 0;
 let voidbirths = 0;
 let stats = null;           // resolved by recomputeStats()
 let overchargeCount = 0, killsSinceLife = 0, killsSinceShield = 0;
+// Lives earned from kills, this run. Capped: kill rate scales with damage and
+// damage grows without bound, so an uncapped source means the stronger you get
+// the more lives you gain — a feedback loop that ends in immortality.
+let livesFromKills = 0;
 // KINETIC VERDICT fires once per level; UNDYING once per run.
 let verdictSpent = false, revivedThisRun = false;
 // WARDEN's per-level grace: hits that cost a life but no upgrade.
@@ -4039,11 +4150,18 @@ const SET_VOL = [
 
 // Rows are: three volumes, the autoskip toggle, then one row per binding.
 function settingsRows() {
-  return SET_VOL.map(v => ({ kind: 'vol', id: v.id, label: v.label }))
-    .concat([{ kind: 'toggle', id: 'autoSkip', label: 'AUTO-SKIP SHOPS' }])
+  const rows = SET_VOL.map(v => ({ kind: 'vol', id: v.id, label: v.label }))
+    .concat([{ kind: 'toggle', id: 'autoSkip', label: 'AUTO-SKIP SHOPS' }]);
+  // RETIRE only exists mid-run. It is the answer to "I cannot die, so I can
+  // never collect" — you end the run on purpose and keep everything.
+  if (settingsReturn === 'play') rows.push({ kind: 'retire', id: 'retire', label: 'RETIRE — END RUN, KEEP CREDITS' });
+  return rows
     .concat(RLCore.BIND_ORDER.map(k => ({ kind: 'bind', id: k, label: RLCore.BIND_LABELS[k] })))
     .concat([{ kind: 'reset', id: 'reset', label: 'RESET TO DEFAULTS' }]);
 }
+
+// Two presses, because ending a good run by accident would be miserable.
+let retireArmed = 0;
 
 function openSettings(from) {
   settingsReturn = from;
@@ -4052,6 +4170,14 @@ function openSettings(from) {
   settingsRebind = null;
   state = 'settings';
   Sound.play('uiMove');
+}
+
+// Ends the run deliberately. Everything the run earned is already banked by
+// bankCredits(); this just settles up and rolls the game-over screen, so a
+// retired run and a wrecked one pay exactly the same.
+function retireRun() {
+  addFlashText('RETIRED', W/2, H/2 - 60, '#9fe8ff');
+  endRun();
 }
 
 function closeSettings() {
@@ -4077,6 +4203,15 @@ function settingsAdjust(row, dir) {
 }
 
 function settingsActivate(row) {
+  if (row.kind === 'retire') {
+    if (retireArmed <= 0) { retireArmed = 240; Sound.play('uiDeny'); return; }
+    retireArmed = 0;
+    closeSettings();
+    state = 'play';
+    retireRun();
+    return;
+  }
+  retireArmed = 0;
   if (row.kind === 'bind') {
     settingsRebind = row.id;
     Sound.play('uiMove');
@@ -4132,6 +4267,7 @@ function drawSettings() {
   ctx.fillStyle = '#5a7a8a';
   ctx.fillText('UP/DOWN CHOOSE   LEFT/RIGHT ADJUST   ENTER SELECT   ESC BACK', W/2, 84);
 
+  if (retireArmed > 0) retireArmed--;
   const rows = settingsRows();
   if (settingsSel < settingsScroll) settingsScroll = settingsSel;
   if (settingsSel >= settingsScroll + SET_VISIBLE) settingsScroll = settingsSel - SET_VISIBLE + 1;
@@ -4168,6 +4304,9 @@ function drawSettings() {
       const listening = settingsRebind === r.id;
       ctx.fillStyle = listening ? '#ffdd44' : (on ? '#ffffff' : '#8aa4b4');
       ctx.fillText(listening ? 'PRESS A KEY…' : Save.data.settings.binds[r.id].map(keyName).join(' / '), W - 44, y);
+    } else if (r.kind === 'retire') {
+      ctx.fillStyle = retireArmed > 0 ? '#ffdd44' : (on ? '#9fe8ff' : '#4d7f96');
+      ctx.fillText(retireArmed > 0 ? 'PRESS AGAIN' : '↵', W - 44, y);
     } else {
       ctx.fillStyle = on ? '#ff8888' : '#7a5555';
       ctx.fillText('↵', W - 44, y);
@@ -4849,6 +4988,7 @@ function startGame() {
   level = RLCore.waypointUnlocked(Save.data.waypoints, launchLevel) ? launchLevel : 1;
   player.x = W/2; player.y = H - 120; player.invincible = 0; player.shieldCharges = 0; player.shieldRegenTimer = 0; player.trail = [];
   player.phaseCharge = 0; player.phaseDriveTimer = 0;
+  player.mercyStreak = 0; player.mercyTimer = 0;
   applyShip(ship);
   bullets = []; enemyBullets = []; asteroids = []; enemies = []; particles = []; flashText = [];
   drones = []; singularity = null;
@@ -4857,14 +4997,14 @@ function startGame() {
   shootTimer = 0;
   dyingTimer = 0;
   boss = null; bossActive = false; bossWarning = 0;
-  runUpgrades = []; scrap = 0; scrapSpent = 0; scrapOnUpgrades = 0;
-  pickups = []; boostRage = 0; boostFreeze = 0; scrapPopup = null;
+  runUpgrades = []; scrap = 0; scrapSpent = 0; scrapOnUpgrades = 0; bankedCredits = 0;
+  pickups = []; boostRage = 0; boostFreeze = 0; scrapPopup = null; scrapLossPopup = null;
   // Ascension is per-run, like the upgrades it governs. A new run starts at
   // the bottom of the ladder however deep the last one got.
   voidbirths = 0;
   vbInfo = null; vbCards = []; vbTick = 0;
   runUpgradesVersion++;
-  overchargeCount = 0; killsSinceLife = 0; killsSinceShield = 0;
+  overchargeCount = 0; killsSinceLife = 0; killsSinceShield = 0; livesFromKills = 0;
   chargeShot = 0; touchCharging = false;
   verdictSpent = false; revivedThisRun = false; scrapDrip = 0;
   recomputeStats();
@@ -4915,6 +5055,19 @@ function startGame() {
   Music.start();
 }
 
+// Pays out the difference between what the run has earned so far and what it
+// has already been paid. Monotonic, so the compressive credit curve still
+// applies to the run TOTAL rather than to each level separately.
+function bankCredits() {
+  const earned = Math.floor(RLCore.creditsForScore(score) * (currentShip().creditMul || 1));
+  const owed = Math.max(0, earned - bankedCredits);
+  if (owed <= 0) return 0;
+  bankedCredits = earned;
+  Save.data.credits += owed;
+  ledgerDirty = true;
+  return owed;
+}
+
 const LEVEL_CLEAR_SCRAP = 500;
 
 function levelUp() {
@@ -4934,6 +5087,10 @@ function levelUp() {
   scrap += clearPay;
   const cleared = level;
   levelTimer = 0; level++;
+  // Banked here, every level, so the credits are yours whether or not the run
+  // ever ends in a wreck.
+  const paid = bankCredits();
+  if (paid > 0) addFlashText('+' + paid.toLocaleString() + ' CR', W/2, 150, '#9fe8ff');
   // Arriving at a checkpoint is what counts, not clearing it. Five arrivals
   // and you may start there next time.
   if (RLCore.waypointAt(level)) {
@@ -4953,7 +5110,8 @@ function levelUp() {
   if (player.canPhase) player.phaseReady = true;   // Phantom recharges each level
   graceLeft = shipNow.graceHits || 0;              // Warden's grace refills too
   // TITAN knits a life back every few levels, never past its own maximum.
-  if (shipNow.regenEvery && cleared % shipNow.regenEvery === 0 && lives < shipNow.lives) {
+  if (shipNow.regenEvery && cleared % shipNow.regenEvery === 0 &&
+      lives < shipNow.lives && lives < RLCore.MAX_LIVES) {
     lives++;
     addFlashText('+1 LIFE', W/2, H/2 - 70, '#5fffaa');
   }
@@ -5132,10 +5290,12 @@ function endRun() {
   Save.data.totalRuns += 1;
   Save.data.totalKills += runKills;
   // SCAVENGER banks a bigger share of the run.
-  runCredits = Math.floor(RLCore.creditsForScore(score) * (currentShip().creditMul || 1));
+  // Settle the remainder. Most of a long run's credits are already banked, so
+  // this is the last level's worth rather than the whole payday.
+  bankCredits();
+  runCredits = bankedCredits;
   Save.data.bestScrapSpent = Math.max(Save.data.bestScrapSpent, scrapSpent);
   creditsShown = 0;
-  Save.data.credits += runCredits;
   Save.write();
   FX.explode(player.x, player.y, 46, '#ff8800');
   FX.explode(player.x - 12, player.y + 8, 26, '#ffdd44');
@@ -6829,19 +6989,26 @@ const PICKUP = {
 //
 // Consecutive grants merge into a single rising number rather than stacking a
 // dozen of them on the same spot.
-let scrapPopup = null;
+let scrapPopup = null, scrapLossPopup = null;
+
+// Merges consecutive numbers of the same kind into one, instead of stacking a
+// dozen on the same spot. Used by both halves of the scrap ledger — losses
+// pile up under sustained fire exactly the way gains did under a good run.
+function mergedNumber(popup, n, x, y, sign, colour) {
+  if (popup && popup.text.life > 0 && frame - popup.frame < 24) {
+    popup.amount += n;
+    popup.frame = frame;
+    popup.text.text = sign + popup.amount.toLocaleString();
+    return popup;
+  }
+  return { amount: n, frame, text: addFlashText(sign + n.toLocaleString(), x, y - 10, colour) };
+}
 
 function grantScrap(x, y, amount) {
   const n = Math.max(0, Math.round(amount));
   if (!n) return;
   scrap += n;
-  if (scrapPopup && scrapPopup.text.life > 0 && frame - scrapPopup.frame < 24) {
-    scrapPopup.amount += n;
-    scrapPopup.frame = frame;
-    scrapPopup.text.text = '+' + scrapPopup.amount.toLocaleString();
-    return;
-  }
-  scrapPopup = { amount: n, frame, text: addFlashText('+' + n.toLocaleString(), x, y - 10, '#ffd23f') };
+  scrapPopup = mergedNumber(scrapPopup, n, x, y, '+', '#ffd23f');
 }
 
 function spawnPickup(x, y, kind, value) {
@@ -6891,8 +7058,8 @@ function collectPickup(p) {
       addFlashText(d.label, p.x, p.y - 12, d.col);
       break;
     case 'life':
-      lives++;
-      addFlashText(d.label, p.x, p.y - 12, d.col);
+      if (lives < RLCore.MAX_LIVES) { lives++; addFlashText(d.label, p.x, p.y - 12, d.col); }
+      else addFlashText('HOLD FULL', p.x, p.y - 12, '#557766');
       break;
     case 'rage':
       // A short, loud damage window. Deliberately timed rather than permanent.
@@ -7061,6 +7228,14 @@ function pickEnemyKind() {
   return w.length ? w[0][0] : 'skiff';
 }
 
+// A spawn's firing clock, already partly spent at depth. This is what makes a
+// tough hull matter: it gets its round off before you delete it, instead of
+// dying in silence with all its health intact.
+function readyTimer(cycle) {
+  const r = RLCore.spawnReadiness(level);
+  return Math.floor(cycle * r + Math.random() * cycle * (1 - r));
+}
+
 function makeEnemy(kind) {
   const d = difficulty();
   const def = ENEMY[kind] || ENEMY.skiff;
@@ -7075,7 +7250,7 @@ function makeEnemy(kind) {
   switch (def.beh) {
     case 'drifter':
       e.vx = (Math.random()-0.5)*2;
-      e.shootTimer = Math.floor(Math.random()*80);
+      e.shootTimer = readyTimer(90);
       break;
     case 'charger':
       // Locks a target column at spawn, then commits to it.
@@ -7088,7 +7263,7 @@ function makeEnemy(kind) {
       e.holdTimer = 480;
       e.phase = 'descend';
       e.aim = Math.PI/2;
-      e.burstLeft = 0; e.burstTimer = 0;
+      e.burstLeft = 0; e.burstTimer = readyTimer(90);
       break;
     case 'mine':
       e.vy = 0.6;
@@ -7100,7 +7275,7 @@ function makeEnemy(kind) {
       // with you, which is a telegraph you can read and get out of.
       e.vy = d.enemySpeed * 0.6;
       e.vx = 0;
-      e.shootTimer = Math.floor(Math.random()*60);
+      e.shootTimer = readyTimer(75);
       e.chargeUp = 0;
       break;
     case 'weaver':
@@ -7110,7 +7285,7 @@ function makeEnemy(kind) {
       e.weaveAmp = 60 + Math.random()*50;
       e.baseX = e.x;
       e.bank = 0;
-      e.shootTimer = Math.floor(Math.random()*70);
+      e.shootTimer = readyTimer(80);
       break;
     case 'bulwark':
       // A shield plate covers its underside. Shoot it from the flank — which
@@ -7142,7 +7317,7 @@ function makeEnemy(kind) {
       e.orbitR = 130 + Math.random() * 70;
       e.orbitDir = Math.random() < 0.5 ? 1 : -1;
       e.settled = false;
-      e.shootTimer = Math.floor(Math.random()*60);
+      e.shootTimer = readyTimer(95);
       break;
     case 'sniper':
       // Holds high, paints a line at you for most of a second, then fires one
@@ -7152,7 +7327,7 @@ function makeEnemy(kind) {
       e.phase = 'descend';
       e.charge = 0;
       e.aim = Math.PI/2;
-      e.shootTimer = Math.floor(Math.random()*90);
+      e.shootTimer = readyTimer(130);
       break;
     case 'splitter':
       // Dies into two smaller copies of itself, once. Killing it badly makes
@@ -7160,14 +7335,14 @@ function makeEnemy(kind) {
       e.vy = d.enemySpeed * 0.6;
       e.vx = (Math.random()-0.5)*1.4;
       e.splitsLeft = 1;
-      e.shootTimer = Math.floor(Math.random()*80);
+      e.shootTimer = readyTimer(90);
       break;
     case 'shielder':
       // Hands out a plate to every nearby ship. Kill it first or kill nothing.
       e.vy = d.enemySpeed * 0.4;
       e.vx = (Math.random()-0.5)*0.9;
       e.auraTimer = 0;
-      e.shootTimer = Math.floor(Math.random()*70);
+      e.shootTimer = readyTimer(110);
       break;
     case 'bomber':
       // Drops slow bombs that sit, then burst into a ring. Area denial.
@@ -7178,9 +7353,9 @@ function makeEnemy(kind) {
     case 'blinker':
       // Teleports rather than travels. Cannot be led, only reacted to.
       e.vy = d.enemySpeed * 0.5;
-      e.blinkTimer = 50 + Math.floor(Math.random()*40);
+      e.blinkTimer = Math.max(8, 90 - Math.floor(90 * RLCore.spawnReadiness(level)));
       e.blinkGhost = 0;
-      e.shootTimer = Math.floor(Math.random()*70);
+      e.shootTimer = readyTimer(90);
       break;
   }
   if (def.bar) e.showBar = true;
@@ -14208,8 +14383,16 @@ function killEnemy(e) {
   if (stats.lifePerKills > 0) {
     killsSinceLife++;
     if (killsSinceLife >= stats.lifePerKills) {
-      killsSinceLife = 0; lives++;
-      addFlashText('+1 LIFE', player.x, player.y - 40, '#44ff88');
+      killsSinceLife = 0;
+      if (livesFromKills >= RLCore.MAX_LIVES_FROM_KILLS) {
+        addFlashText('NO MORE SPARES', player.x, player.y - 40, '#557766');
+      } else if (lives >= RLCore.MAX_LIVES) {
+        addFlashText('HOLD FULL', player.x, player.y - 40, '#557766');
+      } else {
+        livesFromKills++; lives++;
+        addFlashText('+1 LIFE (' + livesFromKills + '/' + RLCore.MAX_LIVES_FROM_KILLS + ')',
+          player.x, player.y - 40, '#44ff88');
+      }
     }
   }
   // KILL SHIELD: a charge back every N kills, capped by the same ceiling
@@ -14281,8 +14464,13 @@ function hitPlayer() {
       addFlashText('HELD', player.x, player.y - 34, '#88ffcc');
     }
     // PHALANX widens the window after a break so a burst cannot strip every
-    // charge in a handful of frames.
-    player.invincible = Math.max(60, stats.shieldIframes);
+    // charge in a handful of frames — but repeated blocks give steadily less,
+    // or the windows chain into permanent immunity. See RLCore.mercyFor.
+    player.invincible = RLCore.mercyFor(
+      Math.min(RLCore.MAX_SHIELD_MERCY, Math.max(60, stats.shieldIframes)),
+      player.mercyStreak || 0);
+    player.mercyStreak = (player.mercyStreak || 0) + 1;
+    player.mercyTimer = RLCore.MERCY_STREAK_RESET;
     FX.addShake(10);
     FX.explode(player.x, player.y, 22, '#00ffff');
     // REACTIVE ARMOUR turns a blocked hit into a counterattack.
@@ -14318,7 +14506,7 @@ function hitPlayer() {
     const before = scrap;
     // MAGPIE's salvage rig halves the bill.
     scrap = RLCore.scrapAfterHit(scrap, stats.scrapLoss * (currentShip().salvage || 1));
-    addFlashText('-' + (before - scrap).toLocaleString() + ' SCRAP', player.x, player.y - 30, '#ffcc44');
+    scrapLossPopup = mergedNumber(scrapLossPopup, before - scrap, player.x, player.y - 20, '-', '#ff9944');
     Sound.play('strip');
   }
   // GRUDGE / SPITE / THE ANSWER: a hit that lands answers in kind. Fired
@@ -14339,8 +14527,12 @@ function hitPlayer() {
   }
 
   lives--;
-  // SECOND WIND buys breathing room after a hit that actually landed.
-  player.invincible = Math.max(120, Math.round(stats.graceSeconds * 60));
+  // SECOND WIND buys breathing room after a hit that actually landed. It
+  // decays on the same streak, so a run cannot live inside its own grace.
+  player.invincible = RLCore.mercyFor(Math.max(120, Math.round(stats.graceSeconds * 60)),
+                                      player.mercyStreak || 0);
+  player.mercyStreak = (player.mercyStreak || 0) + 1;
+  player.mercyTimer = RLCore.MERCY_STREAK_RESET;
   FX.addShake(20);
   FX.explode(player.x, player.y, 24, '#ff4400');
   combo = 0; comboTimer = 0;
@@ -14445,6 +14637,9 @@ function update() {
   player.trail = player.trail.filter(t => t.life > 0);
 
   if (player.invincible > 0) player.invincible--;
+  // The mercy streak cools off once you have been left alone for a moment, so
+  // the penalty applies to sustained fire rather than to a whole run.
+  if (player.mercyTimer > 0) { player.mercyTimer--; if (player.mercyTimer === 0) player.mercyStreak = 0; }
 
   // Phase Drive: recharge the banked hit. The timer only runs while the charge
   // is spent, so an unused charge doesn't quietly bank a second one.
@@ -14468,7 +14663,10 @@ function update() {
     player.shieldRegenTimer = (player.shieldRegenTimer || 0) + 1;
     if (player.shieldRegenTimer >= stats.shieldRegen) {
       player.shieldRegenTimer = 0;
-      player.shieldCharges = Math.min(player.shieldCharges + 1, stats.shieldCharges + 3);
+      // The ceiling is the RESOLVED cap, not cap+3. The old +3 let a build
+      // with the 3-charge maximum float six, which is two extra free hits
+      // between shops that no card ever advertised.
+      player.shieldCharges = Math.min(player.shieldCharges + 1, stats.shieldCharges);
     }
   }
 
@@ -14547,7 +14745,14 @@ function update() {
         if (level >= 35) shapes.push('pincer', 'arrowhead');
         spawnFormation(shapes[Math.floor(Math.random() * shapes.length)]);
       } else if (Math.random() < 0.7) {
-        enemies.push(makeEnemy(pickEnemyKind()));
+        // A group, not a single ship. See RLCore.spawnBurstAt.
+        const n = difficulty().burst;
+        for (let i = 0; i < n; i++) {
+          if (enemies.length >= CFG.caps.enemies) break;
+          const e = makeEnemy(pickEnemyKind());
+          if (i > 0) { e.x = 30 + Math.random() * (W - 60); e.y = -30 - i * 34; }
+          enemies.push(e);
+        }
       }
     }
   }
@@ -15724,7 +15929,7 @@ function drawGameOver() {
   ctx.fillText('+' + Math.floor(creditsShown).toLocaleString() + ' CR', W/2, H/2 + 58);
   ctx.fillStyle = '#8a7f5a';
   ctx.font = '10px monospace';
-  ctx.fillText('banked: ' + Save.data.credits.toLocaleString() + ' CR', W/2, H/2 + 86);
+  ctx.fillText('banked as you flew — total ' + Save.data.credits.toLocaleString() + ' CR', W/2, H/2 + 86);
   ctx.fillText('reached level ' + level + '   ·   ' + runKills + ' kills', W/2, H/2 + 102);
   ctx.fillText('SCRAP SPENT: ' + scrapSpent.toLocaleString(), W/2, H/2 + 118);
 
