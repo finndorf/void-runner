@@ -142,8 +142,8 @@ test('the purity scan would still catch a real reference (the scan is not vacuou
 // 1. Save migration
 // ---------------------------------------------------------------------------
 
-test('SAVE_VERSION is 5, as the spec requires', () => {
-  assert.equal(core.SAVE_VERSION, 5);
+test('SAVE_VERSION is 6, as the spec requires', () => {
+  assert.equal(core.SAVE_VERSION, 6);
 });
 
 test('a v1 save keeps its credits, ships and lifetime records', () => {
@@ -202,7 +202,7 @@ test('a v2 save gains the voidbirth fields and the current version', () => {
 // v4 adds the bestiary and the settings panel. An old save must come out
 // playable: nothing seen, and every control at its default.
 test('any older save gains an empty bestiary and default settings', () => {
-  [1, 2, 3].forEach(version => {
+  [1, 2, 3, 4, 5].forEach(version => {
     const { data, ok } = core.migrateSave({ version, credits: 5 }, DEFAULTS());
     assert.equal(ok, true, `v${version} should migrate, not be discarded`);
     assert.equal(data.version, core.SAVE_VERSION);
@@ -3203,4 +3203,63 @@ test('splash takes the best source rather than adding', () => {
   const s = core.resolveStats(SHIP,
     [{ id: 'ch_burst', stacks: 1 }, { id: 'ch_detonate', stacks: 1 }], 0, 1);
   assert.equal(s.chargeSplash, 120, 'the larger head wins; they do not sum');
+});
+
+// ---------------------------------------------------------------------------
+// 20. Pause
+// ---------------------------------------------------------------------------
+// PAUSE and SETTINGS used to be the same action on two keys. They are separate
+// now, which means an older save has 'p' bound to the settings panel and would
+// open it instead of pausing — with nothing on screen to explain why.
+
+test('pause and settings are separate actions with separate defaults', () => {
+  assert.ok(core.BIND_ORDER.indexOf('pauseGame') !== -1, 'pauseGame is not bindable');
+  assert.deepEqual(core.DEFAULT_BINDS.pauseGame, ['p']);
+  assert.deepEqual(core.DEFAULT_BINDS.pause, ['Escape']);
+  assert.equal(core.DEFAULT_BINDS.pause.indexOf('p'), -1, "'p' must not also open settings");
+  assert.ok(core.BIND_LABELS.pauseGame, 'the settings screen needs a label for it');
+});
+
+test('no two actions share a default key', () => {
+  const seen = new Map();
+  core.BIND_ORDER.forEach(action => {
+    core.DEFAULT_BINDS[action].forEach(k => {
+      assert.ok(!seen.has(k), `"${k}" is bound to both ${seen.get(k)} and ${action}`);
+      seen.set(k, action);
+    });
+  });
+});
+
+test("an older save stops using 'p' for settings", () => {
+  [4, 5].forEach(version => {
+    const { data } = core.migrateSave(
+      { version, settings: { binds: { pause: ['Escape', 'p'] } } }, DEFAULTS());
+    assert.equal(data.settings.binds.pause.indexOf('p'), -1,
+      `v${version} kept 'p' on the settings panel`);
+    assert.deepEqual(data.settings.binds.pauseGame, ['p'], `v${version} pauseGame`);
+  });
+});
+
+test('vertical movement is gone, not silently dead', () => {
+  // The ship flies at a fixed height by design. MOVE UP and MOVE DOWN were
+  // rebindable rows that nothing ever read — and MOVE DOWN's default 's' also
+  // collided with SKIP SHOP.
+  ['up', 'down'].forEach(a => {
+    assert.equal(core.BIND_ORDER.indexOf(a), -1, `${a} is still bindable`);
+    assert.equal(core.DEFAULT_BINDS[a], undefined, `${a} still has a default`);
+    assert.equal(core.BIND_LABELS[a], undefined, `${a} still has a label`);
+  });
+});
+
+test('a save that had rebound pause to something else keeps it', () => {
+  const { data } = core.migrateSave(
+    { version: 5, settings: { binds: { pause: ['Tab'] } } }, DEFAULTS());
+  assert.deepEqual(data.settings.binds.pause, ['Tab']);
+});
+
+test("a save with ONLY 'p' on pause falls back rather than being left unbound", () => {
+  const { data } = core.migrateSave(
+    { version: 5, settings: { binds: { pause: ['p'] } } }, DEFAULTS());
+  assert.ok(data.settings.binds.pause.length > 0, 'settings became unreachable');
+  assert.deepEqual(data.settings.binds.pause, core.DEFAULT_BINDS.pause);
 });

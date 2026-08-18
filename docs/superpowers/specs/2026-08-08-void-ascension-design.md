@@ -1007,3 +1007,38 @@ paid **nothing**. This was arguably the more annoying half of the report.
 The gradient is the point: a big build should be *much* stronger, not immortal.
 Early levels are untouched — a bare ship still survives 20s at level 1 standing
 completely still.
+
+---
+
+# ADDENDUM VII — pause (2026-08-18)
+
+**P pauses, ESCAPE opens settings.** They used to be the same action bound to
+two keys; both opened the settings panel.
+
+The pause is a freeze, not a state change: the game stays in `'play'` and the
+loop simply stops advancing. Everything that ticks already lives inside
+`update()`, so timers, mercy windows, spawn clocks and the level countdown all
+hold exactly where they were — and the starfield stops too, because a frozen
+game with moving scenery reads as a bug rather than as a pause.
+
+**Save v6** strips `'p'` off the old settings binding. Without that, an
+existing save would open the panel instead of pausing and nothing on screen
+would explain why. A binding left empty by the strip falls back to its default
+rather than becoming unreachable.
+
+**Touch gets a pause button** (bottom left, clear of the charge pad), or the
+feature would be desktop-only on the device it is most likely played on.
+
+## What this turned up
+
+Writing "no two actions share a default key" as a test failed immediately:
+`'s'` was bound to both MOVE DOWN and SKIP SHOP.
+
+`MOVE UP` and `MOVE DOWN` were **never read by anything**. The ship flies at a
+fixed height by design, so vertical input has never done a thing — but both sat
+in the settings screen as rows a player could carefully configure. That is this
+project's oldest bug wearing a menu instead of an upgrade card.
+
+Both removed, and `tools/hookaudit.mjs` gained two checks so it cannot recur:
+every action in `BIND_ORDER` must be read by `keyMatches` or `held`, and no two
+actions may claim the same default key.

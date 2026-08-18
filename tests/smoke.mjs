@@ -87,7 +87,9 @@ const fn = new Function(...keys, `${src}\n; return { get state(){return state}, 
   get chargeShot(){return chargeShot}, set touchCharging(v){touchCharging=v},
   retireRun, closeShop, bumpUpgrades: () => { runUpgradesVersion++; }, recomputeStats,
   addScore: (n) => { score += n; },
-  killEnemy, get livesFromKills(){return livesFromKills} };`);
+  killEnemy, get livesFromKills(){return livesFromKills},
+  togglePause, get paused(){return paused}, drawPaused,
+  get levelTimer(){return levelTimer}, get frameNow(){return frame} };`);
 
 let api, bootError = null;
 try {
@@ -608,4 +610,58 @@ check('repeated scrap LOSSES merge into one number too', () => {
   for (let i = 0; i < 6; i++) { api.player.invincible = 0; api.hitPlayer(); }
   const numbers = api.flashText.filter(t => t.text.charAt(0) === '-');
   if (numbers.length !== 1) throw new Error(numbers.length + ' loss popups instead of one merged');
+});
+
+// ---------------------------------------------------------------------------
+// Pause
+// ---------------------------------------------------------------------------
+
+check('pause freezes everything and resuming restarts it', () => {
+  api.startGame();
+  api.level = 20;
+  api.enemies = []; api.clearBoard();
+  tick(90, 'pre-pause');
+  const before = {
+    timer: api.levelTimer, enemies: api.enemies.length,
+    x: api.player.x, lives: api.lives
+  };
+  api.togglePause();
+  if (!api.paused) throw new Error('togglePause did not pause');
+  // The real loop, not update() directly — pausing has to gate the loop.
+  for (let i = 0; i < 600; i++) api.loop();
+  if (api.levelTimer !== before.timer) throw new Error('the level clock advanced while paused');
+  if (api.enemies.length !== before.enemies) throw new Error('enemies spawned while paused');
+  if (api.player.x !== before.x) throw new Error('the ship moved while paused');
+  if (api.lives !== before.lives) throw new Error('the pilot took damage while paused');
+  if (api.state !== 'play') throw new Error('pausing changed the state to ' + api.state);
+
+  api.togglePause();
+  if (api.paused) throw new Error('did not unpause');
+  for (let i = 0; i < 120; i++) api.loop();
+  if (api.levelTimer === before.timer) throw new Error('the clock never restarted');
+});
+
+check('pause only works during play', () => {
+  api.state = 'start';
+  api.togglePause();
+  if (api.paused) throw new Error('paused on the start screen');
+  api.state = 'shop';
+  api.togglePause();
+  if (api.paused) throw new Error('paused inside the shop');
+  api.state = 'play';
+});
+
+check('the pause card draws without throwing', () => {
+  api.state = 'play';
+  api.togglePause();
+  for (let i = 0; i < 60; i++) api.drawPaused();
+  api.togglePause();
+});
+
+check('starting a run clears any pause', () => {
+  api.state = 'play';
+  api.togglePause();
+  if (!api.paused) throw new Error('setup failed');
+  api.startGame();
+  if (api.paused) throw new Error('a new run began paused');
 });

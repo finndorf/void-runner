@@ -152,7 +152,7 @@ const CFG = {
 
 const RLCore = {};
 
-RLCore.SAVE_VERSION = 5;
+RLCore.SAVE_VERSION = 6;
 
 // Upgrading rather than resetting is the whole point: a loader that throws away
 // any save whose version does not match would wipe every player's credits and
@@ -167,20 +167,20 @@ RLCore.SAVE_VERSION = 5;
 RLCore.DEFAULT_BINDS = {
   left:  ['ArrowLeft', 'a'],
   right: ['ArrowRight', 'd'],
-  up:    ['ArrowUp', 'w'],
-  down:  ['ArrowDown', 's'],
   fire:  [' ', 'j'],
   skip:  ['s', 'x'],
   reroll:['r'],
   mute:  ['m'],
-  pause: ['Escape', 'p']
+  pause: ['Escape'],
+  pauseGame: ['p']
 };
 
-RLCore.BIND_ORDER = ['left', 'right', 'up', 'down', 'fire', 'skip', 'reroll', 'mute', 'pause'];
+RLCore.BIND_ORDER = ['left', 'right', 'fire', 'pauseGame', 'skip', 'reroll', 'mute', 'pause'];
 
 RLCore.BIND_LABELS = {
-  left: 'MOVE LEFT', right: 'MOVE RIGHT', up: 'MOVE UP', down: 'MOVE DOWN',
-  fire: 'FIRE', skip: 'SKIP SHOP', reroll: 'REROLL', mute: 'MUTE', pause: 'SETTINGS'
+  left: 'MOVE LEFT', right: 'MOVE RIGHT',
+  fire: 'FIRE', pauseGame: 'PAUSE', skip: 'SKIP SHOP', reroll: 'REROLL',
+  mute: 'MUTE', pause: 'SETTINGS'
 };
 
 RLCore.defaultSettings = function () {
@@ -216,7 +216,7 @@ RLCore.migrateSave = function (parsed, defaults) {
   const fresh = () => ({ data: Object.assign({}, defaults), ok: false });
   if (!parsed || typeof parsed !== 'object') return fresh();
   const v = parsed.version;
-  if ([1, 2, 3, 4, RLCore.SAVE_VERSION].indexOf(v) === -1) return fresh();
+  if ([1, 2, 3, 4, 5, RLCore.SAVE_VERSION].indexOf(v) === -1) return fresh();
 
   const data = Object.assign({}, defaults, parsed);
   data.version = RLCore.SAVE_VERSION;
@@ -242,6 +242,14 @@ RLCore.migrateSave = function (parsed, defaults) {
   // v5 adds waypoints. An older save starts with none reached, which is
   // correct: it has no record of ever having got there.
   if (!data.waypoints || typeof data.waypoints !== 'object') data.waypoints = {};
+  // v6 splits PAUSE off SETTINGS. Older saves bound both to the same action,
+  // so 'p' has to come off the settings binding or it would open the panel
+  // instead of pausing — and the player would have no way to tell why.
+  if (v !== RLCore.SAVE_VERSION && data.settings && data.settings.binds &&
+      Array.isArray(data.settings.binds.pause)) {
+    const kept = data.settings.binds.pause.filter(k => k !== 'p' && k !== 'P');
+    data.settings.binds.pause = kept.length ? kept : RLCore.DEFAULT_BINDS.pause.slice();
+  }
   data.settings = RLCore.normalizeSettings(data.settings);
   if (!data.tiersFound || typeof data.tiersFound !== 'object') data.tiersFound = {};
   if (!data.bossesKilled || typeof data.bossesKilled !== 'object') data.bossesKilled = {};
@@ -4108,6 +4116,12 @@ function enemyAimAngle(fromX, fromY) {
 }
 // Timed boons from meteors. Both are read by the shot builder and the enemy
 // step respectively, so a pickup that says OVERDRIVE does overdrive.
+// A true freeze, not a state change: the game stays in 'play' and simply
+// stops advancing. Everything that ticks lives inside update(), so nothing
+// needs to know it is paused — timers, mercy windows, spawn clocks and the
+// level countdown all hold exactly where they were.
+let paused = false;
+
 let boostRage = 0, boostFreeze = 0;
 let scrapDrip = 0;          // MIDAS FIELD's fractional carry
 
@@ -4696,6 +4710,14 @@ function canvasPos(clientX, clientY) {
   const rect = canvas.getBoundingClientRect();
   return { x: (clientX - rect.left) * (W / rect.width), y: (clientY - rect.top) * (H / rect.height) };
 }
+// Only meaningful during play. The shop, the panels and the voidbirth
+// sequence already stop the world in their own way.
+function togglePause() {
+  if (state !== 'play') return;
+  paused = !paused;
+  Sound.play(paused ? 'uiMove' : 'uiBuy');
+}
+
 function toggleMute() {
   Sound.setMuted(!Sound.muted);
   Music.setMuted(Sound.muted);
@@ -4778,6 +4800,12 @@ document.addEventListener('keydown', e => {
     return;
   }
 
+  if (keyMatches(e.key, 'pauseGame') && (state === 'play')) {
+    togglePause();
+    e.preventDefault();
+    return;
+  }
+
   if (keyMatches(e.key, 'pause')) {
     if (state === 'settings') closeSettings();
     else if (state === 'bestiary') { state = 'start'; Sound.play('uiMove'); }
@@ -4854,7 +4882,12 @@ document.addEventListener('keyup', e => { keys[e.key] = false; });
 const SETTINGS_RECT = { x: W - 92, y: 14, w: 34, h: 34 };
 const BESTIARY_RECT = { x: W - 136, y: 14, w: 34, h: 34 };
 
+const PAUSE_BTN = { x: 14, y: H - 46, w: 34, h: 34 };
+
 function handlePointer(p) {
+  // A paused game resumes on any tap. There is nothing else to press.
+  if (state === 'play' && paused) { togglePause(); return true; }
+  if (state === 'play' && touchSeen && pointInRect(p, PAUSE_BTN)) { togglePause(); return true; }
   // Both full-screen panels close on any tap that is not a control, which is
   // the behaviour a phone player expects from a menu.
   if (state === 'settings') { closeSettings(); return true; }
@@ -4993,6 +5026,7 @@ function startGame() {
   bullets = []; enemyBullets = []; asteroids = []; enemies = []; particles = []; flashText = [];
   drones = []; singularity = null;
   spawnTimer = 0; asteroidTimer = 0; levelTimer = 0; spawnCycle = 0; combo = 0; comboTimer = 0; levelBanner = null;
+  paused = false;
   player.muzzle = 0;
   shootTimer = 0;
   dyingTimer = 0;
@@ -14004,6 +14038,22 @@ function fireCharged(t) {
 // Shown only after a real touch, so a desktop player never sees a thumb pad.
 let touchSeen = false;
 
+// Touch has no keyboard, so without this the whole feature is desktop-only.
+function drawPauseButton() {
+  if (!touchSeen || paused) return;
+  ctx.save();
+  ctx.globalAlpha = 0.4;
+  ctx.fillStyle = '#0b2a3a';
+  ctx.fillRect(PAUSE_BTN.x, PAUSE_BTN.y, PAUSE_BTN.w, PAUSE_BTN.h);
+  ctx.strokeStyle = '#66d8ff'; ctx.lineWidth = 1.4;
+  ctx.strokeRect(PAUSE_BTN.x, PAUSE_BTN.y, PAUSE_BTN.w, PAUSE_BTN.h);
+  ctx.globalAlpha = 0.85;
+  ctx.fillStyle = '#9fe8ff';
+  ctx.fillRect(PAUSE_BTN.x + 11, PAUSE_BTN.y + 9, 4, 16);
+  ctx.fillRect(PAUSE_BTN.x + 19, PAUSE_BTN.y + 9, 4, 16);
+  ctx.restore();
+}
+
 function drawChargePad() {
   if (!touchSeen) return;
   const cx = CHARGE_PAD.x + CHARGE_PAD.w / 2, cy = CHARGE_PAD.y + CHARGE_PAD.h / 2;
@@ -15394,6 +15444,7 @@ function draw() {
 
     if (state === 'play') {
       drawChargePad();
+      drawPauseButton();
       drawCharge();
       drawShip(player.x, player.y, player.invincible, player.shieldCharges, frame, player.muzzle);
       drawDrones();
@@ -15480,6 +15531,8 @@ function draw() {
   }
 
   ctx.restore(); // end shake
+
+  if (state === 'play' && paused) drawPaused();
 
   // Colour drains out of the scene across the dying beat.
   if (state === 'dying') {
@@ -15708,6 +15761,37 @@ function drawChevron(r, dir, enabled) {
   ctx.lineTo(cx - dir*5, cy + 10);
   ctx.stroke();
   ctx.restore();
+}
+
+// The pause card. Dark enough to say "stopped", light enough that you can
+// still see the board you are about to go back to.
+function drawPaused() {
+  ctx.fillStyle = 'rgba(2,6,14,0.72)';
+  ctx.fillRect(0, 0, W, H);
+
+  ctx.textAlign = 'center';
+  ctx.save();
+  ctx.shadowColor = '#00ccff'; ctx.shadowBlur = 22;
+  ctx.fillStyle = '#9fe8ff';
+  ctx.font = 'bold 34px monospace';
+  ctx.fillText('PAUSED', W/2, H/2 - 24);
+  ctx.restore();
+
+  ctx.fillStyle = '#5b7b96'; ctx.font = '11px monospace';
+  ctx.fillText(bindsFor('pauseGame').map(keyName).join(' / ') + ' to resume', W/2, H/2 + 6);
+  ctx.fillStyle = '#41556b'; ctx.font = '10px monospace';
+  ctx.fillText(bindsFor('pause').map(keyName).join(' / ') + ' for settings', W/2, H/2 + 26);
+
+  // Where the run is, since you are probably pausing to look at it.
+  ctx.fillStyle = '#4d6a78'; ctx.font = '10px monospace';
+  ctx.fillText('LEVEL ' + level + '   ·   ' + Math.floor(scrap).toLocaleString() + ' SCRAP   ·   ' +
+    lives + (lives === 1 ? ' LIFE' : ' LIVES'), W/2, H/2 + 56);
+
+  if (touchSeen) {
+    ctx.fillStyle = '#3d5a68'; ctx.font = '9px monospace';
+    ctx.fillText('or tap anywhere', W/2, H/2 + 78);
+  }
+  ctx.textAlign = 'left';
 }
 
 function drawStart() {
@@ -16366,7 +16450,10 @@ function wrapText(text, cx, y, maxW, lineH) {
 function loop() {
   frame++;
 
-  if (state === 'play') {
+  if (state === 'play' && paused) {
+    // Nothing advances. Deliberately not even the starfield: a frozen game
+    // that still has moving scenery reads as a bug rather than as a pause.
+  } else if (state === 'play') {
     if (FX.hitStopFrames > 0) {
       // Everything freezes; only the render below still runs.
       FX.hitStopFrames--;

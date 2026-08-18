@@ -84,6 +84,30 @@ report('played sound names -> defined',
   played.filter(n => !sfxKeys.has(n) && !switchCases.has(n)),
   played.length);
 
+// --- 7. every rebindable action must be read by real game code -------------
+// The settings screen lets a player carefully configure a key. If nothing ever
+// asks about that action, the row is a lie — the same dead-content bug as an
+// upgrade whose effect nobody reads, wearing a menu. MOVE UP and MOVE DOWN sat
+// there doing nothing until a test caught them.
+const readActions = new Set([
+  ...[...html.matchAll(/keyMatches\([^,]+,\s*'([a-zA-Z]+)'\)/g)].map(m => m[1]),
+  ...[...html.matchAll(/held\('([a-zA-Z]+)'\)/g)].map(m => m[1])
+]);
+report('rebindable actions -> game code',
+  C.BIND_ORDER.filter(a => !readActions.has(a)),
+  C.BIND_ORDER.length);
+
+// Two actions sharing a default key means one of them silently loses.
+const claimed = new Map();
+const clashes = [];
+C.BIND_ORDER.forEach(action => {
+  (C.DEFAULT_BINDS[action] || []).forEach(k => {
+    if (claimed.has(k)) clashes.push(`"${k}" (${claimed.get(k)} vs ${action})`);
+    else claimed.set(k, action);
+  });
+});
+report('default keys are unique', clashes, claimed.size);
+
 // The tier-reveal ladder is built by string concatenation, so it cannot be
 // caught by the scan above — check it explicitly against the tier list.
 const LOUD = ['APEX', 'OVERCLOCKED', 'HYPERCLOCKED', 'UBERCLOCKED', 'DYNACLOCKED', 'MYTHIC'];
